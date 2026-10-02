@@ -4,6 +4,7 @@ mod automation_ui;
 mod engine;
 mod modulation;
 mod params;
+mod recorder;
 mod source;
 
 use std::path::PathBuf;
@@ -14,15 +15,19 @@ use eframe::egui::{self, Color32, Key, Rect, RichText, pos2};
 use automation_ui::AutoCtx;
 use engine::{Engine, HEIGHT, WIDTH};
 use modulation::Clock;
+use recorder::{Finishing, Recorder};
 use params::*;
 use source::{Source, Stream};
 
 fn main() -> eframe::Result {
     let mut files: Vec<PathBuf> = Vec::new();
     let mut preset = 1;
+    let mut record = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
-        if arg == "--preset" {
+        if arg == "--record" {
+            record = true;
+        } else if arg == "--preset" {
             preset = args.next().and_then(|v| v.parse().ok()).filter(|n| (1..=9).contains(n)).unwrap_or(1);
         } else {
             files.push(PathBuf::from(arg));
@@ -43,7 +48,11 @@ fn main() -> eframe::Result {
                 .wgpu_render_state
                 .as_ref()
                 .ok_or("trippy needs the wgpu renderer")?;
-            Ok(Box::new(App::new(Engine::new(rs), files, preset - 1)))
+            let mut app = App::new(Engine::new(rs), files, preset - 1);
+            if record {
+                app.toggle_recording();
+            }
+            Ok(Box::new(app))
         }),
     )
 }
@@ -84,6 +93,9 @@ struct App {
     /// Which deck dragging / scrolling on the preview moves and resizes.
     grab_deck: usize,
     frame_count: u64,
+    recorder: Option<Recorder>,
+    /// Recordings whose encoder is still finalizing the file.
+    finishing: Vec<Finishing>,
     /// Testing hook: `TRIPPY_SNAPSHOT=<frames>:<out.png>` saves a frame and quits.
     auto_snapshot: Option<(u64, PathBuf)>,
 }
@@ -107,6 +119,8 @@ impl App {
             preset: Some(0),
             grab_deck: 0,
             frame_count: 0,
+            recorder: None,
+            finishing: Vec::new(),
             auto_snapshot: std::env::var("TRIPPY_SNAPSHOT").ok().and_then(|v| {
                 let (n, p) = v.split_once(':')?;
                 Some((n.parse().ok()?, PathBuf::from(p)))
@@ -214,6 +228,9 @@ impl App {
         if pressed(Key::G) {
             self.grab_deck = 1 - self.grab_deck;
         }
+        if pressed(Key::R) {
+            self.toggle_recording();
+        }
         if pressed(Key::S) {
             self.save_snapshot(None);
         }
@@ -236,6 +253,56 @@ impl App {
         }
         if held(Key::ArrowDown) {
             self.params.fx.zoom = (self.params.fx.zoom - dt * 0.1).max(0.05);
+        }
+    }
+
+    fn toggle_recording(&mut self) {
+        if let Some(rec) = self.recorder.take() {
+            let (device, _, _) = self.engine.output();
+            let fin = rec.stop(device);
+            self.status = format!("Finishing {} …", fin.path.display());
+            self.finishing.push(fin);
+            return;
+        }
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let path = std::env::current_dir().unwrap_or_default().join(format!("trippy-{ts}.mp4"));
+        let (device, _, _) = self.engine.output();
+        match Recorder::start(device, path) {
+            Ok(rec) => {
+                self.status = format!("Recording to {} ({})", rec.path.display(), rec.encoder);
+                self.recorder = Some(rec);
+            }
+            Err(e) => self.status = format!("Recording failed: {e}"),
+        }
+    }
+
+    fn capture_frame(&mut self) {
+        let Some(rec) = self.recorder.as_mut() else { return };
+        let (device, queue, tex) = self.engine.output();
+        if let Err(e) = rec.capture(device, queue, tex) {
+            self.status = format!("Recording stopped: {e}");
+            if let Some(rec) = self.recorder.take() {
+                self.finishing.push(rec.stop(device));
+            }
+        }
+    }
+
+    /// Report recordings whose file has been finalized.
+    fn poll_finished_recordings(&mut self) {
+        let (done, pending): (Vec<_>, Vec<_>) = self.finishing.drain(..).partition(|f| f.is_done());
+        self.finishing = pending;
+        for f in done {
+            self.status = match f.join() {
+                Ok((path, frames)) => format!(
+                    "Saved {} ({:.1}s)",
+                    path.display(),
+                    frames as f64 / recorder::FPS as f64
+                ),
+                Err(e) => format!("Recording failed: {e}"),
+            };
         }
     }
 
@@ -282,6 +349,7 @@ impl App {
             let [a, b] = &mut self.decks;
             self.engine
                 .render(&p, self.sim_time as f32, self.freeze, a.source.as_mut(), b.source.as_mut());
+            self.capture_frame();
         }
     }
 
@@ -338,6 +406,20 @@ impl App {
             ui.toggle_value(&mut self.freeze, "❄ Freeze (Space)");
             if ui.button("Clear (C)").clicked() {
                 self.engine.clear();
+            }
+            let rec_label = match &self.recorder {
+                Some(r) => {
+                    let secs = r.frames / recorder::FPS as u64;
+                    RichText::new(format!("⏺ {}:{:02}  Stop (R)", secs / 60, secs % 60)).color(Color32::WHITE)
+                }
+                None => RichText::new("⏺ Record (R)"),
+            };
+            let mut rec_btn = egui::Button::new(rec_label);
+            if self.recorder.is_some() {
+                rec_btn = rec_btn.fill(Color32::from_rgb(200, 30, 40));
+            }
+            if ui.add(rec_btn).clicked() {
+                self.toggle_recording();
             }
             ui.toggle_value(&mut self.show_output, "🖵 Output window");
             ui.label("Grab:");
@@ -558,8 +640,23 @@ fn paint_output(ui: &mut egui::Ui, tex: egui::TextureId) -> (egui::Response, Rec
 }
 
 impl eframe::App for App {
+    /// Make sure a recording in progress ends up as a playable file.
+    fn on_exit(&mut self) {
+        if let Some(rec) = self.recorder.take() {
+            let (device, _, _) = self.engine.output();
+            self.finishing.push(rec.stop(device));
+        }
+        for f in self.finishing.drain(..) {
+            match f.join() {
+                Ok((path, frames)) => eprintln!("saved {} ({frames} frames)", path.display()),
+                Err(e) => eprintln!("recording failed: {e}"),
+            }
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.poll_finished_recordings();
         self.handle_input(&ctx);
         self.render_frame();
         let tex = self.engine.display_id;
@@ -616,6 +713,11 @@ impl eframe::App for App {
                 .show(ui, |ui| {
                     let (resp, rect) = paint_output(ui, tex);
                     self.preview_interaction(ui, &resp, rect);
+                    if self.recorder.is_some() {
+                        // Shown on the preview only; the recorded frames come from the engine.
+                        let c = rect.right_top() + egui::vec2(-16.0, 16.0);
+                        ui.painter().circle_filled(c, 7.0, Color32::from_rgb(230, 30, 40));
+                    }
                 });
         }
 

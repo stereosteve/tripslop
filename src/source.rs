@@ -248,6 +248,12 @@ fn output_args(width: u32, height: u32) -> Vec<String> {
         "-an".into(),
         "-vf".into(),
         format!("scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height}"),
+        // Emit each decoded/captured frame exactly once. Without this, rawvideo output is
+        // constant-frame-rate, and capture devices often report a bogus rate (avfoundation
+        // says 1,000,000 fps) so ffmpeg floods the pipe with duplicates of the first frame:
+        // the camera looks frozen.
+        "-fps_mode".into(),
+        "passthrough".into(),
         "-pix_fmt".into(),
         "rgba".into(),
         "-f".into(),

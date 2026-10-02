@@ -70,6 +70,22 @@ from NASA/ESA Hubble via Wikimedia Commons. See the source pages for the exact t
 * **Decks**: images, looping videos (any format ffmpeg reads, GIFs included), live cameras, or a
   built-in oscillator pattern (bars, rings, plasma, checker, orbiting dot).
 
+## Recording
+
+Press `R` (or the **⏺ Record** button) to start and stop recording. Frames are captured
+straight from the renderer, so the file has no UI or cursor and doesn't drop frames. It's
+saved as `trippy-<timestamp>.mp4` (H.264, 1280×720, 60 fps) in the directory you launched
+from. Encoding uses the hardware encoder on macOS and falls back to x264 elsewhere. If you
+quit while recording, the file is still finalized.
+
+To record a whole session from launch:
+
+```
+cargo run --release -- --record --preset 6 samples/jellyfish.mp4 samples/crab-nebula.jpg
+```
+
+Recording uses ffmpeg. There's no audio, so add music afterwards in an editor.
+
 ## Controls
 
 | Key | Action |
@@ -81,6 +97,7 @@ from NASA/ESA Hubble via Wikimedia Commons. See the source pages for the exact t
 | Z / X | cut to deck A / B |
 | ← / → | crossfade |
 | ↑ / ↓ | copy scale (zoom) |
+| R | start / stop recording a video |
 | S | save a PNG snapshot |
 | G | switch which deck the preview drag/scroll controls |
 | drag / scroll on preview | move / resize that deck (trackpad pinch works too) |

@@ -2,3 +2,4 @@
 *.png
 .juggler
 .DS_Store
+/trippy-*.mp4

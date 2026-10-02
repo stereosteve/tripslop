@@ -395,6 +395,11 @@ impl Engine {
         self.queue.submit([enc.finish()]);
     }
 
+    /// Device, queue and the final output texture, for recording.
+    pub fn output(&self) -> (&wgpu::Device, &wgpu::Queue, &wgpu::Texture) {
+        (&self.device, &self.queue, &self.display_tex)
+    }
+
     /// Read back the current output frame (blocking).
     pub fn snapshot(&self) -> Result<image::RgbaImage, String> {
         let row = 4 * WIDTH; // 5120: already a multiple of COPY_BYTES_PER_ROW_ALIGNMENT
