@@ -1,6 +1,8 @@
 //! trippy — a two-deck video DJ mixer with an emulated analog video-feedback rig.
 
+mod automation_ui;
 mod engine;
+mod modulation;
 mod params;
 mod source;
 
@@ -9,7 +11,9 @@ use std::time::Instant;
 
 use eframe::egui::{self, Color32, Key, Rect, RichText, pos2};
 
-use engine::{Engine, HEIGHT, MAX_DELAY, WIDTH};
+use automation_ui::AutoCtx;
+use engine::{Engine, HEIGHT, WIDTH};
+use modulation::Clock;
 use params::*;
 use source::{Source, Stream};
 
@@ -68,6 +72,8 @@ struct App {
     sim_time: f64,
     last_frame: Instant,
     beat: f64,
+    /// Automated value of every slider in the last frame, indexed like `PARAMS`.
+    live: Vec<f32>,
     taps: Vec<Instant>,
     freeze: bool,
     perform: bool,
@@ -91,6 +97,7 @@ impl App {
             sim_time: 0.0,
             last_frame: Instant::now(),
             beat: 0.0,
+            live: Vec::new(),
             taps: Vec::new(),
             freeze: false,
             perform: false,
@@ -232,6 +239,13 @@ impl App {
         }
     }
 
+    fn clock(&self) -> Clock {
+        Clock {
+            beat: self.beat,
+            time: self.sim_time,
+        }
+    }
+
     fn save_snapshot(&mut self, path: Option<PathBuf>) {
         let path = path.unwrap_or_else(|| {
             let ts = std::time::SystemTime::now()
@@ -263,7 +277,8 @@ impl App {
             self.beat += TICK * self.params.bpm as f64 / 60.0;
             self.sim_time += TICK;
             self.frame_count += 1;
-            let p = self.params.modulated(self.beat);
+            let mut p = self.params.modulated(self.clock());
+            self.live = PARAMS.iter().map(|d| d.get(&mut p)).collect();
             let [a, b] = &mut self.decks;
             self.engine
                 .render(&p, self.sim_time as f32, self.freeze, a.source.as_mut(), b.source.as_mut());
@@ -304,15 +319,21 @@ impl App {
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("◉ trippy").strong().color(Color32::from_rgb(255, 120, 220)));
+            ui.label(RichText::new("trippy").strong().color(Color32::from_rgb(255, 120, 220)));
             ui.separator();
             ui.label("BPM");
             ui.add(egui::DragValue::new(&mut self.params.bpm).range(30.0..=300.0).speed(0.5).max_decimals(1));
             if ui.button("Tap (T)").clicked() {
                 self.tap();
             }
-            let beat_on = self.beat.fract() < 0.15;
-            ui.label(RichText::new(if beat_on { "●" } else { "○" }).color(Color32::from_rgb(255, 200, 0)));
+            // Beat light.
+            let (r, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+            let amber = Color32::from_rgb(255, 200, 0);
+            if self.beat.fract() < 0.15 {
+                ui.painter().circle_filled(r.center(), 5.0, amber);
+            } else {
+                ui.painter().circle_stroke(r.center(), 5.0, egui::Stroke::new(1.0, amber));
+            }
             ui.separator();
             ui.toggle_value(&mut self.freeze, "❄ Freeze (Space)");
             if ui.button("Clear (C)").clicked() {
@@ -378,19 +399,28 @@ impl App {
                 }
             });
             let has_src = src_name.is_some();
-            let d = self.deck_params(i);
+            let clock = self.clock();
+            let mut ac = AutoCtx {
+                params: &mut self.params,
+                live: &self.live,
+                clock,
+            };
+            let k = |a: &'static str, b: &'static str| if i == 0 { a } else { b };
+            let d = if i == 0 { &mut ac.params.deck_a } else { &mut ac.params.deck_b };
             ui.horizontal(|ui| {
                 ui.add_enabled(has_src, egui::Checkbox::new(&mut d.use_pattern, "Oscillator"));
                 combo(ui, ("pattern", i), &mut d.pattern, &Pattern::ALL, Pattern::name);
             });
-            if d.use_pattern || !has_src {
-                ui.add(egui::Slider::new(&mut d.osc_freq, 0.5..=40.0).logarithmic(true).text("freq"));
-                ui.add(egui::Slider::new(&mut d.osc_speed, 0.0..=4.0).text("speed"));
-            }
-            ui.add(egui::Slider::new(&mut d.gain, 0.0..=2.0).text("gain"));
-            ui.add(egui::Slider::new(&mut d.hue, 0.0..=1.0).text("hue"));
+            let show_osc = d.use_pattern || !has_src;
             ui.checkbox(&mut d.invert, "invert");
+            if show_osc {
+                ac.slider(ui, k("a.osc_freq", "b.osc_freq"));
+                ac.slider(ui, k("a.osc_speed", "b.osc_speed"));
+            }
+            ac.slider(ui, k("a.gain", "b.gain"));
+            ac.slider(ui, k("a.hue", "b.hue"));
             ui.separator();
+            let d = if i == 0 { &mut ac.params.deck_a } else { &mut ac.params.deck_b };
             ui.horizontal(|ui| {
                 ui.label("Placement");
                 ui.selectable_value(&mut d.fit_whole, false, "Fill");
@@ -399,9 +429,9 @@ impl App {
                     d.reset_placement();
                 }
             });
-            ui.add(egui::Slider::new(&mut d.scale, 0.05..=3.0).logarithmic(true).text("size"));
-            ui.add(egui::Slider::new(&mut d.pos_x, -1.0..=1.0).text("x"));
-            ui.add(egui::Slider::new(&mut d.pos_y, -1.0..=1.0).text("y"));
+            ac.slider(ui, k("a.scale", "b.scale"));
+            ac.slider(ui, k("a.pos_x", "b.pos_x"));
+            ac.slider(ui, k("a.pos_y", "b.pos_y"));
         });
         self.decks[i].rect = resp.response.rect;
     }
@@ -410,100 +440,75 @@ impl App {
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.label(RichText::new("MIXER").strong().size(16.0));
-            ui.horizontal(|ui| {
-                ui.label("A");
-                ui.spacing_mut().slider_width = ui.available_width() - 30.0;
-                ui.add(egui::Slider::new(&mut self.params.crossfade, 0.0..=1.0).show_value(false));
-                ui.label("B");
-            });
+            let clock = self.clock();
+            let mut ac = AutoCtx {
+                params: &mut self.params,
+                live: &self.live,
+                clock,
+            };
+            ui.spacing_mut().slider_width = (ui.available_width() - 150.0).max(100.0);
+            ac.slider(ui, "crossfade");
             combo(ui, "blend", &mut self.params.blend, &BlendMode::ALL, BlendMode::name);
-            ui.label(RichText::new("Z / X = cut to A / B, ←/→ = fade").weak().small());
+            ui.label(RichText::new("Z / X = cut to A / B, left / right arrows = fade").weak().small());
         });
     }
 
     fn fx_ui(&mut self, ui: &mut egui::Ui) {
-        let fx = &mut self.params.fx;
+        let clock = self.clock();
+        let mut ac = AutoCtx {
+            params: &mut self.params,
+            live: &self.live,
+            clock,
+        };
         egui::CollapsingHeader::new(RichText::new("FEEDBACK / FRACTAL").strong())
             .default_open(true)
             .show(ui, |ui| {
-                ui.add(egui::Slider::new(&mut fx.feedback, 0.0..=1.2).text("feedback"));
-                ui.add(egui::Slider::new(&mut fx.copies, 1..=8).text("copies (monitors)"));
-                ui.add(egui::Slider::new(&mut fx.zoom, 0.05..=2.0).text("copy scale"));
-                ui.add(egui::Slider::new(&mut fx.rotate, -180.0..=180.0).text("rotate °"));
-                ui.add(egui::Slider::new(&mut fx.spread, 0.0..=1.5).text("spread"));
-                ui.add(egui::Slider::new(&mut fx.twist, -180.0..=180.0).text("twist ° / copy"));
-                ui.add(egui::Slider::new(&mut fx.center_x, -0.8..=0.8).text("center x"));
-                ui.add(egui::Slider::new(&mut fx.center_y, -0.5..=0.5).text("center y"));
+                for key in ["feedback", "copies", "zoom", "rotate", "spread", "twist", "center_x", "center_y"] {
+                    ac.slider(ui, key);
+                }
+                let fx = &mut ac.params.fx;
                 combo(ui, "combine", &mut fx.combine, &CopyCombine::ALL, CopyCombine::name);
                 combo(ui, "edges", &mut fx.edge, &EdgeMode::ALL, EdgeMode::name);
                 combo(ui, "symmetry", &mut fx.symmetry, &Symmetry::ALL, Symmetry::name);
                 if fx.symmetry == Symmetry::Kaleido {
-                    ui.add(egui::Slider::new(&mut fx.kaleido_segments, 2..=16).text("segments"));
+                    ac.slider(ui, "kaleido_segments");
                 }
             });
         egui::CollapsingHeader::new(RichText::new("LOOP COLOR").strong())
             .default_open(true)
             .show(ui, |ui| {
-                ui.add(egui::Slider::new(&mut fx.hue_shift, -0.1..=0.1).text("hue / pass"));
-                ui.add(egui::Slider::new(&mut fx.saturation, 0.0..=2.0).text("saturation"));
-                ui.add(egui::Slider::new(&mut fx.contrast, 0.5..=2.0).text("contrast"));
-                ui.add(egui::Slider::new(&mut fx.blur, 0.0..=1.0).text("blur / soften"));
-                ui.add(egui::Slider::new(&mut fx.noise, 0.0..=1.0).text("noise"));
+                for key in ["hue_shift", "saturation", "contrast", "blur", "noise"] {
+                    ac.slider(ui, key);
+                }
             });
         egui::CollapsingHeader::new(RichText::new("KEYER (input over loop)").strong())
             .default_open(true)
             .show(ui, |ui| {
-                combo(ui, "input mode", &mut fx.input_mode, &InputMode::ALL, InputMode::name);
-                ui.add(egui::Slider::new(&mut fx.input_level, 0.0..=1.5).text("input level"));
-                if fx.input_mode == InputMode::LumaKey {
-                    ui.add(egui::Slider::new(&mut fx.key_threshold, 0.0..=1.0).text("key threshold"));
-                    ui.add(egui::Slider::new(&mut fx.key_softness, 0.0..=0.5).text("key softness"));
+                combo(ui, "input mode", &mut ac.params.fx.input_mode, &InputMode::ALL, InputMode::name);
+                ac.slider(ui, "input_level");
+                if ac.params.fx.input_mode == InputMode::LumaKey {
+                    ac.slider(ui, "key_threshold");
+                    ac.slider(ui, "key_softness");
                 }
             });
         egui::CollapsingHeader::new(RichText::new("VIDEO DELAY").strong())
             .default_open(true)
             .show(ui, |ui| {
-                ui.add(egui::Slider::new(&mut fx.loop_delay, 1..=MAX_DELAY).text("loop delay (frames)"));
-                ui.add(egui::Slider::new(&mut fx.echo_amount, 0.0..=1.0).text("echo"));
-                ui.add(egui::Slider::new(&mut fx.echo_spacing, 1..=MAX_DELAY / 3).text("echo spacing"));
-                ui.add(egui::Slider::new(&mut fx.chroma_delay, 0..=MAX_DELAY / 2).text("RGB split (frames)"));
-                ui.add(egui::Slider::new(&mut fx.chroma_amount, 0.0..=1.0).text("RGB split amount"));
+                for key in ["loop_delay", "echo_amount", "echo_spacing", "chroma_delay", "chroma_amount"] {
+                    ac.slider(ui, key);
+                }
             });
         egui::CollapsingHeader::new(RichText::new("OUTPUT").strong())
             .default_open(false)
             .show(ui, |ui| {
-                ui.add(egui::Slider::new(&mut fx.out_hue, 0.0..=1.0).text("hue"));
-                ui.add(egui::Slider::new(&mut fx.brightness, 0.0..=2.0).text("brightness"));
-                ui.add(egui::Slider::new(&mut fx.posterize, 0..=16).text("posterize"));
-                ui.add(egui::Slider::new(&mut fx.scanlines, 0.0..=1.0).text("scanlines"));
-                ui.add(egui::Slider::new(&mut fx.vignette, 0.0..=1.0).text("vignette"));
-                ui.checkbox(&mut fx.out_invert, "invert");
-            });
-        egui::CollapsingHeader::new(RichText::new("LFOs (beat-synced)").strong())
-            .default_open(true)
-            .show(ui, |ui| {
-                for (n, lfo) in self.params.lfos.iter_mut().enumerate() {
-                    ui.horizontal(|ui| {
-                        ui.label(format!("{}", n + 1));
-                        combo(ui, ("lfo target", n), &mut lfo.target, &LfoTarget::ALL, LfoTarget::name);
-                        combo(ui, ("lfo shape", n), &mut lfo.shape, &LfoShape::ALL, LfoShape::name);
-                    });
-                    if lfo.target != LfoTarget::Off {
-                        ui.horizontal(|ui| {
-                            egui::ComboBox::from_id_salt(("lfo beats", n))
-                                .selected_text(beats_label(lfo.beats))
-                                .width(70.0)
-                                .show_ui(ui, |ui| {
-                                    for b in [0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0] {
-                                        ui.selectable_value(&mut lfo.beats, b, beats_label(b));
-                                    }
-                                });
-                            ui.add(egui::Slider::new(&mut lfo.depth, 0.0..=1.0).text("depth"));
-                        });
-                    }
-                    ui.add_space(4.0);
+                for key in ["out_hue", "brightness", "posterize", "scanlines", "vignette"] {
+                    ac.slider(ui, key);
                 }
+                ui.checkbox(&mut ac.params.fx.out_invert, "invert");
             });
+        egui::CollapsingHeader::new(RichText::new("AUTOMATION").strong())
+            .default_open(true)
+            .show(ui, |ui| automation_ui::overview(ui, ac.params, clock));
     }
 }
 
@@ -513,10 +518,6 @@ fn deck_name(i: usize) -> &'static str {
 
 fn deck_color(i: usize) -> Color32 {
     if i == 0 { Color32::from_rgb(80, 200, 255) } else { Color32::from_rgb(255, 140, 60) }
-}
-
-fn beats_label(b: f32) -> String {
-    if b < 1.0 { format!("1/{} beat", (1.0 / b).round()) } else { format!("{b} beats") }
 }
 
 fn combo<T: Copy + PartialEq>(

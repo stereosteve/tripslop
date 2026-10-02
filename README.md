@@ -53,6 +53,20 @@ from NASA/ESA Hubble via Wikimedia Commons. See the source pages for the exact t
 * **Keyer**: fresh input is luma-keyed (or added, lightened, differenced) over the loop.
 * **Placement**: each deck has a size, an x/y position, and Fill (crop to the frame) or Fit
   (show the whole image). Set them with the sliders or by dragging and scrolling on the preview.
+* **Automation**: every slider has a `~` button. Clicking it attaches a signal generator and
+  opens an editor:
+  * shapes: sine, triangle, saw up/down, square (adjustable width), S&H random, smooth random
+    drift, or a hand-drawn **envelope** (click to add points, drag to move them, right-click to
+    delete)
+  * rate synced to the BPM (1/4 to 128 beats per cycle) or free-running in Hz
+  * depth (a fraction of the slider's range), polarity (± around the slider, + above, − below)
+    and phase
+  * a live plot with a playhead
+
+  The slider still sets the center value. Automated sliders show a pink dot for the live value
+  and a band for the sweep range. The **AUTOMATION** panel lists everything that's automated,
+  with on/off and remove buttons. Presets replace the effect automation but keep any automation
+  on the decks and the crossfader.
 * **Decks**: images, looping videos (any format ffmpeg reads, GIFs included), live cameras, or a
   built-in oscillator pattern (bars, rings, plasma, checker, orbiting dot).
 
@@ -63,7 +77,7 @@ from NASA/ESA Hubble via Wikimedia Commons. See the source pages for the exact t
 | 1–9 | presets (Tunnel, Sierpinski, Mandala, Slow echo, Time smear, Spiral, Hall of mirrors, Melt, Clean) |
 | Space | freeze the loop |
 | C | clear the feedback memory |
-| T | tap tempo (LFOs are beat-synced) |
+| T | tap tempo (beat-synced automation follows it) |
 | Z / X | cut to deck A / B |
 | ← / → | crossfade |
 | ↑ / ↓ | copy scale (zoom) |

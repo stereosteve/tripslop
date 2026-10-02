@@ -1,6 +1,9 @@
 //! All live-tweakable state for the mixer + feedback loop, plus presets and LFOs.
 
-use std::f32::consts::TAU;
+use std::collections::BTreeMap;
+
+use crate::engine::MAX_DELAY;
+use crate::modulation::{Clock, Modulator, Shape};
 
 /// What a deck shows when it has no file loaded (or the user picks a generator).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -275,109 +278,6 @@ impl Default for FxParams {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum LfoTarget {
-    Off,
-    Zoom,
-    Rotate,
-    Spread,
-    Twist,
-    Feedback,
-    HueShift,
-    Crossfade,
-    CenterX,
-    CenterY,
-    KeyThreshold,
-}
-
-impl LfoTarget {
-    pub const ALL: [LfoTarget; 11] = [
-        LfoTarget::Off,
-        LfoTarget::Zoom,
-        LfoTarget::Rotate,
-        LfoTarget::Spread,
-        LfoTarget::Twist,
-        LfoTarget::Feedback,
-        LfoTarget::HueShift,
-        LfoTarget::Crossfade,
-        LfoTarget::CenterX,
-        LfoTarget::CenterY,
-        LfoTarget::KeyThreshold,
-    ];
-    pub fn name(self) -> &'static str {
-        match self {
-            LfoTarget::Off => "Off",
-            LfoTarget::Zoom => "Zoom",
-            LfoTarget::Rotate => "Rotate",
-            LfoTarget::Spread => "Spread",
-            LfoTarget::Twist => "Twist",
-            LfoTarget::Feedback => "Feedback",
-            LfoTarget::HueShift => "Hue shift",
-            LfoTarget::Crossfade => "Crossfade",
-            LfoTarget::CenterX => "Center X",
-            LfoTarget::CenterY => "Center Y",
-            LfoTarget::KeyThreshold => "Key threshold",
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum LfoShape {
-    Sine,
-    Triangle,
-    Saw,
-    Square,
-}
-
-impl LfoShape {
-    pub const ALL: [LfoShape; 4] = [LfoShape::Sine, LfoShape::Triangle, LfoShape::Saw, LfoShape::Square];
-    pub fn name(self) -> &'static str {
-        match self {
-            LfoShape::Sine => "Sine",
-            LfoShape::Triangle => "Tri",
-            LfoShape::Saw => "Saw",
-            LfoShape::Square => "Square",
-        }
-    }
-    /// Bipolar wave in [-1, 1] for phase in [0, 1).
-    pub fn eval(self, phase: f32) -> f32 {
-        let p = phase.rem_euclid(1.0);
-        match self {
-            LfoShape::Sine => (p * TAU).sin(),
-            LfoShape::Triangle => 1.0 - 4.0 * (p - 0.5).abs(),
-            LfoShape::Saw => 2.0 * p - 1.0,
-            LfoShape::Square => {
-                if p < 0.5 {
-                    1.0
-                } else {
-                    -1.0
-                }
-            }
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct Lfo {
-    pub target: LfoTarget,
-    pub shape: LfoShape,
-    /// Length of one cycle, in beats of the global BPM.
-    pub beats: f32,
-    /// 0..1, scaled to a sensible range for each target.
-    pub depth: f32,
-}
-
-impl Lfo {
-    pub fn off() -> Self {
-        Self {
-            target: LfoTarget::Off,
-            shape: LfoShape::Sine,
-            beats: 8.0,
-            depth: 0.3,
-        }
-    }
-}
-
 /// Everything the engine needs for one frame.
 #[derive(Clone, Debug)]
 pub struct Params {
@@ -386,8 +286,9 @@ pub struct Params {
     pub crossfade: f32,
     pub blend: BlendMode,
     pub fx: FxParams,
-    pub lfos: [Lfo; 3],
     pub bpm: f32,
+    /// Automation, keyed by `ParamDef::key`.
+    pub mods: BTreeMap<&'static str, Modulator>,
 }
 
 impl Default for Params {
@@ -398,43 +299,150 @@ impl Default for Params {
             crossfade: 0.0,
             blend: BlendMode::Crossfade,
             fx: FxParams::default(),
-            lfos: [Lfo::off(), Lfo::off(), Lfo::off()],
             bpm: 120.0,
+            mods: BTreeMap::new(),
         }
     }
 }
 
+// ---------------------------------------------------------------- parameter table
+
+#[derive(Clone, Copy)]
+pub enum Access {
+    F(fn(&mut Params) -> &mut f32),
+    U(fn(&mut Params) -> &mut u32),
+}
+
+/// A slider: one entry per automatable parameter. The UI and the modulation engine both
+/// go through this table, so every slider can be automated.
+pub struct ParamDef {
+    pub key: &'static str,
+    pub label: &'static str,
+    pub min: f32,
+    pub max: f32,
+    pub log: bool,
+    pub access: Access,
+}
+
+impl ParamDef {
+    pub fn get(&self, p: &mut Params) -> f32 {
+        match self.access {
+            Access::F(f) => *f(p),
+            Access::U(f) => *f(p) as f32,
+        }
+    }
+    pub fn set(&self, p: &mut Params, v: f32) {
+        match self.access {
+            Access::F(f) => *f(p) = v,
+            Access::U(f) => *f(p) = v.round().max(0.0) as u32,
+        }
+    }
+    /// Slider position (0..1) of a value, matching egui's linear/log mapping.
+    pub fn normalized(&self, v: f32) -> f32 {
+        if self.log && self.min > 0.0 {
+            ((v.max(self.min) / self.min).ln() / (self.max / self.min).ln()).clamp(0.0, 1.0)
+        } else {
+            ((v - self.min) / (self.max - self.min)).clamp(0.0, 1.0)
+        }
+    }
+}
+
+macro_rules! def {
+    ($key:literal, $label:literal, $min:expr, $max:expr, f32, $($path:tt)+) => {
+        def!(@ $key, $label, $min, $max, false, Access::F({ fn get(p: &mut Params) -> &mut f32 { &mut p.$($path)+ } get }))
+    };
+    ($key:literal, $label:literal, $min:expr, $max:expr, log, $($path:tt)+) => {
+        def!(@ $key, $label, $min, $max, true, Access::F({ fn get(p: &mut Params) -> &mut f32 { &mut p.$($path)+ } get }))
+    };
+    ($key:literal, $label:literal, $min:expr, $max:expr, u32, $($path:tt)+) => {
+        def!(@ $key, $label, $min, $max, false, Access::U({ fn get(p: &mut Params) -> &mut u32 { &mut p.$($path)+ } get }))
+    };
+    (@ $key:literal, $label:literal, $min:expr, $max:expr, $log:expr, $access:expr) => {
+        ParamDef { key: $key, label: $label, min: $min as f32, max: $max as f32, log: $log, access: $access }
+    };
+}
+
+pub static PARAMS: &[ParamDef] = &[
+    // decks
+    def!("a.osc_freq", "freq", 0.5, 40.0, log, deck_a.osc_freq),
+    def!("a.osc_speed", "speed", 0.0, 4.0, f32, deck_a.osc_speed),
+    def!("a.gain", "gain", 0.0, 2.0, f32, deck_a.gain),
+    def!("a.hue", "hue", 0.0, 1.0, f32, deck_a.hue),
+    def!("a.scale", "size", 0.05, 3.0, log, deck_a.scale),
+    def!("a.pos_x", "x", -1.0, 1.0, f32, deck_a.pos_x),
+    def!("a.pos_y", "y", -1.0, 1.0, f32, deck_a.pos_y),
+    def!("b.osc_freq", "freq", 0.5, 40.0, log, deck_b.osc_freq),
+    def!("b.osc_speed", "speed", 0.0, 4.0, f32, deck_b.osc_speed),
+    def!("b.gain", "gain", 0.0, 2.0, f32, deck_b.gain),
+    def!("b.hue", "hue", 0.0, 1.0, f32, deck_b.hue),
+    def!("b.scale", "size", 0.05, 3.0, log, deck_b.scale),
+    def!("b.pos_x", "x", -1.0, 1.0, f32, deck_b.pos_x),
+    def!("b.pos_y", "y", -1.0, 1.0, f32, deck_b.pos_y),
+    def!("crossfade", "crossfade", 0.0, 1.0, f32, crossfade),
+    // feedback / fractal
+    def!("feedback", "feedback", 0.0, 1.2, f32, fx.feedback),
+    def!("copies", "copies (monitors)", 1, 8, u32, fx.copies),
+    def!("zoom", "copy scale", 0.05, 2.0, f32, fx.zoom),
+    def!("rotate", "rotate °", -180.0, 180.0, f32, fx.rotate),
+    def!("spread", "spread", 0.0, 1.5, f32, fx.spread),
+    def!("twist", "twist ° / copy", -180.0, 180.0, f32, fx.twist),
+    def!("center_x", "center x", -0.8, 0.8, f32, fx.center_x),
+    def!("center_y", "center y", -0.5, 0.5, f32, fx.center_y),
+    def!("kaleido_segments", "segments", 2, 16, u32, fx.kaleido_segments),
+    // loop colour
+    def!("hue_shift", "hue / pass", -0.1, 0.1, f32, fx.hue_shift),
+    def!("saturation", "saturation", 0.0, 2.0, f32, fx.saturation),
+    def!("contrast", "contrast", 0.5, 2.0, f32, fx.contrast),
+    def!("blur", "blur / soften", 0.0, 1.0, f32, fx.blur),
+    def!("noise", "noise", 0.0, 1.0, f32, fx.noise),
+    // keyer
+    def!("input_level", "input level", 0.0, 1.5, f32, fx.input_level),
+    def!("key_threshold", "key threshold", 0.0, 1.0, f32, fx.key_threshold),
+    def!("key_softness", "key softness", 0.0, 0.5, f32, fx.key_softness),
+    // delay
+    def!("loop_delay", "loop delay (frames)", 1, MAX_DELAY, u32, fx.loop_delay),
+    def!("echo_amount", "echo", 0.0, 1.0, f32, fx.echo_amount),
+    def!("echo_spacing", "echo spacing", 1, MAX_DELAY / 3, u32, fx.echo_spacing),
+    def!("chroma_delay", "RGB split (frames)", 0, MAX_DELAY / 2, u32, fx.chroma_delay),
+    def!("chroma_amount", "RGB split amount", 0.0, 1.0, f32, fx.chroma_amount),
+    // output
+    def!("out_hue", "hue", 0.0, 1.0, f32, fx.out_hue),
+    def!("brightness", "brightness", 0.0, 2.0, f32, fx.brightness),
+    def!("posterize", "posterize", 0, 16, u32, fx.posterize),
+    def!("scanlines", "scanlines", 0.0, 1.0, f32, fx.scanlines),
+    def!("vignette", "vignette", 0.0, 1.0, f32, fx.vignette),
+];
+
+pub fn param_def(key: &str) -> &'static ParamDef {
+    PARAMS
+        .iter()
+        .find(|d| d.key == key)
+        .unwrap_or_else(|| panic!("unknown parameter {key}"))
+}
+
+/// Deck and mixer automation belongs to the decks, so presets leave it alone.
+fn is_deck_key(key: &str) -> bool {
+    key.starts_with("a.") || key.starts_with("b.") || key == "crossfade"
+}
+
 impl Params {
-    /// Returns a copy with LFO modulation applied at `beat` (fractional beat count).
-    pub fn modulated(&self, beat: f64) -> Params {
+    /// Returns a copy with all enabled automation applied.
+    pub fn modulated(&self, clock: Clock) -> Params {
         let mut p = self.clone();
-        for lfo in &self.lfos {
-            if lfo.target == LfoTarget::Off || lfo.depth == 0.0 {
+        for (key, m) in &self.mods {
+            if !m.enabled || m.depth == 0.0 {
                 continue;
             }
-            let phase = (beat / lfo.beats.max(0.0625) as f64).fract() as f32;
-            let v = lfo.shape.eval(phase) * lfo.depth;
-            let fx = &mut p.fx;
-            match lfo.target {
-                LfoTarget::Off => {}
-                LfoTarget::Zoom => fx.zoom = (fx.zoom + v * 0.25).clamp(0.05, 2.0),
-                LfoTarget::Rotate => fx.rotate += v * 45.0,
-                LfoTarget::Spread => fx.spread = (fx.spread + v * 0.5).max(0.0),
-                LfoTarget::Twist => fx.twist += v * 90.0,
-                LfoTarget::Feedback => fx.feedback = (fx.feedback + v * 0.2).clamp(0.0, 1.2),
-                LfoTarget::HueShift => fx.hue_shift += v * 0.05,
-                LfoTarget::Crossfade => p.crossfade = (p.crossfade + v).clamp(0.0, 1.0),
-                LfoTarget::CenterX => fx.center_x += v * 0.5,
-                LfoTarget::CenterY => fx.center_y += v * 0.5,
-                LfoTarget::KeyThreshold => fx.key_threshold = (fx.key_threshold + v * 0.5).clamp(0.0, 1.0),
-            }
+            let def = param_def(key);
+            let base = def.get(&mut p);
+            def.set(&mut p, m.apply(base, def.min, def.max, m.signal(clock)));
         }
         p
     }
 }
 
-/// Built-in starting points. Each preset only rewrites the FX + LFO section so the
-/// loaded decks stay as they are.
+/// Built-in starting points. Each preset only rewrites the FX section and its automation,
+/// so the loaded decks (and their automation) stay as they are.
 pub const PRESET_NAMES: [&str; 9] = [
     "1 Tunnel",
     "2 Sierpinski",
@@ -449,7 +457,7 @@ pub const PRESET_NAMES: [&str; 9] = [
 
 pub fn apply_preset(p: &mut Params, idx: usize) {
     let mut fx = FxParams::default();
-    let mut lfos = [Lfo::off(), Lfo::off(), Lfo::off()];
+    let mut mods: Vec<(&'static str, Shape, f32, f32)> = Vec::new();
     match idx {
         // Classic camera-at-monitor zoom tunnel.
         0 => {
@@ -457,7 +465,7 @@ pub fn apply_preset(p: &mut Params, idx: usize) {
             fx.zoom = 0.93;
             fx.rotate = 3.0;
             fx.hue_shift = 0.012;
-            lfos[0] = Lfo { target: LfoTarget::Rotate, shape: LfoShape::Sine, beats: 16.0, depth: 0.3 };
+            mods.push(("rotate", Shape::Sine, 16.0, 0.075));
         }
         // Three half-size copies: the textbook IFS that the analog rig produces with 3 monitors.
         1 => {
@@ -470,7 +478,7 @@ pub fn apply_preset(p: &mut Params, idx: usize) {
             fx.combine = CopyCombine::Lighten;
             fx.hue_shift = 0.02;
             fx.key_threshold = 0.3;
-            lfos[0] = Lfo { target: LfoTarget::Twist, shape: LfoShape::Sine, beats: 32.0, depth: 0.15 };
+            mods.push(("twist", Shape::Sine, 32.0, 0.075));
         }
         // Many rotating copies + kaleidoscope.
         2 => {
@@ -483,8 +491,8 @@ pub fn apply_preset(p: &mut Params, idx: usize) {
             fx.symmetry = Symmetry::Kaleido;
             fx.kaleido_segments = 6;
             fx.hue_shift = 0.015;
-            lfos[0] = Lfo { target: LfoTarget::Rotate, shape: LfoShape::Triangle, beats: 32.0, depth: 0.5 };
-            lfos[1] = Lfo { target: LfoTarget::Spread, shape: LfoShape::Sine, beats: 16.0, depth: 0.15 };
+            mods.push(("rotate", Shape::Triangle, 32.0, 0.125));
+            mods.push(("spread", Shape::Sine, 16.0, 0.1));
         }
         // Delay-line trails, little feedback geometry.
         3 => {
@@ -518,7 +526,7 @@ pub fn apply_preset(p: &mut Params, idx: usize) {
             fx.twist = 0.0;
             fx.hue_shift = 0.006;
             fx.combine = CopyCombine::Lighten;
-            lfos[0] = Lfo { target: LfoTarget::Rotate, shape: LfoShape::Sine, beats: 64.0, depth: 0.4 };
+            mods.push(("rotate", Shape::Sine, 64.0, 0.1));
         }
         // Tiled infinite mirror room.
         6 => {
@@ -531,7 +539,7 @@ pub fn apply_preset(p: &mut Params, idx: usize) {
             fx.combine = CopyCombine::Average;
             fx.hue_shift = 0.01;
             fx.contrast = 1.15;
-            lfos[0] = Lfo { target: LfoTarget::Zoom, shape: LfoShape::Sine, beats: 16.0, depth: 0.2 };
+            mods.push(("zoom", Shape::Sine, 16.0, 0.05));
         }
         // Blurry zoom-out melt with delay.
         7 => {
@@ -544,8 +552,8 @@ pub fn apply_preset(p: &mut Params, idx: usize) {
             fx.saturation = 1.2;
             fx.input_mode = InputMode::Difference;
             fx.input_level = 0.8;
-            lfos[0] = Lfo { target: LfoTarget::CenterX, shape: LfoShape::Sine, beats: 8.0, depth: 0.15 };
-            lfos[1] = Lfo { target: LfoTarget::CenterY, shape: LfoShape::Sine, beats: 12.0, depth: 0.15 };
+            mods.push(("center_x", Shape::Sine, 8.0, 0.094));
+            mods.push(("center_y", Shape::Sine, 12.0, 0.15));
         }
         _ => {
             fx.feedback = 0.0;
@@ -554,5 +562,38 @@ pub fn apply_preset(p: &mut Params, idx: usize) {
         }
     }
     p.fx = fx;
-    p.lfos = lfos;
+    p.mods.retain(|k, _| is_deck_key(k));
+    for (key, shape, beats, depth) in mods {
+        p.mods.insert(key, Modulator::lfo(key, shape, beats, depth));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn param_keys_are_unique_and_ranges_sane() {
+        let mut p = Params::default();
+        for (i, d) in PARAMS.iter().enumerate() {
+            assert!(PARAMS[i + 1..].iter().all(|o| o.key != d.key), "duplicate key {}", d.key);
+            assert!(d.min < d.max, "{}", d.key);
+            // Round-trips through the accessor.
+            let v = d.get(&mut p);
+            d.set(&mut p, v);
+            assert_eq!(d.get(&mut p), v);
+        }
+    }
+
+    #[test]
+    fn presets_only_reference_known_params() {
+        let mut p = Params::default();
+        for i in 0..PRESET_NAMES.len() {
+            apply_preset(&mut p, i);
+            for k in p.mods.keys() {
+                param_def(k);
+            }
+            let _ = p.modulated(Clock { beat: 3.3, time: 1.0 });
+        }
+    }
 }
