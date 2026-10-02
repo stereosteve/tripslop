@@ -1,0 +1,270 @@
+//! Media sources for a deck: still images, video files and live cameras.
+//!
+//! Video decoding is delegated to an `ffmpeg` subprocess that writes raw RGBA frames
+//! to stdout. That keeps the build free of native ffmpeg bindings, and gives us every
+//! codec / container / capture device ffmpeg knows about.
+
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+
+/// A decoded frame ready for upload.
+pub struct Frame {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
+pub enum Source {
+    Image { name: String, frame: Frame, uploaded: bool },
+    Stream(Stream),
+}
+
+impl Source {
+    pub fn name(&self) -> &str {
+        match self {
+            Source::Image { name, .. } => name,
+            Source::Stream(s) => &s.name,
+        }
+    }
+
+    /// Returns a new frame if one is available since the last call.
+    pub fn poll(&mut self) -> Option<FrameRef<'_>> {
+        match self {
+            Source::Image { frame, uploaded, .. } => {
+                if *uploaded {
+                    None
+                } else {
+                    *uploaded = true;
+                    Some(FrameRef::Borrowed(frame))
+                }
+            }
+            Source::Stream(s) => s.poll(),
+        }
+    }
+
+    pub fn error(&self) -> Option<String> {
+        match self {
+            Source::Image { .. } => None,
+            Source::Stream(s) => s.shared.error.lock().unwrap().clone(),
+        }
+    }
+}
+
+pub enum FrameRef<'a> {
+    Borrowed(&'a Frame),
+    Owned(Frame),
+}
+
+impl FrameRef<'_> {
+    pub fn get(&self) -> &Frame {
+        match self {
+            FrameRef::Borrowed(f) => f,
+            FrameRef::Owned(f) => f,
+        }
+    }
+}
+
+const VIDEO_EXTS: &[&str] = &[
+    "mp4", "mov", "m4v", "mkv", "webm", "avi", "gif", "mpg", "mpeg", "wmv", "flv", "ts", "mts",
+];
+
+pub fn is_video(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| VIDEO_EXTS.contains(&e.to_ascii_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
+/// Open any file: videos (and animated GIFs) go through ffmpeg, everything else
+/// is decoded as a still image.
+pub fn open_file(path: &Path, width: u32, height: u32) -> Result<Source, String> {
+    if is_video(path) {
+        Stream::video(path.to_path_buf(), width, height).map(Source::Stream)
+    } else {
+        load_image(path)
+    }
+}
+
+fn load_image(path: &Path) -> Result<Source, String> {
+    let img = image::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    // Keep textures within sane GPU limits.
+    let img = if img.width() > 4096 || img.height() > 4096 {
+        img.resize(4096, 4096, image::imageops::FilterType::Triangle)
+    } else {
+        img
+    };
+    let rgba = img.to_rgba8();
+    Ok(Source::Image {
+        name: file_name(path),
+        frame: Frame {
+            width: rgba.width(),
+            height: rgba.height(),
+            rgba: rgba.into_raw(),
+        },
+        uploaded: false,
+    })
+}
+
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+struct Shared {
+    latest: Mutex<Option<Vec<u8>>>,
+    frames: AtomicU64,
+    stop: AtomicBool,
+    error: Mutex<Option<String>>,
+}
+
+/// A live ffmpeg-decoded stream (video file on loop, or capture device).
+pub struct Stream {
+    pub name: String,
+    width: u32,
+    height: u32,
+    shared: Arc<Shared>,
+    child: Option<Child>,
+    thread: Option<JoinHandle<()>>,
+    seen: u64,
+}
+
+impl Stream {
+    fn video(path: PathBuf, width: u32, height: u32) -> Result<Self, String> {
+        if !path.exists() {
+            return Err(format!("no such file: {}", path.display()));
+        }
+        let mut args: Vec<String> = vec![
+            "-stream_loop".into(),
+            "-1".into(),
+            "-re".into(),
+            "-i".into(),
+            path.to_string_lossy().into_owned(),
+        ];
+        args.extend(output_args(width, height));
+        Self::spawn(file_name(&path), args, width, height)
+    }
+
+    /// Open a capture device by index (webcam, capture card, or on macOS a screen).
+    pub fn camera(index: u32, width: u32, height: u32) -> Result<Self, String> {
+        let mut args: Vec<String> = Vec::new();
+        if cfg!(target_os = "macos") {
+            args.extend(
+                ["-f", "avfoundation", "-framerate", "30", "-pixel_format", "uyvy422", "-i"]
+                    .map(String::from),
+            );
+            args.push(format!("{index}:none"));
+        } else if cfg!(target_os = "windows") {
+            // On Windows ffmpeg needs a device *name*; index-based selection is not supported.
+            return Err("camera input on Windows: use `ffmpeg -list_devices true -f dshow -i dummy` and open via a file/URL instead".into());
+        } else {
+            args.extend(["-f", "v4l2", "-i"].map(String::from));
+            args.push(format!("/dev/video{index}"));
+        }
+        args.extend(output_args(width, height));
+        Self::spawn(format!("Camera {index}"), args, width, height)
+    }
+
+    fn spawn(name: String, args: Vec<String>, width: u32, height: u32) -> Result<Self, String> {
+        let mut child = Command::new("ffmpeg")
+            .args(["-hide_banner", "-loglevel", "error", "-nostdin"])
+            .args(&args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("failed to start ffmpeg (is it installed and on PATH?): {e}"))?;
+
+        let mut stdout = child.stdout.take().unwrap();
+        let mut stderr = child.stderr.take().unwrap();
+        let shared = Arc::new(Shared {
+            latest: Mutex::new(None),
+            frames: AtomicU64::new(0),
+            stop: AtomicBool::new(false),
+            error: Mutex::new(None),
+        });
+
+        // Collect stderr so we can show ffmpeg errors in the UI.
+        let err_shared = shared.clone();
+        std::thread::spawn(move || {
+            let mut s = String::new();
+            let _ = stderr.read_to_string(&mut s);
+            let s = s.trim();
+            if !s.is_empty() {
+                *err_shared.error.lock().unwrap() = Some(s.lines().last().unwrap_or(s).to_string());
+            }
+        });
+
+        let frame_len = (width * height * 4) as usize;
+        let t_shared = shared.clone();
+        let thread = std::thread::spawn(move || {
+            let mut buf = vec![0u8; frame_len];
+            while !t_shared.stop.load(Ordering::Relaxed) {
+                if stdout.read_exact(&mut buf).is_err() {
+                    break;
+                }
+                // Hand over the frame, recycling the previous buffer if the UI hasn't taken it.
+                let mut slot = t_shared.latest.lock().unwrap();
+                let next = slot.take().unwrap_or_else(|| vec![0u8; frame_len]);
+                *slot = Some(std::mem::replace(&mut buf, next));
+                drop(slot);
+                t_shared.frames.fetch_add(1, Ordering::Release);
+            }
+        });
+
+        Ok(Self {
+            name,
+            width,
+            height,
+            shared,
+            child: Some(child),
+            thread: Some(thread),
+            seen: 0,
+        })
+    }
+
+    fn poll(&mut self) -> Option<FrameRef<'_>> {
+        let n = self.shared.frames.load(Ordering::Acquire);
+        if n == self.seen {
+            return None;
+        }
+        self.seen = n;
+        let rgba = self.shared.latest.lock().unwrap().take()?;
+        Some(FrameRef::Owned(Frame {
+            width: self.width,
+            height: self.height,
+            rgba,
+        }))
+    }
+}
+
+/// Scale-to-cover + crop to the engine resolution, raw RGBA on stdout.
+fn output_args(width: u32, height: u32) -> Vec<String> {
+    vec![
+        "-an".into(),
+        "-vf".into(),
+        format!("scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height}"),
+        "-pix_fmt".into(),
+        "rgba".into(),
+        "-f".into(),
+        "rawvideo".into(),
+        "pipe:1".into(),
+    ]
+}
+
+impl Drop for Stream {
+    fn drop(&mut self) {
+        self.shared.stop.store(true, Ordering::Relaxed);
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}

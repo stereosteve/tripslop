@@ -1,0 +1,72 @@
+# trippy
+
+A two-deck video DJ mixer in Rust that emulates an analog **video-feedback fractal rig**
+(camera pointed at monitors, with mirrors, delay lines, keyers and proc amps) on the GPU.
+
+```
+cargo run --release -- [deckA.mp4|png] [deckB.mov|jpg]
+```
+
+Requires `ffmpeg` on your PATH for video and camera decks (images work without it).
+
+## Demo
+
+Sample clips and images are in `samples/` (run `samples/fetch.sh` to re-download them):
+
+```
+cargo run --release -- --preset 6 samples/jellyfish.mp4 samples/crab-nebula.jpg
+```
+
+This puts the jellyfish on deck A and the Crab Nebula on deck B, starting on the
+*Spiral galaxy* preset. Then try:
+
+* press `2` (Sierpinski) or `3` (Mandala) and pull the crossfader toward B: the dark nebula
+  lets the fractal copies show through the luma key
+* press `5` for the RGB time-split, `8` for the melt
+* swap in the other samples, e.g.
+  `cargo run --release -- --preset 8 samples/big-buck-bunny.mp4 samples/pillars-of-creation.jpg`
+
+`--preset N` (1–9) picks the starting preset. Any other arguments are files for deck A and B.
+
+Sample credits: *Jellyfish* test clip via test-videos.co.uk (footage from jell.yfish.us);
+*Big Buck Bunny* © Blender Foundation, CC BY 3.0; *Pillars of Creation* (2014) and *Crab Nebula*
+from NASA/ESA Hubble via Wikimedia Commons. See the source pages for the exact terms.
+
+## How it works
+
+```
+ deck A ─┐
+         ├─ mixer ─► input ─┐
+ deck B ─┘                  ├─ feedback stage ─► output ─┬─► delay line (64-frame ring buffer)
+     delay line[now - d] ───┘   (N copies, keyer,         └─► output stage ─► screen
+                                 hue/sat/contrast)
+```
+
+* **Feedback / fractal**: every 1/60 s, *N* scaled and rotated copies of an earlier output
+  frame are composited, like a camera seeing *N* monitors that show its own output. Do that
+  over and over and you get an iterated function system: 3 copies at scale 0.5 make a Sierpinski
+  triangle, and adding rotation and twist gives spirals and mandalas.
+* **Video delay**: the feedback reads from a ring buffer, so the loop can lag behind by up to
+  60 frames. There are also echo taps, plus an RGB time-split where green and blue come from
+  older frames.
+* **Keyer**: fresh input is luma-keyed (or added, lightened, differenced) over the loop.
+* **Decks**: images, looping videos (any format ffmpeg reads, GIFs included), live cameras, or a
+  built-in oscillator pattern (bars, rings, plasma, checker, orbiting dot).
+
+## Controls
+
+| Key | Action |
+| --- | --- |
+| 1–9 | presets (Tunnel, Sierpinski, Mandala, Slow echo, Time smear, Spiral, Hall of mirrors, Melt, Clean) |
+| Space | freeze the loop |
+| C | clear the feedback memory |
+| T | tap tempo (LFOs are beat-synced) |
+| Z / X | cut to deck A / B |
+| ← / → | crossfade |
+| ↑ / ↓ | copy scale (zoom) |
+| S | save a PNG snapshot |
+| F / Esc | performance mode (fullscreen output only) |
+
+Drop files onto a deck panel to load them. If you drop them anywhere else, they go into the
+deck that's currently off-air. **Output window** opens a second window you can drag to a
+projector and double-click to make fullscreen.

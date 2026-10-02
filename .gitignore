@@ -1,0 +1,4 @@
+/target
+*.png
+.juggler
+.DS_Store
