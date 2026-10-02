@@ -168,7 +168,7 @@ impl Engine {
         let fx_pipe = pipeline(&device, "fx", &shader(&device, "fx", include_str!("shaders/fx.wgsl")));
         let post_pipe = pipeline(&device, "post", &shader(&device, "post", include_str!("shaders/post.wgsl")));
 
-        let mix_ubuf = ubuf(&device, "mix u", 5);
+        let mix_ubuf = ubuf(&device, "mix u", 7);
         let fx_ubuf = ubuf(&device, "fx u", 9);
         let post_ubuf = ubuf(&device, "post u", 3);
 
@@ -318,20 +318,23 @@ impl Engine {
 
         let aspect = WIDTH as f32 / HEIGHT as f32;
         let b = |v: bool| if v { 1.0 } else { 0.0 };
-        let deck_u = |d: &crate::params::DeckParams, has: bool| -> [[f32; 4]; 2] {
+        let deck_u = |d: &crate::params::DeckParams, has: bool| -> [[f32; 4]; 3] {
             [
                 [b(d.use_pattern || !has), d.pattern as u32 as f32, d.osc_freq, d.osc_speed],
                 [d.gain, d.hue, b(d.invert), b(has)],
+                [d.scale, d.pos_x, d.pos_y, b(d.fit_whole)],
             ]
         };
         let da = deck_u(&p.deck_a, self.decks[0].has_content);
         let db = deck_u(&p.deck_b, self.decks[1].has_content);
-        let mix_u: [[f32; 4]; 5] = [
+        let mix_u: [[f32; 4]; 7] = [
             [time, p.crossfade, p.blend as u32 as f32, aspect],
             da[0],
             da[1],
             db[0],
             db[1],
+            da[2],
+            db[2],
         ];
         self.queue.write_buffer(&self.mix_ubuf, 0, bytemuck::cast_slice(&mix_u));
 

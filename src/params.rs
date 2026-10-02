@@ -41,9 +41,22 @@ pub struct DeckParams {
     pub gain: f32,
     pub hue: f32,
     pub invert: bool,
+    /// Size of the deck's box relative to the screen (1 = full screen).
+    pub scale: f32,
+    /// Box center offset in screen fractions; +x right, +y up.
+    pub pos_x: f32,
+    pub pos_y: f32,
+    /// Show the whole image (letterboxed) instead of filling the box and cropping.
+    pub fit_whole: bool,
 }
 
 impl DeckParams {
+    pub fn reset_placement(&mut self) {
+        self.scale = 1.0;
+        self.pos_x = 0.0;
+        self.pos_y = 0.0;
+    }
+
     pub fn new(pattern: Pattern) -> Self {
         Self {
             use_pattern: true,
@@ -53,6 +66,10 @@ impl DeckParams {
             gain: 1.0,
             hue: 0.0,
             invert: false,
+            scale: 1.0,
+            pos_x: 0.0,
+            pos_y: 0.0,
+            fit_whole: false,
         }
     }
 }

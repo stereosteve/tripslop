@@ -75,6 +75,8 @@ struct App {
     status: String,
     fps: f32,
     preset: Option<usize>,
+    /// Which deck dragging / scrolling on the preview moves and resizes.
+    grab_deck: usize,
     frame_count: u64,
     /// Testing hook: `TRIPPY_SNAPSHOT=<frames>:<out.png>` saves a frame and quits.
     auto_snapshot: Option<(u64, PathBuf)>,
@@ -96,6 +98,7 @@ impl App {
             status: "Drop images/videos on a deck, or press 1-9 for presets. F = performance mode.".into(),
             fps: 60.0,
             preset: Some(0),
+            grab_deck: 0,
             frame_count: 0,
             auto_snapshot: std::env::var("TRIPPY_SNAPSHOT").ok().and_then(|v| {
                 let (n, p) = v.split_once(':')?;
@@ -201,6 +204,9 @@ impl App {
         if pressed(Key::C) {
             self.engine.clear();
         }
+        if pressed(Key::G) {
+            self.grab_deck = 1 - self.grab_deck;
+        }
         if pressed(Key::S) {
             self.save_snapshot(None);
         }
@@ -266,6 +272,36 @@ impl App {
 
     // ------------------------------------------------------------------ UI
 
+    /// Drag on the preview to move the grabbed deck, scroll / pinch to resize it.
+    fn preview_interaction(&mut self, ui: &mut egui::Ui, resp: &egui::Response, rect: Rect) {
+        let i = self.grab_deck;
+        let d = self.deck_params(i);
+        if resp.dragged() {
+            let delta = resp.drag_delta();
+            d.pos_x += delta.x / rect.width();
+            d.pos_y -= delta.y / rect.height();
+        }
+        if resp.hovered() {
+            let (scroll, zoom) = ui.input(|inp| (inp.smooth_scroll_delta.y, inp.zoom_delta()));
+            if scroll != 0.0 || zoom != 1.0 {
+                d.scale = (d.scale * (scroll * 0.004).exp() * zoom).clamp(0.05, 3.0);
+            }
+            // Outline the grabbed deck's box and show a hint.
+            let center = rect.center() + egui::vec2(d.pos_x * rect.width(), -d.pos_y * rect.height());
+            let deck_rect = Rect::from_center_size(center, rect.size() * d.scale);
+            let color = deck_color(i);
+            let painter = ui.painter_at(rect);
+            painter.rect_stroke(deck_rect, 0.0, egui::Stroke::new(1.5, color), egui::StrokeKind::Middle);
+            painter.text(
+                rect.left_top() + egui::vec2(8.0, 8.0),
+                egui::Align2::LEFT_TOP,
+                format!("Deck {}: drag = move, scroll = size  (G switches deck)", deck_name(i)),
+                egui::FontId::proportional(13.0),
+                color,
+            );
+        }
+    }
+
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("◉ trippy").strong().color(Color32::from_rgb(255, 120, 220)));
@@ -283,6 +319,9 @@ impl App {
                 self.engine.clear();
             }
             ui.toggle_value(&mut self.show_output, "🖵 Output window");
+            ui.label("Grab:");
+            ui.selectable_value(&mut self.grab_deck, 0, "A");
+            ui.selectable_value(&mut self.grab_deck, 1, "B");
             if ui.button("Perform (F)").clicked() {
                 self.perform = true;
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
@@ -305,7 +344,7 @@ impl App {
     }
 
     fn deck_ui(&mut self, ui: &mut egui::Ui, i: usize) {
-        let color = if i == 0 { Color32::from_rgb(80, 200, 255) } else { Color32::from_rgb(255, 140, 60) };
+        let color = deck_color(i);
         let resp = egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.label(RichText::new(format!("DECK {}", deck_name(i))).strong().size(16.0).color(color));
@@ -351,6 +390,18 @@ impl App {
             ui.add(egui::Slider::new(&mut d.gain, 0.0..=2.0).text("gain"));
             ui.add(egui::Slider::new(&mut d.hue, 0.0..=1.0).text("hue"));
             ui.checkbox(&mut d.invert, "invert");
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.label("Placement");
+                ui.selectable_value(&mut d.fit_whole, false, "Fill");
+                ui.selectable_value(&mut d.fit_whole, true, "Fit");
+                if ui.small_button("Reset").clicked() {
+                    d.reset_placement();
+                }
+            });
+            ui.add(egui::Slider::new(&mut d.scale, 0.05..=3.0).logarithmic(true).text("size"));
+            ui.add(egui::Slider::new(&mut d.pos_x, -1.0..=1.0).text("x"));
+            ui.add(egui::Slider::new(&mut d.pos_y, -1.0..=1.0).text("y"));
         });
         self.decks[i].rect = resp.response.rect;
     }
@@ -460,6 +511,10 @@ fn deck_name(i: usize) -> &'static str {
     if i == 0 { "A" } else { "B" }
 }
 
+fn deck_color(i: usize) -> Color32 {
+    if i == 0 { Color32::from_rgb(80, 200, 255) } else { Color32::from_rgb(255, 140, 60) }
+}
+
 fn beats_label(b: f32) -> String {
     if b < 1.0 { format!("1/{} beat", (1.0 / b).round()) } else { format!("{b} beats") }
 }
@@ -483,9 +538,10 @@ fn combo<T: Copy + PartialEq>(
 }
 
 /// Paint the output texture letterboxed to 16:9 into the available space.
-fn paint_output(ui: &mut egui::Ui, tex: egui::TextureId) -> egui::Response {
+/// Returns the response for the whole area and the rect the picture occupies.
+fn paint_output(ui: &mut egui::Ui, tex: egui::TextureId) -> (egui::Response, Rect) {
     let avail = ui.available_rect_before_wrap();
-    let resp = ui.allocate_rect(avail, egui::Sense::click());
+    let resp = ui.allocate_rect(avail, egui::Sense::click_and_drag());
     let aspect = WIDTH as f32 / HEIGHT as f32;
     let mut size = avail.size();
     if size.x / size.y > aspect {
@@ -497,7 +553,7 @@ fn paint_output(ui: &mut egui::Ui, tex: egui::TextureId) -> egui::Response {
     let painter = ui.painter();
     painter.rect_filled(avail, 0.0, Color32::BLACK);
     painter.image(tex, rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
-    resp
+    (resp, rect)
 }
 
 impl eframe::App for App {
@@ -515,7 +571,7 @@ impl eframe::App for App {
                     .with_title("trippy output (double-click = fullscreen)")
                     .with_inner_size([960.0, 540.0]),
                 |ui, _class| {
-                    let resp = paint_output(ui, tex);
+                    let (resp, _) = paint_output(ui, tex);
                     if resp.double_clicked() {
                         let fs = ui.input(|i| i.viewport().fullscreen.unwrap_or(false));
                         ui.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fs));
@@ -529,7 +585,7 @@ impl eframe::App for App {
         }
 
         if self.perform {
-            let resp = paint_output(ui, tex);
+            let (resp, _) = paint_output(ui, tex);
             if resp.double_clicked() {
                 self.perform = false;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
@@ -557,7 +613,8 @@ impl eframe::App for App {
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE.fill(Color32::BLACK))
                 .show(ui, |ui| {
-                    paint_output(ui, tex);
+                    let (resp, rect) = paint_output(ui, tex);
+                    self.preview_interaction(ui, &resp, rect);
                 });
         }
 

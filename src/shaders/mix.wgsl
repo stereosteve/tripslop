@@ -8,6 +8,9 @@ struct MixU {
     a1: vec4<f32>,
     b0: vec4<f32>,
     b1: vec4<f32>,
+    // per deck placement: (scale, x, y, fit) — x/y in screen fractions, fit 1 = contain
+    a2: vec4<f32>,
+    b2: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: MixU;
@@ -50,33 +53,50 @@ fn pattern(kind: i32, uv: vec2<f32>, freq: f32, speed: f32, t: f32) -> vec3<f32>
     }
 }
 
-// Scale-to-cover the output, preserving the texture's aspect ratio.
-fn cover_uv(uv: vec2<f32>, dims: vec2<u32>) -> vec2<f32> {
+// Map output uv to texture uv, preserving the texture's aspect ratio:
+// cover = fill the frame and crop, contain = show the whole texture (letterboxed).
+fn fit_uv(uv: vec2<f32>, dims: vec2<u32>, contain: bool) -> vec2<f32> {
     let ta = f32(dims.x) / f32(dims.y);
     let oa = u.g.w;
-    if (ta > oa) {
+    if ((ta > oa) != contain) {
         return vec2<f32>(0.5 + (uv.x - 0.5) * oa / ta, uv.y);
     }
     return vec2<f32>(uv.x, 0.5 + (uv.y - 0.5) * ta / oa);
 }
 
-fn deck(which: i32, uv: vec2<f32>) -> vec3<f32> {
+fn deck(which: i32, uv_in: vec2<f32>) -> vec3<f32> {
     var d0 = u.a0;
     var d1 = u.a1;
+    var d2 = u.a2;
     if (which == 1) {
         d0 = u.b0;
         d1 = u.b1;
+        d2 = u.b2;
     }
+    // Place the deck: scaled about its own center, then moved (y up is positive).
+    let duv = (uv_in - 0.5 - vec2<f32>(d2.y, -d2.z)) / max(d2.x, 0.001) + 0.5;
+    let contain = d2.w > 0.5;
     var c = vec3<f32>(0.0);
     if (d0.x > 0.5) {
-        c = pattern(i32(d0.y), uv, d0.z, d0.w, u.g.x);
+        c = pattern(i32(d0.y), duv, d0.z, d0.w, u.g.x);
     } else if (d1.w > 0.5) {
+        var tuv: vec2<f32>;
         if (which == 0) {
-            c = textureSampleLevel(tex_a, samp, cover_uv(uv, textureDimensions(tex_a)), 0.0).rgb;
+            tuv = fit_uv(duv, textureDimensions(tex_a), contain);
+            c = textureSampleLevel(tex_a, samp, tuv, 0.0).rgb;
         } else {
-            c = textureSampleLevel(tex_b, samp, cover_uv(uv, textureDimensions(tex_b)), 0.0).rgb;
+            tuv = fit_uv(duv, textureDimensions(tex_b), contain);
+            c = textureSampleLevel(tex_b, samp, tuv, 0.0).rgb;
+        }
+        // Letterbox bars when fitting the whole texture.
+        if (any(tuv < vec2<f32>(0.0)) || any(tuv > vec2<f32>(1.0))) {
+            c = vec3<f32>(0.0);
         }
     }
+    // Outside the deck's box: black, with a 1px soft edge.
+    let px = vec2<f32>(1.0 / 720.0) / max(d2.x, 0.001);
+    let inside = smoothstep(vec2<f32>(0.0), px, duv) * smoothstep(vec2<f32>(0.0), px, 1.0 - duv);
+    c = c * inside.x * inside.y;
     c = hue_rotate(c, d1.y);
     if (d1.z > 0.5) {
         c = 1.0 - c;

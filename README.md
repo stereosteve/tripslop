@@ -20,8 +20,9 @@ cargo run --release -- --preset 6 samples/jellyfish.mp4 samples/crab-nebula.jpg
 This puts the jellyfish on deck A and the Crab Nebula on deck B, starting on the
 *Spiral galaxy* preset. Then try:
 
-* press `2` (Sierpinski) or `3` (Mandala) and pull the crossfader toward B: the dark nebula
-  lets the fractal copies show through the luma key
+* press `2` (Sierpinski) or `3` (Mandala), then **scroll on the preview to shrink the deck**:
+  a small source acts as a seed and the fractal copies grow around it (full-screen
+  bright footage covers the whole loop)
 * press `5` for the RGB time-split, `8` for the melt
 * swap in the other samples, e.g.
   `cargo run --release -- --preset 8 samples/big-buck-bunny.mp4 samples/pillars-of-creation.jpg`
@@ -50,6 +51,8 @@ from NASA/ESA Hubble via Wikimedia Commons. See the source pages for the exact t
   60 frames. There are also echo taps, plus an RGB time-split where green and blue come from
   older frames.
 * **Keyer**: fresh input is luma-keyed (or added, lightened, differenced) over the loop.
+* **Placement**: each deck has a size, an x/y position, and Fill (crop to the frame) or Fit
+  (show the whole image). Set them with the sliders or by dragging and scrolling on the preview.
 * **Decks**: images, looping videos (any format ffmpeg reads, GIFs included), live cameras, or a
   built-in oscillator pattern (bars, rings, plasma, checker, orbiting dot).
 
@@ -65,6 +68,8 @@ from NASA/ESA Hubble via Wikimedia Commons. See the source pages for the exact t
 | ← / → | crossfade |
 | ↑ / ↓ | copy scale (zoom) |
 | S | save a PNG snapshot |
+| G | switch which deck the preview drag/scroll controls |
+| drag / scroll on preview | move / resize that deck (trackpad pinch works too) |
 | F / Esc | performance mode (fullscreen output only) |
 
 Drop files onto a deck panel to load them. If you drop them anywhere else, they go into the
