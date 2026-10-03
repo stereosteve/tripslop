@@ -1,108 +1,126 @@
 # trippy
 
-A two-deck video DJ mixer in Rust that emulates an analog **video-feedback fractal rig**
-(camera pointed at monitors, with mirrors, delay lines, keyers and proc amps) on the GPU.
+A live video mixer (VJ tool) in Rust, in the spirit of Resolume Avenue: a clip grid of layers
+× scenes, per-layer and master effect chains, blend modes, an A/B crossfader, clip loop modes,
+beat-synced automation for every parameter, and recording. Its signature effect emulates an
+analog **video-feedback fractal rig** (a camera pointed at monitors, with delay lines, keyers
+and proc amps) on the GPU.
 
 ```
-cargo run --release -- [deckA.mp4|png] [deckB.mov|jpg]
+cargo run --release -- --demo
 ```
 
-Requires `ffmpeg` on your PATH for video and camera decks (images work without it).
+Requires `ffmpeg` and `ffprobe` on your PATH for video, cameras and recording. Images and
+generators work without them.
 
 ## Demo
 
-Sample clips and images are in `samples/` (run `samples/fetch.sh` to re-download them):
+`--demo` builds a three-layer set from the media in `samples/` (run `samples/fetch.sh` to
+re-download it). **Run it from the repo root**, since the sample paths are relative.
 
-```
-cargo run --release -- --preset 6 samples/jellyfish.mp4 samples/crab-nebula.jpg
-```
+* **Footage** (bottom): jellyfish, Big Buck Bunny, a plasma generator, and a half-speed
+  bouncing jellyfish
+* **Fractal**: small images and a dot generator (the layer is scaled to 42%) going through the
+  Feedback effect's *Sierpinski* preset, Screen-blended
+* **Overlay**: generators through a kaleidoscope, Add-blended at 35%
 
-This puts the jellyfish on deck A and the Crab Nebula on deck B, starting on the
-*Spiral galaxy* preset. Then try:
+Press `1`–`4` to launch scenes. Launches are quantized to the next beat.
 
-* press `2` (Sierpinski) or `3` (Mandala), then **scroll on the preview to shrink the deck**:
-  a small source acts as a seed and the fractal copies grow around it (full-screen
-  bright footage covers the whole loop)
-* press `5` for the RGB time-split, `8` for the melt
-* swap in the other samples, e.g.
-  `cargo run --release -- --preset 8 samples/big-buck-bunny.mp4 samples/pillars-of-creation.jpg`
-
-`--preset N` (1–9) picks the starting preset. Any other arguments are files for deck A and B.
+Any file arguments are loaded into the first layer's cells: `cargo run --release -- a.mp4 b.png`.
 
 Sample credits: *Jellyfish* test clip via test-videos.co.uk (footage from jell.yfish.us);
 *Big Buck Bunny* © Blender Foundation, CC BY 3.0; *Pillars of Creation* (2014) and *Crab Nebula*
 from NASA/ESA Hubble via Wikimedia Commons. See the source pages for the exact terms.
 
-## How it works
+## Concepts
 
-```
- deck A ─┐
-         ├─ mixer ─► input ─┐
- deck B ─┘                  ├─ feedback stage ─► output ─┬─► delay line (64-frame ring buffer)
-     delay line[now - d] ───┘   (N copies, keyer,         └─► output stage ─► screen
-                                 hue/sat/contrast)
-```
+**Grid.** Rows are layers (the top row is drawn on top) and columns are scenes.
+* Click a cell to launch its clip.
+* Click a ▶ column header (or press its number key) to launch a whole scene, like an Ableton
+  scene. Layers with an empty cell in that scene stop.
+* *Launch: next beat / next bar* quantizes launches; pending ones blink amber.
+* Drop files onto a cell (several files fill the cells that follow it), or right-click a cell
+  to load a file, a generator or a camera.
 
-* **Feedback / fractal**: every 1/60 s, *N* scaled and rotated copies of an earlier output
-  frame are composited, like a camera seeing *N* monitors that show its own output. Do that
-  over and over and you get an iterated function system: 3 copies at scale 0.5 make a Sierpinski
-  triangle, and adding rotation and twist gives spirals and mandalas.
-* **Video delay**: the feedback reads from a ring buffer, so the loop can lag behind by up to
-  60 frames. There are also echo taps, plus an RGB time-split where green and blue come from
-  older frames.
-* **Keyer**: fresh input is luma-keyed (or added, lightened, differenced) over the loop.
-* **Placement**: each deck has a size, an x/y position, and Fill (crop to the frame) or Fit
-  (show the whole image). Set them with the sliders or by dragging and scrolling on the preview.
-* **Automation**: every slider has a `~` button. Clicking it attaches a signal generator and
-  opens an editor:
-  * shapes: sine, triangle, saw up/down, square (adjustable width), S&H random, smooth random
-    drift, or a hand-drawn **envelope** (click to add points, drag to move them, right-click to
-    delete)
-  * rate synced to the BPM (1/4 to 128 beats per cycle) or free-running in Hz
-  * depth (a fraction of the slider's range), polarity (± around the slider, + above, − below)
-    and phase
-  * a live plot with a playhead
+**Layers.** Each layer has opacity, a blend mode (Normal, Add, Screen, Multiply, Difference,
+Lighten, Darken, Overlay, Subtract), an A/B crossfader assignment, bypass/solo, a transform
+(position, scale, rotation) and a clip transition time (a crossfade when switching clips).
+It also has its own effect chain. Drag or scroll on the output monitor to move or scale the
+selected layer.
 
-  The slider still sets the center value. Automated sliders show a pink dot for the live value
-  and a band for the sweep range. The **AUTOMATION** panel lists everything that's automated,
-  with on/off and remove buttons. Presets replace the effect automation but keep any automation
-  on the decks and the crossfader.
-* **Decks**: images, looping videos (any format ffmpeg reads, GIFs included), live cameras, or a
-  built-in oscillator pattern (bars, rings, plasma, checker, orbiting dot).
+**Clips.**
+* Loop modes: **Loop**, **Bounce**, **Random** (jumps somewhere new every beat), **Play
+  once** (then the layer goes empty) and **Play once & hold**.
+* Direction: forward, reverse or paused, with scrubbing.
+* Speed, or **BPM sync**, which stretches the clip to N beats.
+* Fit modes: Fill, Fit or Stretch.
+
+On import, each video is transcoded once into in-memory JPEG frames at 1280×720 (the same
+idea as Resolume's DXV codec). That gives instant random access for bounce, reverse and random
+playback. It takes about 100–150 KB per frame, so a 10 s clip at 30 fps is roughly 40 MB of RAM.
+
+**Generators.** Bars, rings, plasma, checker, an orbiting dot, noise and solid color. Each
+has frequency, speed and hue controls.
+
+**Effects** (per layer, plus a master chain on the Composition tab):
+
+| Category | Effects |
+| --- | --- |
+| Feedback | **Feedback / Fractal**: N scaled, rotated copies of the delayed output with a keyer, hue drift and symmetry. It has presets: Tunnel, Sierpinski, Mandala, Slow trails, Spiral galaxy, Hall of mirrors, Melt |
+| Time | Echo trails, RGB time split |
+| Space | Kaleidoscope, Mirror, Transform (zoom/rotate/tile), Wave warp |
+| Color | Color (hue/sat/contrast/brightness/gamma/invert), Luma key, Pixelate / posterize |
+| Stylize | Blur, Edges, CRT, Strobe (beat-synced) |
+
+Effects can be reordered, bypassed and removed. Effects that need history (feedback and the
+delays) each allocate their own 32-frame delay buffer when you add them.
+
+Tip: the feedback rig's fractals need a seed that doesn't cover the whole frame. Scale the
+layer down or use a generator. With a full-frame opaque clip, the input simply covers the loop.
+
+**Automation.** Every parameter has a `~` button that attaches a signal generator:
+* Shapes: sine, triangle, saw up/down, square, sample & hold, smooth random drift, or a
+  hand-drawn envelope.
+* Rate: synced to the BPM or free-running in Hz.
+* Depth, polarity and phase.
+
+The **Composition** tab lists everything that's automated.
 
 ## Recording
 
-Press `R` (or the **⏺ Record** button) to start and stop recording. Frames are captured
-straight from the renderer, so the file has no UI or cursor and doesn't drop frames. It's
-saved as `trippy-<timestamp>.mp4` (H.264, 1280×720, 60 fps) in the directory you launched
-from. Encoding uses the hardware encoder on macOS and falls back to x264 elsewhere. If you
-quit while recording, the file is still finalized.
-
-To record a whole session from launch:
-
-```
-cargo run --release -- --record --preset 6 samples/jellyfish.mp4 samples/crab-nebula.jpg
-```
-
-Recording uses ffmpeg. There's no audio, so add music afterwards in an editor.
+Press `R` (or **⏺ Record**) to start and stop. Frames are captured straight from the
+renderer, so the file has no UI and doesn't drop frames. It's saved as
+`trippy-<timestamp>.mp4` (H.264, 1280×720, 60 fps) in the directory you launched from, using
+the hardware encoder on macOS and x264 elsewhere. The file is finalized even if you quit
+mid-recording. `--record` starts recording at launch. There's no audio.
 
 ## Controls
 
 | Key | Action |
 | --- | --- |
-| 1–9 | presets (Tunnel, Sierpinski, Mandala, Slow echo, Time smear, Spiral, Hall of mirrors, Melt, Clean) |
-| Space | freeze the loop |
-| C | clear the feedback memory |
-| T | tap tempo (beat-synced automation follows it) |
-| Z / X | cut to deck A / B |
-| ← / → | crossfade |
-| ↑ / ↓ | copy scale (zoom) |
-| R | start / stop recording a video |
+| 1–9 | launch scene (column) |
+| Space | play / pause all clips |
+| T | tap tempo |
+| ← / → | crossfader |
+| R | start / stop recording |
 | S | save a PNG snapshot |
-| G | switch which deck the preview drag/scroll controls |
-| drag / scroll on preview | move / resize that deck (trackpad pinch works too) |
+| C | clear all feedback / delay memory |
+| Delete | remove the selected clip |
 | F / Esc | performance mode (fullscreen output only) |
+| drag / scroll on output | move / scale the selected layer |
 
-Drop files onto a deck panel to load them. If you drop them anywhere else, they go into the
-deck that's currently off-air. **Output window** opens a second window you can drag to a
-projector and double-click to make fullscreen.
+**Output window** opens a second window you can drag to a projector and double-click to make
+fullscreen.
+
+## How it works
+
+```
+for each layer (bottom → top):
+    clip(s) ── clip pass: transform, fit, transition ──► layer texture
+    layer   ── effect → effect → … (each with an optional history ring) ──►
+    comp    ── composite: blend mode × opacity × crossfader ──► comp
+comp ── master effects ──► final (master fader) ──► screen / output window / recorder
+```
+
+Everything runs on a fixed 60 Hz clock, so effects, delays and BPM sync behave the same on
+any display. Shaders are validated by `cargo test`.

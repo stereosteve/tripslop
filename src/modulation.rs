@@ -8,6 +8,7 @@ pub struct Clock {
     pub beat: f64,
     /// Seconds elapsed.
     pub time: f64,
+    pub bpm: f32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -101,7 +102,7 @@ pub struct Modulator {
 }
 
 impl Modulator {
-    pub fn new(key: &str) -> Self {
+    pub fn new(seed: u64) -> Self {
         Self {
             enabled: true,
             shape: Shape::Sine,
@@ -112,16 +113,16 @@ impl Modulator {
             width: 0.5,
             // A "pluck": fast attack on the beat, then decay.
             points: vec![[0.0, 0.0], [0.08, 1.0], [0.6, 0.15]],
-            seed: key.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3)),
+            seed,
         }
     }
 
-    pub fn lfo(key: &str, shape: Shape, beats: f32, depth: f32) -> Self {
+    pub fn lfo(seed: u64, shape: Shape, beats: f32, depth: f32) -> Self {
         Self {
             shape,
             rate: Rate::Beats(beats),
             depth,
-            ..Self::new(key)
+            ..Self::new(seed)
         }
     }
 
@@ -221,7 +222,7 @@ mod tests {
 
     #[test]
     fn apply_respects_polarity_and_range() {
-        let mut m = Modulator::new("t");
+        let mut m = Modulator::new(1);
         m.depth = 0.5;
         assert_eq!(m.apply(0.5, 0.0, 1.0, 0.5), 0.5);
         assert_eq!(m.apply(0.5, 0.0, 1.0, 1.0), 0.75);
@@ -234,7 +235,7 @@ mod tests {
     #[test]
     fn shapes_stay_in_unit_range() {
         for shape in Shape::ALL {
-            let mut m = Modulator::new("s");
+            let mut m = Modulator::new(2);
             m.shape = shape;
             for i in 0..1000 {
                 let s = m.signal_at(i as f64 * 0.0137);

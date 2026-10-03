@@ -1,11 +1,11 @@
-//! Media sources for a deck: still images, video files and live cameras.
+//! Still images and live capture devices. (Video files live in `video.rs`.)
 //!
-//! Video decoding is delegated to an `ffmpeg` subprocess that writes raw RGBA frames
-//! to stdout. That keeps the build free of native ffmpeg bindings, and gives us every
-//! codec / container / capture device ffmpeg knows about.
+//! Cameras are read through an `ffmpeg` subprocess that writes raw RGBA frames to stdout.
+//! That keeps the build free of native ffmpeg bindings, and gives us every capture device
+//! ffmpeg knows about.
 
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -16,56 +16,6 @@ pub struct Frame {
     pub width: u32,
     pub height: u32,
     pub rgba: Vec<u8>,
-}
-
-pub enum Source {
-    Image { name: String, frame: Frame, uploaded: bool },
-    Stream(Stream),
-}
-
-impl Source {
-    pub fn name(&self) -> &str {
-        match self {
-            Source::Image { name, .. } => name,
-            Source::Stream(s) => &s.name,
-        }
-    }
-
-    /// Returns a new frame if one is available since the last call.
-    pub fn poll(&mut self) -> Option<FrameRef<'_>> {
-        match self {
-            Source::Image { frame, uploaded, .. } => {
-                if *uploaded {
-                    None
-                } else {
-                    *uploaded = true;
-                    Some(FrameRef::Borrowed(frame))
-                }
-            }
-            Source::Stream(s) => s.poll(),
-        }
-    }
-
-    pub fn error(&self) -> Option<String> {
-        match self {
-            Source::Image { .. } => None,
-            Source::Stream(s) => s.shared.error.lock().unwrap().clone(),
-        }
-    }
-}
-
-pub enum FrameRef<'a> {
-    Borrowed(&'a Frame),
-    Owned(Frame),
-}
-
-impl FrameRef<'_> {
-    pub fn get(&self) -> &Frame {
-        match self {
-            FrameRef::Borrowed(f) => f,
-            FrameRef::Owned(f) => f,
-        }
-    }
 }
 
 const VIDEO_EXTS: &[&str] = &[
@@ -79,17 +29,8 @@ pub fn is_video(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Open any file: videos (and animated GIFs) go through ffmpeg, everything else
-/// is decoded as a still image.
-pub fn open_file(path: &Path, width: u32, height: u32) -> Result<Source, String> {
-    if is_video(path) {
-        Stream::video(path.to_path_buf(), width, height).map(Source::Stream)
-    } else {
-        load_image(path)
-    }
-}
-
-fn load_image(path: &Path) -> Result<Source, String> {
+/// Decode a still image (premultiplied later, on the GPU).
+pub fn load_image(path: &Path) -> Result<Frame, String> {
     let img = image::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     // Keep textures within sane GPU limits.
     let img = if img.width() > 4096 || img.height() > 4096 {
@@ -98,18 +39,14 @@ fn load_image(path: &Path) -> Result<Source, String> {
         img
     };
     let rgba = img.to_rgba8();
-    Ok(Source::Image {
-        name: file_name(path),
-        frame: Frame {
-            width: rgba.width(),
-            height: rgba.height(),
-            rgba: rgba.into_raw(),
-        },
-        uploaded: false,
+    Ok(Frame {
+        width: rgba.width(),
+        height: rgba.height(),
+        rgba: rgba.into_raw(),
     })
 }
 
-fn file_name(path: &Path) -> String {
+pub fn file_name(path: &Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string())
@@ -122,9 +59,8 @@ struct Shared {
     error: Mutex<Option<String>>,
 }
 
-/// A live ffmpeg-decoded stream (video file on loop, or capture device).
+/// A live ffmpeg-decoded capture device (webcam, capture card, or on macOS a screen).
 pub struct Stream {
-    pub name: String,
     width: u32,
     height: u32,
     shared: Arc<Shared>,
@@ -134,21 +70,6 @@ pub struct Stream {
 }
 
 impl Stream {
-    fn video(path: PathBuf, width: u32, height: u32) -> Result<Self, String> {
-        if !path.exists() {
-            return Err(format!("no such file: {}", path.display()));
-        }
-        let mut args: Vec<String> = vec![
-            "-stream_loop".into(),
-            "-1".into(),
-            "-re".into(),
-            "-i".into(),
-            path.to_string_lossy().into_owned(),
-        ];
-        args.extend(output_args(width, height));
-        Self::spawn(file_name(&path), args, width, height)
-    }
-
     /// Open a capture device by index (webcam, capture card, or on macOS a screen).
     pub fn camera(index: u32, width: u32, height: u32) -> Result<Self, String> {
         let mut args: Vec<String> = Vec::new();
@@ -166,10 +87,10 @@ impl Stream {
             args.push(format!("/dev/video{index}"));
         }
         args.extend(output_args(width, height));
-        Self::spawn(format!("Camera {index}"), args, width, height)
+        Self::spawn(args, width, height)
     }
 
-    fn spawn(name: String, args: Vec<String>, width: u32, height: u32) -> Result<Self, String> {
+    fn spawn(args: Vec<String>, width: u32, height: u32) -> Result<Self, String> {
         let mut child = Command::new("ffmpeg")
             .args(["-hide_banner", "-loglevel", "error", "-nostdin"])
             .args(&args)
@@ -217,7 +138,6 @@ impl Stream {
         });
 
         Ok(Self {
-            name,
             width,
             height,
             shared,
@@ -227,18 +147,23 @@ impl Stream {
         })
     }
 
-    fn poll(&mut self) -> Option<FrameRef<'_>> {
+    pub fn error(&self) -> Option<String> {
+        self.shared.error.lock().unwrap().clone()
+    }
+
+    /// Returns a new frame if one arrived since the last call.
+    pub fn poll(&mut self) -> Option<Frame> {
         let n = self.shared.frames.load(Ordering::Acquire);
         if n == self.seen {
             return None;
         }
         self.seen = n;
         let rgba = self.shared.latest.lock().unwrap().take()?;
-        Some(FrameRef::Owned(Frame {
+        Some(Frame {
             width: self.width,
             height: self.height,
             rgba,
-        }))
+        })
     }
 }
 

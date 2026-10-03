@@ -63,3 +63,25 @@ fn rot2(a: f32) -> mat2x2<f32> {
 fn palette(t: f32) -> vec3<f32> {
     return 0.5 + 0.5 * cos(TAU * (vec3<f32>(t) + vec3<f32>(0.0, 0.33, 0.67)));
 }
+
+// Premultiplied <-> straight alpha.
+fn unpremul(c: vec4<f32>) -> vec4<f32> {
+    if (c.a <= 0.0001) {
+        return vec4<f32>(0.0);
+    }
+    return vec4<f32>(c.rgb / c.a, c.a);
+}
+
+fn premul(c: vec4<f32>) -> vec4<f32> {
+    return vec4<f32>(c.rgb * c.a, c.a);
+}
+
+fn max3(c: vec3<f32>) -> f32 {
+    return max(c.r, max(c.g, c.b));
+}
+
+// Mirror-repeat texture coordinates into [0, 1].
+fn mirror_uv(q: vec2<f32>) -> vec2<f32> {
+    let t = fract(q * 0.5) * 2.0;
+    return 1.0 - abs(t - 1.0);
+}

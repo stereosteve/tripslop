@@ -3167,6 +3167,7 @@ dependencies = [
  "bytemuck",
  "eframe",
  "image",
+ "naga",
  "rfd",
 ]
 

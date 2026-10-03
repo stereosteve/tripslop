@@ -1,42 +1,47 @@
-//! trippy — a two-deck video DJ mixer with an emulated analog video-feedback rig.
+//! trippy — a live video mixer: layered clip grid with scenes, per-layer effects and an
+//! emulated analog video-feedback rig.
 
-mod automation_ui;
-mod engine;
+mod clip;
+mod composition;
+mod effects;
 mod modulation;
-mod params;
+mod param;
 mod recorder;
+mod renderer;
 mod source;
+mod ui;
+mod video;
 
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, Key, Rect, RichText, pos2};
 
-use automation_ui::AutoCtx;
-use engine::{Engine, HEIGHT, WIDTH};
-use modulation::Clock;
+use clip::{Clip, LoopMode};
+use composition::{Blend, Composition, Launch, Quantize};
+use effects::{Effect, EffectKind, apply_feedback_preset};
+use modulation::{Clock, Shape};
 use recorder::{Finishing, Recorder};
-use params::*;
-use source::{Source, Stream};
+use renderer::{HEIGHT, Renderer, WIDTH};
+use ui::grid::{GridAction, GridView};
+
+const TICK: f64 = 1.0 / 60.0;
 
 fn main() -> eframe::Result {
     let mut files: Vec<PathBuf> = Vec::new();
-    let mut preset = 1;
     let mut record = false;
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        if arg == "--record" {
-            record = true;
-        } else if arg == "--preset" {
-            preset = args.next().and_then(|v| v.parse().ok()).filter(|n| (1..=9).contains(n)).unwrap_or(1);
-        } else {
-            files.push(PathBuf::from(arg));
+    let mut demo = false;
+    for arg in std::env::args().skip(1) {
+        match arg.as_str() {
+            "--record" => record = true,
+            "--demo" => demo = true,
+            _ => files.push(PathBuf::from(arg)),
         }
     }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("trippy — video feedback DJ")
-            .with_inner_size([1600.0, 900.0])
+            .with_title("trippy")
+            .with_inner_size([1680.0, 1000.0])
             .with_drag_and_drop(true),
         ..Default::default()
     };
@@ -44,11 +49,15 @@ fn main() -> eframe::Result {
         "trippy",
         options,
         Box::new(move |cc| {
-            let rs = cc
-                .wgpu_render_state
-                .as_ref()
-                .ok_or("trippy needs the wgpu renderer")?;
-            let mut app = App::new(Engine::new(rs), files, preset - 1);
+            let rs = cc.wgpu_render_state.as_ref().ok_or("trippy needs the wgpu renderer")?;
+            cc.egui_ctx.set_theme(egui::ThemePreference::Dark);
+            let mut app = App::new(Renderer::new(rs));
+            if demo {
+                app.load_demo();
+            }
+            for (col, f) in files.into_iter().enumerate() {
+                app.load_file(0, col, f);
+            }
             if record {
                 app.toggle_recording();
             }
@@ -57,67 +66,51 @@ fn main() -> eframe::Result {
     )
 }
 
-struct Deck {
-    source: Option<Source>,
-    camera_index: u32,
-    /// Screen rect of this deck's controls, for drag-and-drop targeting.
-    rect: Rect,
-}
-
-impl Deck {
-    fn new() -> Self {
-        Self {
-            source: None,
-            camera_index: 0,
-            rect: Rect::NOTHING,
-        }
-    }
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum Tab {
+    Layer,
+    Composition,
 }
 
 struct App {
-    engine: Engine,
-    params: Params,
-    decks: [Deck; 2],
+    renderer: Renderer,
+    comp: Composition,
+    grid: GridView,
+    tab: Tab,
     sim_time: f64,
-    last_frame: Instant,
     beat: f64,
-    /// Automated value of every slider in the last frame, indexed like `PARAMS`.
-    live: Vec<f32>,
+    last_frame: Instant,
     taps: Vec<Instant>,
-    freeze: bool,
     perform: bool,
     show_output: bool,
     status: String,
     fps: f32,
-    preset: Option<usize>,
-    /// Which deck dragging / scrolling on the preview moves and resizes.
-    grab_deck: usize,
     frame_count: u64,
     recorder: Option<Recorder>,
-    /// Recordings whose encoder is still finalizing the file.
     finishing: Vec<Finishing>,
     /// Testing hook: `TRIPPY_SNAPSHOT=<frames>:<out.png>` saves a frame and quits.
     auto_snapshot: Option<(u64, PathBuf)>,
 }
 
 impl App {
-    fn new(engine: Engine, files: Vec<PathBuf>, preset: usize) -> Self {
-        let mut app = Self {
-            engine,
-            params: Params::default(),
-            decks: [Deck::new(), Deck::new()],
+    fn new(renderer: Renderer) -> Self {
+        Self {
+            renderer,
+            comp: Composition::new(3, 8),
+            grid: GridView {
+                selected_layer: 0,
+                selected_clip: None,
+                cells: Vec::new(),
+            },
+            tab: Tab::Layer,
             sim_time: 0.0,
-            last_frame: Instant::now(),
             beat: 0.0,
-            live: Vec::new(),
+            last_frame: Instant::now(),
             taps: Vec::new(),
-            freeze: false,
             perform: false,
             show_output: false,
-            status: "Drop images/videos on a deck, or press 1-9 for presets. F = performance mode.".into(),
+            status: "Drop media onto the grid, or right-click a cell. Number keys launch scenes.".into(),
             fps: 60.0,
-            preset: Some(0),
-            grab_deck: 0,
             frame_count: 0,
             recorder: None,
             finishing: Vec::new(),
@@ -125,46 +118,130 @@ impl App {
                 let (n, p) = v.split_once(':')?;
                 Some((n.parse().ok()?, PathBuf::from(p)))
             }),
-        };
-        apply_preset(&mut app.params, preset);
-        app.preset = Some(preset);
-        for (i, f) in files.into_iter().take(2).enumerate() {
-            app.load_file(i, f);
         }
-        app
     }
 
-    fn deck_params(&mut self, i: usize) -> &mut DeckParams {
-        if i == 0 { &mut self.params.deck_a } else { &mut self.params.deck_b }
+    fn clock(&self) -> Clock {
+        Clock {
+            beat: self.beat,
+            time: self.sim_time,
+            bpm: self.comp.bpm,
+        }
     }
 
-    fn load_file(&mut self, deck: usize, path: PathBuf) {
-        match source::open_file(&path, WIDTH, HEIGHT) {
-            Ok(src) => {
-                self.status = format!("Deck {}: loaded {}", deck_name(deck), src.name());
-                self.decks[deck].source = Some(src);
-                self.deck_params(deck).use_pattern = false;
+    fn load_file(&mut self, layer: usize, col: usize, path: PathBuf) {
+        match Clip::open(&path, WIDTH, HEIGHT) {
+            Ok(c) => {
+                self.status = format!("Loaded {} into {} / column {}", c.name, self.comp.layers[layer].name, col + 1);
+                self.comp.set_clip(layer, col, c);
+                self.grid.selected_clip = Some((layer, col));
             }
             Err(e) => self.status = format!("Error: {e}"),
         }
     }
 
-    fn open_camera(&mut self, deck: usize) {
-        match Stream::camera(self.decks[deck].camera_index, WIDTH, HEIGHT) {
-            Ok(s) => {
-                self.decks[deck].source = Some(Source::Stream(s));
-                self.deck_params(deck).use_pattern = false;
-                self.status = format!("Deck {}: camera opened", deck_name(deck));
+    /// Example set built from `samples/`.
+    fn load_demo(&mut self) {
+        let s = |f: &str| PathBuf::from("samples").join(f);
+        // Layer 1: full-frame footage.
+        self.load_file(0, 0, s("jellyfish.mp4"));
+        self.load_file(0, 1, s("big-buck-bunny.mp4"));
+        self.comp.set_clip(0, 2, Clip::generator(2));
+        self.load_file(0, 3, s("jellyfish.mp4"));
+        if let Some(c) = self.comp.clip_mut(0, 3) {
+            c.loop_mode = LoopMode::Bounce;
+            c.speed.set(0.5);
+        }
+        // Layer 2: small seeds feeding a fractal feedback rig.
+        self.load_file(1, 0, s("crab-nebula.jpg"));
+        self.comp.set_clip(1, 1, Clip::generator(4));
+        self.load_file(1, 2, s("pillars-of-creation.jpg"));
+        self.load_file(1, 3, s("crab-nebula.jpg"));
+        for col in [0, 2, 3] {
+            if let Some(c) = self.comp.clip_mut(1, col) {
+                c.fit = clip::Fit::Contain;
             }
-            Err(e) => self.status = format!("Error: {e}"),
+        }
+        let l2 = &mut self.comp.layers[1];
+        l2.name = "Fractal".into();
+        l2.scale.set(0.42);
+        l2.blend = Blend::Screen;
+        let mut fb = Effect::new(EffectKind::Feedback);
+        apply_feedback_preset(&mut fb, 1);
+        l2.effects.push(fb);
+        // Layer 3: generator overlay through a kaleidoscope.
+        self.comp.set_clip(2, 0, Clip::generator(1));
+        self.comp.set_clip(2, 2, Clip::generator(0));
+        self.comp.set_clip(2, 3, Clip::generator(5));
+        let l3 = &mut self.comp.layers[2];
+        l3.name = "Overlay".into();
+        l3.blend = Blend::Add;
+        l3.opacity.set(0.35);
+        let mut k = Effect::new(EffectKind::Kaleidoscope);
+        k.params[1] = k.params[1].clone().lfo(Shape::Triangle, 32.0, 0.25);
+        l3.effects.push(k);
+        self.comp.layers[0].name = "Footage".into();
+        for l in &mut self.comp.layers {
+            l.launch(0);
+        }
+        self.comp.active_column = Some(0);
+        self.comp.quantize = Quantize::Beat;
+        self.grid.selected_layer = 1;
+        self.grid.selected_clip = Some((1, 0));
+        self.status = "Demo loaded: number keys 1–4 launch scenes.".into();
+    }
+
+    fn handle_grid(&mut self, actions: Vec<GridAction>) {
+        for a in actions {
+            match a {
+                GridAction::Launch(l) => self.comp.launch(l),
+                GridAction::Select { layer, col } => {
+                    self.grid.selected_layer = layer;
+                    self.tab = Tab::Layer;
+                    if let Some(c) = col {
+                        self.grid.selected_clip = Some((layer, c));
+                    }
+                }
+                GridAction::LoadFile { layer, col } => {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter(
+                            "media",
+                            &["png", "jpg", "jpeg", "gif", "webp", "bmp", "mp4", "mov", "m4v", "mkv", "webm", "avi"],
+                        )
+                        .pick_file()
+                    {
+                        self.load_file(layer, col, path);
+                    }
+                }
+                GridAction::Camera { layer, col, index } => match Clip::camera(index, WIDTH, HEIGHT) {
+                    Ok(c) => {
+                        self.comp.set_clip(layer, col, c);
+                        self.grid.selected_clip = Some((layer, col));
+                    }
+                    Err(e) => self.status = format!("Error: {e}"),
+                },
+                GridAction::Generator { layer, col, pattern } => {
+                    self.comp.set_clip(layer, col, Clip::generator(pattern));
+                    self.grid.selected_clip = Some((layer, col));
+                }
+                GridAction::Remove { layer, col } => self.comp.layers[layer].remove_clip(col),
+                GridAction::Clear(layer) => self.comp.layers[layer].clear(),
+                GridAction::AddLayer => self.comp.add_layer(),
+                GridAction::AddColumn => self.comp.add_column(),
+                GridAction::RemoveLayer(i) => {
+                    if self.comp.layers.len() > 1 {
+                        self.comp.layers.remove(i);
+                        self.grid.selected_layer = self.grid.selected_layer.min(self.comp.layers.len() - 1);
+                        self.grid.selected_clip = None;
+                    }
+                }
+            }
         }
     }
 
     fn tap(&mut self) {
         let now = Instant::now();
-        if let Some(last) = self.taps.last()
-            && now.duration_since(*last).as_secs_f32() > 2.0
-        {
+        if self.taps.last().is_some_and(|l| now.duration_since(*l).as_secs_f32() > 2.0) {
             self.taps.clear();
         }
         self.taps.push(now);
@@ -173,41 +250,38 @@ impl App {
         }
         if self.taps.len() >= 2 {
             let span = now.duration_since(self.taps[0]).as_secs_f32();
-            let bpm = 60.0 * (self.taps.len() - 1) as f32 / span;
-            self.params.bpm = bpm.clamp(30.0, 300.0);
-            // Re-align phase to the tap so LFOs land on the beat.
+            self.comp.bpm = (60.0 * (self.taps.len() - 1) as f32 / span).clamp(30.0, 300.0);
             self.beat = self.beat.round();
         }
     }
 
     fn handle_input(&mut self, ctx: &egui::Context) {
-        // Drag and drop: onto a deck's controls, else into the deck that is *not* live.
+        // Drop files onto a cell (several fill the following cells); elsewhere they go into
+        // the selected layer's first free cells.
         let (dropped, pointer) = ctx.input(|i| (i.raw.dropped_files.clone(), i.pointer.hover_pos()));
-        for (n, f) in dropped.iter().enumerate() {
-            let target = match pointer {
-                Some(p) if self.decks[0].rect.contains(p) => 0,
-                Some(p) if self.decks[1].rect.contains(p) => 1,
-                _ if dropped.len() > 1 => n.min(1),
-                _ => {
-                    if self.params.crossfade >= 0.5 { 0 } else { 1 }
-                }
-            };
-            self.load_file(target, f.path().to_path_buf());
+        if !dropped.is_empty() {
+            let target = pointer.and_then(|p| self.grid.cells.iter().find(|(_, r)| r.contains(p)).map(|(k, _)| *k));
+            let (layer, mut col) = target.unwrap_or_else(|| {
+                let l = self.grid.selected_layer;
+                let free = self.comp.layers[l].clips.iter().position(|c| c.is_none()).unwrap_or(self.comp.columns);
+                (l, free)
+            });
+            for f in dropped {
+                self.load_file(layer, col, f.path().to_path_buf());
+                col += 1;
+            }
         }
 
         if ctx.egui_wants_keyboard_input() {
             return;
         }
-        let keys = [
-            Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9,
-        ];
-        for (i, k) in keys.iter().enumerate() {
-            if ctx.input(|inp| inp.key_pressed(*k)) {
-                apply_preset(&mut self.params, i);
-                self.preset = Some(i);
+        let pressed = |k: Key| ctx.input(|i| i.key_pressed(k));
+        let scene_keys = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9];
+        for (i, k) in scene_keys.iter().enumerate() {
+            if pressed(*k) && i < self.comp.columns {
+                self.comp.launch(Launch::Column(i));
             }
         }
-        let pressed = |k: Key| ctx.input(|i| i.key_pressed(k));
         if pressed(Key::F) {
             self.perform = !self.perform;
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.perform));
@@ -217,16 +291,13 @@ impl App {
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
         }
         if pressed(Key::Space) {
-            self.freeze = !self.freeze;
+            self.comp.playing = !self.comp.playing;
         }
         if pressed(Key::T) {
             self.tap();
         }
         if pressed(Key::C) {
-            self.engine.clear();
-        }
-        if pressed(Key::G) {
-            self.grab_deck = 1 - self.grab_deck;
+            self.renderer.clear_history();
         }
         if pressed(Key::R) {
             self.toggle_recording();
@@ -234,42 +305,40 @@ impl App {
         if pressed(Key::S) {
             self.save_snapshot(None);
         }
-        if pressed(Key::Z) {
-            self.params.crossfade = 0.0;
+        if (pressed(Key::Delete) || pressed(Key::Backspace))
+            && let Some((l, c)) = self.grid.selected_clip
+        {
+            self.comp.layers[l].remove_clip(c);
         }
-        if pressed(Key::X) {
-            self.params.crossfade = 1.0;
-        }
-        let held = |k: Key| ctx.input(|i| i.key_down(k));
         let dt = ctx.input(|i| i.stable_dt).min(0.1);
+        let held = |k: Key| ctx.input(|i| i.key_down(k));
+        let xf = &mut self.comp.crossfader;
         if held(Key::ArrowLeft) {
-            self.params.crossfade = (self.params.crossfade - dt).max(0.0);
+            xf.set(xf.value - dt);
         }
         if held(Key::ArrowRight) {
-            self.params.crossfade = (self.params.crossfade + dt).min(1.0);
+            xf.set(xf.value + dt);
         }
-        if held(Key::ArrowUp) {
-            self.params.fx.zoom = (self.params.fx.zoom + dt * 0.1).min(2.0);
-        }
-        if held(Key::ArrowDown) {
-            self.params.fx.zoom = (self.params.fx.zoom - dt * 0.1).max(0.05);
-        }
+    }
+
+    fn save_snapshot(&mut self, path: Option<PathBuf>) {
+        let path = path.unwrap_or_else(|| PathBuf::from(format!("trippy-{}.png", unix_time())));
+        self.status = match self.renderer.snapshot().and_then(|img| img.save(&path).map_err(|e| e.to_string())) {
+            Ok(()) => format!("Saved {}", path.display()),
+            Err(e) => format!("Snapshot failed: {e}"),
+        };
     }
 
     fn toggle_recording(&mut self) {
         if let Some(rec) = self.recorder.take() {
-            let (device, _, _) = self.engine.output();
+            let (device, _, _) = self.renderer.output();
             let fin = rec.stop(device);
             self.status = format!("Finishing {} …", fin.path.display());
             self.finishing.push(fin);
             return;
         }
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let path = std::env::current_dir().unwrap_or_default().join(format!("trippy-{ts}.mp4"));
-        let (device, _, _) = self.engine.output();
+        let path = std::env::current_dir().unwrap_or_default().join(format!("trippy-{}.mp4", unix_time()));
+        let (device, _, _) = self.renderer.output();
         match Recorder::start(device, path) {
             Ok(rec) => {
                 self.status = format!("Recording to {} ({})", rec.path.display(), rec.encoder);
@@ -281,7 +350,7 @@ impl App {
 
     fn capture_frame(&mut self) {
         let Some(rec) = self.recorder.as_mut() else { return };
-        let (device, queue, tex) = self.engine.output();
+        let (device, queue, tex) = self.renderer.output();
         if let Err(e) = rec.capture(device, queue, tex) {
             self.status = format!("Recording stopped: {e}");
             if let Some(rec) = self.recorder.take() {
@@ -290,123 +359,104 @@ impl App {
         }
     }
 
-    /// Report recordings whose file has been finalized.
     fn poll_finished_recordings(&mut self) {
         let (done, pending): (Vec<_>, Vec<_>) = self.finishing.drain(..).partition(|f| f.is_done());
         self.finishing = pending;
         for f in done {
             self.status = match f.join() {
-                Ok((path, frames)) => format!(
-                    "Saved {} ({:.1}s)",
-                    path.display(),
-                    frames as f64 / recorder::FPS as f64
-                ),
+                Ok((path, frames)) => format!("Saved {} ({:.1}s)", path.display(), frames as f64 / recorder::FPS as f64),
                 Err(e) => format!("Recording failed: {e}"),
             };
         }
     }
 
-    fn clock(&self) -> Clock {
-        Clock {
-            beat: self.beat,
-            time: self.sim_time,
-        }
-    }
-
-    fn save_snapshot(&mut self, path: Option<PathBuf>) {
-        let path = path.unwrap_or_else(|| {
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            PathBuf::from(format!("trippy-{ts}.png"))
-        });
-        self.status = match self.engine.snapshot().and_then(|img| img.save(&path).map_err(|e| e.to_string())) {
-            Ok(()) => format!("Saved {}", path.display()),
-            Err(e) => format!("Snapshot failed: {e}"),
-        };
-    }
-
-    /// Advance the feedback loop on a fixed 60Hz clock, so the trip looks the same on a
-    /// 60Hz, 120Hz or unthrottled display and delay times are real-time frames.
+    /// Advance on a fixed 60Hz clock so effects and delays behave the same on any display.
     fn render_frame(&mut self) {
-        const TICK: f64 = 1.0 / 60.0;
         let now = Instant::now();
         let dt = now.duration_since(self.last_frame).as_secs_f64();
         if dt < TICK {
             return;
         }
         let ticks = ((dt / TICK) as u32).min(3);
-        // Carry the remainder, but drop time we couldn't keep up with.
-        self.last_frame = if dt > TICK * 4.0 { now } else { self.last_frame + std::time::Duration::from_secs_f64(TICK * ticks as f64) };
+        self.last_frame = if dt > TICK * 4.0 { now } else { self.last_frame + Duration::from_secs_f64(TICK * ticks as f64) };
         self.fps = self.fps * 0.95 + (1.0 / dt as f32) * 0.05;
         for _ in 0..ticks {
-            self.beat += TICK * self.params.bpm as f64 / 60.0;
+            let prev_beat = self.beat;
+            self.beat += TICK * self.comp.bpm as f64 / 60.0;
             self.sim_time += TICK;
             self.frame_count += 1;
-            let mut p = self.params.modulated(self.clock());
-            self.live = PARAMS.iter().map(|d| d.get(&mut p)).collect();
-            let [a, b] = &mut self.decks;
-            self.engine
-                .render(&p, self.sim_time as f32, self.freeze, a.source.as_mut(), b.source.as_mut());
+            let clock = self.clock();
+            self.comp.tick(TICK, prev_beat, clock);
+            self.renderer.render(&mut self.comp, clock);
             self.capture_frame();
+        }
+    }
+
+    /// Create grid thumbnails for clips that have a first frame.
+    fn make_thumbnails(&mut self, ctx: &egui::Context) {
+        for l in &mut self.comp.layers {
+            for c in l.clips.iter_mut().flatten() {
+                if c.thumbnail.is_some() {
+                    continue;
+                }
+                let img = match &c.media {
+                    clip::Media::Video(v) => v.thumbnail(160, 90),
+                    clip::Media::Image { frame, .. } => image::RgbaImage::from_raw(frame.width, frame.height, frame.rgba.clone())
+                        .map(|i| image::DynamicImage::ImageRgba8(i).thumbnail_exact(160, 90).to_rgba8()),
+                    _ => None,
+                };
+                if let Some(img) = img {
+                    let ci = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
+                    c.thumbnail = Some(ctx.load_texture(format!("thumb-{}", c.id), ci, egui::TextureOptions::LINEAR));
+                }
+            }
         }
     }
 
     // ------------------------------------------------------------------ UI
 
-    /// Drag on the preview to move the grabbed deck, scroll / pinch to resize it.
-    fn preview_interaction(&mut self, ui: &mut egui::Ui, resp: &egui::Response, rect: Rect) {
-        let i = self.grab_deck;
-        let d = self.deck_params(i);
-        if resp.dragged() {
-            let delta = resp.drag_delta();
-            d.pos_x += delta.x / rect.width();
-            d.pos_y -= delta.y / rect.height();
-        }
-        if resp.hovered() {
-            let (scroll, zoom) = ui.input(|inp| (inp.smooth_scroll_delta.y, inp.zoom_delta()));
-            if scroll != 0.0 || zoom != 1.0 {
-                d.scale = (d.scale * (scroll * 0.004).exp() * zoom).clamp(0.05, 3.0);
-            }
-            // Outline the grabbed deck's box and show a hint.
-            let center = rect.center() + egui::vec2(d.pos_x * rect.width(), -d.pos_y * rect.height());
-            let deck_rect = Rect::from_center_size(center, rect.size() * d.scale);
-            let color = deck_color(i);
-            let painter = ui.painter_at(rect);
-            painter.rect_stroke(deck_rect, 0.0, egui::Stroke::new(1.5, color), egui::StrokeKind::Middle);
-            painter.text(
-                rect.left_top() + egui::vec2(8.0, 8.0),
-                egui::Align2::LEFT_TOP,
-                format!("Deck {}: drag = move, scroll = size  (G switches deck)", deck_name(i)),
-                egui::FontId::proportional(13.0),
-                color,
-            );
-        }
-    }
-
-    fn top_bar(&mut self, ui: &mut egui::Ui) {
+    fn transport_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("trippy").strong().color(Color32::from_rgb(255, 120, 220)));
+            ui.label(RichText::new("trippy").strong().color(ui::widgets::ACCENT));
             ui.separator();
+            let play = if self.comp.playing { "⏸" } else { "▶" };
+            if ui.button(play).on_hover_text("Play / pause all clips (Space)").clicked() {
+                self.comp.playing = !self.comp.playing;
+            }
             ui.label("BPM");
-            ui.add(egui::DragValue::new(&mut self.params.bpm).range(30.0..=300.0).speed(0.5).max_decimals(1));
+            ui.add(egui::DragValue::new(&mut self.comp.bpm).range(30.0..=300.0).speed(0.5).max_decimals(1));
+            if ui.small_button("÷2").clicked() {
+                self.comp.bpm = (self.comp.bpm / 2.0).max(30.0);
+            }
+            if ui.small_button("×2").clicked() {
+                self.comp.bpm = (self.comp.bpm * 2.0).min(300.0);
+            }
             if ui.button("Tap (T)").clicked() {
                 self.tap();
             }
-            // Beat light.
-            let (r, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
-            let amber = Color32::from_rgb(255, 200, 0);
-            if self.beat.fract() < 0.15 {
-                ui.painter().circle_filled(r.center(), 5.0, amber);
-            } else {
-                ui.painter().circle_stroke(r.center(), 5.0, egui::Stroke::new(1.0, amber));
+            if ui.button("Resync").on_hover_text("Make now beat 1").clicked() {
+                self.beat = 0.0;
             }
+            // Beat lights: 4 per bar.
+            let (r, _) = ui.allocate_exact_size(egui::vec2(52.0, 12.0), egui::Sense::hover());
+            let beat_in_bar = (self.beat.floor() as i64).rem_euclid(4) as usize;
+            for i in 0..4 {
+                let c = r.left_center() + egui::vec2(6.0 + i as f32 * 13.0, 0.0);
+                let amber = Color32::from_rgb(255, 190, 40);
+                if i == beat_in_bar {
+                    ui.painter().circle_filled(c, 5.0, amber);
+                } else {
+                    ui.painter().circle_stroke(c, 5.0, egui::Stroke::new(1.0, amber.gamma_multiply(0.6)));
+                }
+            }
+            egui::ComboBox::from_id_salt("quantize bar")
+                .selected_text(self.comp.quantize.name())
+                .show_ui(ui, |ui| {
+                    for q in Quantize::ALL {
+                        ui.selectable_value(&mut self.comp.quantize, q, q.name());
+                    }
+                });
             ui.separator();
-            ui.toggle_value(&mut self.freeze, "❄ Freeze (Space)");
-            if ui.button("Clear (C)").clicked() {
-                self.engine.clear();
-            }
             let rec_label = match &self.recorder {
                 Some(r) => {
                     let secs = r.frames / recorder::FPS as u64;
@@ -421,21 +471,16 @@ impl App {
             if ui.add(rec_btn).clicked() {
                 self.toggle_recording();
             }
+            if ui.button("Snapshot (S)").clicked() {
+                self.save_snapshot(None);
+            }
             ui.toggle_value(&mut self.show_output, "🖵 Output window");
-            ui.label("Grab:");
-            ui.selectable_value(&mut self.grab_deck, 0, "A");
-            ui.selectable_value(&mut self.grab_deck, 1, "B");
             if ui.button("Perform (F)").clicked() {
                 self.perform = true;
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
             }
-            ui.separator();
-            ui.label("Presets:");
-            for (i, name) in PRESET_NAMES.iter().enumerate() {
-                if ui.selectable_label(self.preset == Some(i), *name).clicked() {
-                    apply_preset(&mut self.params, i);
-                    self.preset = Some(i);
-                }
+            if ui.button("Clear feedback (C)").clicked() {
+                self.renderer.clear_history();
             }
         });
         ui.horizontal(|ui| {
@@ -446,182 +491,64 @@ impl App {
         });
     }
 
-    fn deck_ui(&mut self, ui: &mut egui::Ui, i: usize) {
-        let color = deck_color(i);
-        let resp = egui::Frame::group(ui.style()).show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.label(RichText::new(format!("DECK {}", deck_name(i))).strong().size(16.0).color(color));
-            let src_name = self.decks[i].source.as_ref().map(|s| s.name().to_string());
-            let err = self.decks[i].source.as_ref().and_then(|s| s.error());
-            ui.label(match &src_name {
-                Some(n) => format!("▶ {n}"),
-                None => "(no media — drop a file here)".into(),
-            });
-            if let Some(e) = err {
-                ui.colored_label(Color32::RED, e);
+    /// Output monitor; drag / scroll moves and scales the selected layer.
+    fn monitor(&mut self, ui: &mut egui::Ui) {
+        let (resp, rect) = paint_output(ui, self.renderer.display_id);
+        let Some(layer) = self.comp.layers.get_mut(self.grid.selected_layer) else { return };
+        if resp.dragged() {
+            let d = resp.drag_delta();
+            layer.pos_x.set(layer.pos_x.value + d.x / rect.width());
+            layer.pos_y.set(layer.pos_y.value - d.y / rect.height());
+        }
+        if resp.hovered() {
+            let (scroll, zoom) = ui.input(|i| (i.smooth_scroll_delta.y, i.zoom_delta()));
+            if scroll != 0.0 || zoom != 1.0 {
+                layer.scale.set(layer.scale.value * (scroll * 0.004).exp() * zoom);
             }
-            ui.horizontal(|ui| {
-                if ui.button("Open…").clicked()
-                    && let Some(path) = rfd::FileDialog::new()
-                        .add_filter(
-                            "media",
-                            &["png", "jpg", "jpeg", "gif", "webp", "bmp", "mp4", "mov", "m4v", "mkv", "webm", "avi"],
-                        )
-                        .pick_file()
-                {
-                    self.load_file(i, path);
-                }
-                if ui.button("Camera").clicked() {
-                    self.open_camera(i);
-                }
-                ui.add(egui::DragValue::new(&mut self.decks[i].camera_index).range(0..=9).prefix("#"));
-                if src_name.is_some() && ui.button("Eject").clicked() {
-                    self.decks[i].source = None;
-                    self.deck_params(i).use_pattern = true;
-                }
-            });
-            let has_src = src_name.is_some();
-            let clock = self.clock();
-            let mut ac = AutoCtx {
-                params: &mut self.params,
-                live: &self.live,
-                clock,
-            };
-            let k = |a: &'static str, b: &'static str| if i == 0 { a } else { b };
-            let d = if i == 0 { &mut ac.params.deck_a } else { &mut ac.params.deck_b };
-            ui.horizontal(|ui| {
-                ui.add_enabled(has_src, egui::Checkbox::new(&mut d.use_pattern, "Oscillator"));
-                combo(ui, ("pattern", i), &mut d.pattern, &Pattern::ALL, Pattern::name);
-            });
-            let show_osc = d.use_pattern || !has_src;
-            ui.checkbox(&mut d.invert, "invert");
-            if show_osc {
-                ac.slider(ui, k("a.osc_freq", "b.osc_freq"));
-                ac.slider(ui, k("a.osc_speed", "b.osc_speed"));
-            }
-            ac.slider(ui, k("a.gain", "b.gain"));
-            ac.slider(ui, k("a.hue", "b.hue"));
-            ui.separator();
-            let d = if i == 0 { &mut ac.params.deck_a } else { &mut ac.params.deck_b };
-            ui.horizontal(|ui| {
-                ui.label("Placement");
-                ui.selectable_value(&mut d.fit_whole, false, "Fill");
-                ui.selectable_value(&mut d.fit_whole, true, "Fit");
-                if ui.small_button("Reset").clicked() {
-                    d.reset_placement();
-                }
-            });
-            ac.slider(ui, k("a.scale", "b.scale"));
-            ac.slider(ui, k("a.pos_x", "b.pos_x"));
-            ac.slider(ui, k("a.pos_y", "b.pos_y"));
-        });
-        self.decks[i].rect = resp.response.rect;
+            let center = rect.center() + egui::vec2(layer.pos_x.get() * rect.width(), -layer.pos_y.get() * rect.height());
+            let r = Rect::from_center_size(center, rect.size() * layer.scale.get());
+            let painter = ui.painter_at(rect);
+            painter.rect_stroke(r, 0.0, egui::Stroke::new(1.0, ui::widgets::ACCENT), egui::StrokeKind::Middle);
+            painter.text(
+                rect.left_top() + egui::vec2(6.0, 6.0),
+                egui::Align2::LEFT_TOP,
+                format!("{}: drag = move, scroll = scale", layer.name),
+                egui::FontId::proportional(12.0),
+                ui::widgets::ACCENT,
+            );
+        }
+        if self.recorder.is_some() {
+            ui.painter().circle_filled(rect.right_top() + egui::vec2(-14.0, 14.0), 6.0, Color32::from_rgb(230, 30, 40));
+        }
     }
 
-    fn mixer_ui(&mut self, ui: &mut egui::Ui) {
-        egui::Frame::group(ui.style()).show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.label(RichText::new("MIXER").strong().size(16.0));
-            let clock = self.clock();
-            let mut ac = AutoCtx {
-                params: &mut self.params,
-                live: &self.live,
-                clock,
-            };
-            ui.spacing_mut().slider_width = (ui.available_width() - 150.0).max(100.0);
-            ac.slider(ui, "crossfade");
-            combo(ui, "blend", &mut self.params.blend, &BlendMode::ALL, BlendMode::name);
-            ui.label(RichText::new("Z / X = cut to A / B, left / right arrows = fade").weak().small());
+    fn crossfader(&mut self, ui: &mut egui::Ui) {
+        let w = (ui.available_width() - 90.0).max(80.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().slider_width = w;
+            ui.add_sized([22.0, 18.0], egui::Label::new(RichText::new("A").strong()));
+            ui.add(egui::Slider::new(&mut self.comp.crossfader.value, 0.0..=1.0).show_value(false))
+                .on_hover_text("Crossfader: layers assigned to A / B fade (←/→)");
+            ui.label(RichText::new("B").strong());
+        });
+        ui.horizontal(|ui| {
+            ui.spacing_mut().slider_width = w;
+            ui.add_sized([22.0, 18.0], egui::Label::new(RichText::new("M").strong()));
+            ui.add(egui::Slider::new(&mut self.comp.master.value, 0.0..=1.0).show_value(false))
+                .on_hover_text("Master");
+            ui.label(format!("{:.0}%", self.comp.master.value * 100.0));
         });
     }
-
-    fn fx_ui(&mut self, ui: &mut egui::Ui) {
-        let clock = self.clock();
-        let mut ac = AutoCtx {
-            params: &mut self.params,
-            live: &self.live,
-            clock,
-        };
-        egui::CollapsingHeader::new(RichText::new("FEEDBACK / FRACTAL").strong())
-            .default_open(true)
-            .show(ui, |ui| {
-                for key in ["feedback", "copies", "zoom", "rotate", "spread", "twist", "center_x", "center_y"] {
-                    ac.slider(ui, key);
-                }
-                let fx = &mut ac.params.fx;
-                combo(ui, "combine", &mut fx.combine, &CopyCombine::ALL, CopyCombine::name);
-                combo(ui, "edges", &mut fx.edge, &EdgeMode::ALL, EdgeMode::name);
-                combo(ui, "symmetry", &mut fx.symmetry, &Symmetry::ALL, Symmetry::name);
-                if fx.symmetry == Symmetry::Kaleido {
-                    ac.slider(ui, "kaleido_segments");
-                }
-            });
-        egui::CollapsingHeader::new(RichText::new("LOOP COLOR").strong())
-            .default_open(true)
-            .show(ui, |ui| {
-                for key in ["hue_shift", "saturation", "contrast", "blur", "noise"] {
-                    ac.slider(ui, key);
-                }
-            });
-        egui::CollapsingHeader::new(RichText::new("KEYER (input over loop)").strong())
-            .default_open(true)
-            .show(ui, |ui| {
-                combo(ui, "input mode", &mut ac.params.fx.input_mode, &InputMode::ALL, InputMode::name);
-                ac.slider(ui, "input_level");
-                if ac.params.fx.input_mode == InputMode::LumaKey {
-                    ac.slider(ui, "key_threshold");
-                    ac.slider(ui, "key_softness");
-                }
-            });
-        egui::CollapsingHeader::new(RichText::new("VIDEO DELAY").strong())
-            .default_open(true)
-            .show(ui, |ui| {
-                for key in ["loop_delay", "echo_amount", "echo_spacing", "chroma_delay", "chroma_amount"] {
-                    ac.slider(ui, key);
-                }
-            });
-        egui::CollapsingHeader::new(RichText::new("OUTPUT").strong())
-            .default_open(false)
-            .show(ui, |ui| {
-                for key in ["out_hue", "brightness", "posterize", "scanlines", "vignette"] {
-                    ac.slider(ui, key);
-                }
-                ui.checkbox(&mut ac.params.fx.out_invert, "invert");
-            });
-        egui::CollapsingHeader::new(RichText::new("AUTOMATION").strong())
-            .default_open(true)
-            .show(ui, |ui| automation_ui::overview(ui, ac.params, clock));
-    }
 }
 
-fn deck_name(i: usize) -> &'static str {
-    if i == 0 { "A" } else { "B" }
+fn unix_time() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
-fn deck_color(i: usize) -> Color32 {
-    if i == 0 { Color32::from_rgb(80, 200, 255) } else { Color32::from_rgb(255, 140, 60) }
-}
-
-fn combo<T: Copy + PartialEq>(
-    ui: &mut egui::Ui,
-    id: impl std::hash::Hash + Copy + std::fmt::Debug,
-    value: &mut T,
-    all: &[T],
-    name: fn(T) -> &'static str,
-) {
-    ui.horizontal(|ui| {
-        egui::ComboBox::from_id_salt(id)
-            .selected_text(name(*value))
-            .show_ui(ui, |ui| {
-                for v in all {
-                    ui.selectable_value(value, *v, name(*v));
-                }
-            });
-    });
-}
-
-/// Paint the output texture letterboxed to 16:9 into the available space.
-/// Returns the response for the whole area and the rect the picture occupies.
+/// Paint the output letterboxed to 16:9; returns the response and the picture rect.
 fn paint_output(ui: &mut egui::Ui, tex: egui::TextureId) -> (egui::Response, Rect) {
     let avail = ui.available_rect_before_wrap();
     let resp = ui.allocate_rect(avail, egui::Sense::click_and_drag());
@@ -633,17 +560,16 @@ fn paint_output(ui: &mut egui::Ui, tex: egui::TextureId) -> (egui::Response, Rec
         size.y = size.x / aspect;
     }
     let rect = Rect::from_center_size(avail.center(), size);
-    let painter = ui.painter();
-    painter.rect_filled(avail, 0.0, Color32::BLACK);
-    painter.image(tex, rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+    ui.painter().rect_filled(avail, 0.0, Color32::BLACK);
+    ui.painter()
+        .image(tex, rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
     (resp, rect)
 }
 
 impl eframe::App for App {
-    /// Make sure a recording in progress ends up as a playable file.
     fn on_exit(&mut self) {
         if let Some(rec) = self.recorder.take() {
-            let (device, _, _) = self.engine.output();
+            let (device, _, _) = self.renderer.output();
             self.finishing.push(rec.stop(device));
         }
         for f in self.finishing.drain(..) {
@@ -659,7 +585,10 @@ impl eframe::App for App {
         self.poll_finished_recordings();
         self.handle_input(&ctx);
         self.render_frame();
-        let tex = self.engine.display_id;
+        self.make_thumbnails(&ctx);
+        let tex = self.renderer.display_id;
+        let clock = self.clock();
+        let blink = (self.beat * 4.0).fract() < 0.5;
 
         if self.show_output {
             let mut open = true;
@@ -689,36 +618,39 @@ impl eframe::App for App {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
             }
         } else {
-            egui::Panel::top("top").show(ui, |ui| self.top_bar(ui));
-            egui::Panel::left("decks")
-                .default_size(300.0)
-                .resizable(true)
-                .show(ui, |ui| {
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        self.deck_ui(ui, 0);
-                        ui.add_space(6.0);
-                        self.mixer_ui(ui);
-                        ui.add_space(6.0);
-                        self.deck_ui(ui, 1);
-                    });
+            egui::Panel::top("transport").show(ui, |ui| self.transport_bar(ui));
+            egui::Panel::top("grid").resizable(true).default_size(330.0).show(ui, |ui| {
+                egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
+                    let actions = self.grid.show(ui, &mut self.comp, blink);
+                    self.handle_grid(actions);
                 });
-            egui::Panel::right("fx")
-                .default_size(320.0)
-                .resizable(true)
-                .show(ui, |ui| {
-                    egui::ScrollArea::vertical().show(ui, |ui| self.fx_ui(ui));
+            });
+            egui::Panel::left("monitor").resizable(true).default_size(560.0).show(ui, |ui| {
+                ui.label(RichText::new("Output").strong());
+                let h = ui.available_width() * HEIGHT as f32 / WIDTH as f32;
+                ui.allocate_ui(egui::vec2(ui.available_width(), h), |ui| self.monitor(ui));
+                self.crossfader(ui);
+            });
+            egui::Panel::right("clip").resizable(true).default_size(380.0).show(ui, |ui| {
+                ui.label(RichText::new("Clip").strong());
+                ui.separator();
+                egui::ScrollArea::vertical().id_salt("clip scroll").show(ui, |ui| {
+                    let sel = self.grid.selected_clip;
+                    let clip = sel.and_then(|(l, c)| self.comp.clip_mut(l, c));
+                    ui::panels::clip_panel(ui, clip, clock);
                 });
-            egui::CentralPanel::default()
-                .frame(egui::Frame::NONE.fill(Color32::BLACK))
-                .show(ui, |ui| {
-                    let (resp, rect) = paint_output(ui, tex);
-                    self.preview_interaction(ui, &resp, rect);
-                    if self.recorder.is_some() {
-                        // Shown on the preview only; the recorded frames come from the engine.
-                        let c = rect.right_top() + egui::vec2(-16.0, 16.0);
-                        ui.painter().circle_filled(c, 7.0, Color32::from_rgb(230, 30, 40));
-                    }
+            });
+            egui::CentralPanel::default().show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.tab, Tab::Layer, RichText::new("Layer").strong());
+                    ui.selectable_value(&mut self.tab, Tab::Composition, RichText::new("Composition").strong());
                 });
+                ui.separator();
+                egui::ScrollArea::vertical().id_salt("inspector").show(ui, |ui| match self.tab {
+                    Tab::Layer => ui::panels::layer_panel(ui, &mut self.comp, self.grid.selected_layer, clock),
+                    Tab::Composition => ui::panels::composition_panel(ui, &mut self.comp, clock),
+                });
+            });
         }
 
         if let Some((n, path)) = self.auto_snapshot.clone()
@@ -727,6 +659,6 @@ impl eframe::App for App {
             self.save_snapshot(Some(path));
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
-        ctx.request_repaint_after(std::time::Duration::from_secs_f64(1.0 / 120.0));
+        ctx.request_repaint_after(Duration::from_secs_f64(1.0 / 120.0));
     }
 }

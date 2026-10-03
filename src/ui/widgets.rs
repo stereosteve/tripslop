@@ -7,77 +7,87 @@
 use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Stroke, pos2, vec2};
 
 use crate::modulation::{BEAT_CHOICES, Clock, Modulator, Polarity, Rate, Shape};
-use crate::params::{Access, PARAMS, ParamDef, Params, param_def};
+use crate::param::Param;
 
 pub const ACCENT: Color32 = Color32::from_rgb(255, 120, 220);
 
-/// What a slider needs to draw itself: the editable params, the live (automated) values
-/// from the last frame, and the clock for the editor's playhead.
-pub struct AutoCtx<'a> {
-    pub params: &'a mut Params,
-    pub live: &'a [f32],
-    pub clock: Clock,
+/// A parameter slider (or dropdown, for choices) with an automation button.
+pub fn param(ui: &mut egui::Ui, p: &mut Param, clock: Clock) -> egui::Response {
+    param_labeled(ui, p, p.spec.label, clock)
 }
 
-impl AutoCtx<'_> {
-    pub fn slider(&mut self, ui: &mut egui::Ui, key: &'static str) {
-        let idx = PARAMS.iter().position(|d| d.key == key).unwrap_or_else(|| panic!("unknown parameter {key}"));
-        let def = &PARAMS[idx];
-        ui.horizontal(|ui| {
-            let modulator = self.params.mods.get(key);
-            let active = modulator.is_some_and(|m| m.enabled);
-            let label = RichText::new("~").monospace().color(if active { Color32::BLACK } else { ui.visuals().weak_text_color() });
-            let mut button = egui::Button::new(label).small().selected(active);
-            if active {
-                button = button.fill(ACCENT);
-            }
-            let btn = ui.add(button).on_hover_text(if modulator.is_some() {
-                "Edit automation"
-            } else {
-                "Automate this slider"
-            });
-
-            let resp = match def.access {
-                Access::F(f) => ui.add(
-                    egui::Slider::new(f(self.params), def.min..=def.max)
-                        .logarithmic(def.log)
-                        .text(def.label),
-                ),
-                Access::U(f) => ui.add(egui::Slider::new(f(self.params), def.min as u32..=def.max as u32).text(def.label)),
-            };
-
-            let base = def.get(self.params);
-            if active && let Some(m) = self.params.mods.get(key) {
-                paint_live_marker(ui, &resp, def, m, base, self.live.get(idx).copied().unwrap_or(base));
-            }
-
-            egui::Popup::from_toggle_button_response(&btn)
-                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-                .show(|ui| {
-                    let base = def.get(self.params);
-                    let m = self.params.mods.entry(key).or_insert_with(|| Modulator::new(key));
-                    if editor(ui, def, m, base, self.clock) {
-                        self.params.mods.remove(key);
-                        ui.close();
-                    }
-                });
+pub fn param_labeled(ui: &mut egui::Ui, p: &mut Param, label: &str, clock: Clock) -> egui::Response {
+    ui.horizontal(|ui| {
+        let active = p.is_automated();
+        let text = RichText::new("~").monospace().color(if active { Color32::BLACK } else { ui.visuals().weak_text_color() });
+        let mut button = egui::Button::new(text).small().selected(active);
+        if active {
+            button = button.fill(ACCENT);
+        }
+        let btn = ui.add(button).on_hover_text(if p.modulator.is_some() {
+            "Edit automation"
+        } else {
+            "Automate this parameter"
         });
-    }
+
+        let spec = p.spec;
+        let resp = if !spec.choices.is_empty() {
+            let mut idx = p.value.round() as usize;
+            let shown = if active { p.index() } else { idx };
+            let r = egui::ComboBox::from_id_salt(ui.next_auto_id())
+                .selected_text(spec.choices[shown.min(spec.choices.len() - 1)])
+                .show_ui(ui, |ui| {
+                    for (i, c) in spec.choices.iter().enumerate() {
+                        ui.selectable_value(&mut idx, i, *c);
+                    }
+                })
+                .response;
+            if idx as f32 != p.value.round() {
+                p.set(idx as f32);
+            }
+            ui.label(label);
+            r
+        } else {
+            let mut slider = egui::Slider::new(&mut p.value, spec.min..=spec.max).logarithmic(spec.log).text(label);
+            if spec.int {
+                slider = slider.integer();
+            }
+            let r = ui.add(slider);
+            if active && let Some(m) = &p.modulator {
+                paint_live_marker(ui, &r, p, m);
+            }
+            r
+        };
+
+        egui::Popup::from_toggle_button_response(&btn)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| {
+                let base = p.value;
+                let seed = p.seed;
+                let m = p.modulator.get_or_insert_with(|| Modulator::new(seed));
+                if editor(ui, &spec, label, m, base, clock) {
+                    p.modulator = None;
+                    ui.close();
+                }
+            });
+        resp
+    })
+    .inner
 }
 
 /// Dot at the automated value plus a band showing the sweep range, drawn over the rail.
-fn paint_live_marker(ui: &egui::Ui, resp: &egui::Response, def: &ParamDef, m: &Modulator, base: f32, live: f32) {
+fn paint_live_marker(ui: &egui::Ui, resp: &egui::Response, p: &Param, m: &Modulator) {
     let rail_h = ui.spacing().interact_size.y;
     let r = rail_h / 2.5;
     let left = resp.rect.left() + r;
     let width = ui.spacing().slider_width - 2.0 * r;
     let y = resp.rect.center().y + rail_h * 0.5 - 1.0;
-    let x_of = |v: f32| left + def.normalized(v) * width;
-    let a = m.apply(base, def.min, def.max, 0.0);
-    let b = m.apply(base, def.min, def.max, 1.0);
+    let x_of = |v: f32| left + p.normalized(v) * width;
+    let a = m.apply(p.value, p.spec.min, p.spec.max, 0.0);
+    let b = m.apply(p.value, p.spec.min, p.spec.max, 1.0);
     let painter = ui.painter();
     painter.line_segment([pos2(x_of(a), y), pos2(x_of(b), y)], Stroke::new(2.0, ACCENT.gamma_multiply(0.5)));
-    painter.circle_filled(pos2(x_of(live), y), 3.0, ACCENT);
+    painter.circle_filled(pos2(x_of(p.live), y), 3.0, ACCENT);
 }
 
 fn beats_label(b: f32) -> String {
@@ -85,11 +95,11 @@ fn beats_label(b: f32) -> String {
 }
 
 /// Returns true when the user asked to remove the automation.
-fn editor(ui: &mut egui::Ui, def: &ParamDef, m: &mut Modulator, base: f32, clock: Clock) -> bool {
+fn editor(ui: &mut egui::Ui, spec: &crate::param::Spec, label: &str, m: &mut Modulator, base: f32, clock: Clock) -> bool {
     ui.set_width(320.0);
     let mut remove = false;
     ui.horizontal(|ui| {
-        ui.label(RichText::new(format!("Automate · {}", def.label)).strong());
+        ui.label(RichText::new(format!("Automate · {label}")).strong());
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             remove = ui.button("Remove").clicked();
             ui.checkbox(&mut m.enabled, "on");
@@ -139,8 +149,8 @@ fn editor(ui: &mut egui::Ui, def: &ParamDef, m: &mut Modulator, base: f32, clock
 
     plot(ui, m, clock);
 
-    let a = m.apply(base, def.min, def.max, 0.0);
-    let b = m.apply(base, def.min, def.max, 1.0);
+    let a = m.apply(base, spec.min, spec.max, 0.0);
+    let b = m.apply(base, spec.min, spec.max, 1.0);
     ui.label(
         RichText::new(format!("slider {base:.3} · sweeps {:.3} … {:.3}", a.min(b), a.max(b)))
             .small()
@@ -249,16 +259,6 @@ fn edit_envelope(ui: &egui::Ui, m: &mut Modulator, rect: Rect, resp: &egui::Resp
     }
 }
 
-/// Human-readable name for a parameter key, including its deck.
-pub fn display_name(key: &str) -> String {
-    let def = param_def(key);
-    match key.split_once('.') {
-        Some(("a", _)) => format!("Deck A {}", def.label),
-        Some(("b", _)) => format!("Deck B {}", def.label),
-        _ => def.label.to_string(),
-    }
-}
-
 pub fn rate_label(rate: Rate) -> String {
     match rate {
         Rate::Beats(b) => format!("{} beat{}", beats_label(b), if b == 1.0 { "" } else { "s" }),
@@ -266,14 +266,13 @@ pub fn rate_label(rate: Rate) -> String {
     }
 }
 
-/// Compact list of every automated parameter.
-pub fn overview(ui: &mut egui::Ui, params: &mut Params, clock: Clock) {
-    if params.mods.is_empty() {
-        ui.label(RichText::new("Nothing automated yet. Click ~ next to any slider.").weak());
-        return;
-    }
-    let mut remove = None;
-    for (key, m) in params.mods.iter_mut() {
+/// Compact list of every automated parameter in the composition.
+pub fn overview(ui: &mut egui::Ui, comp: &mut crate::composition::Composition, clock: Clock) {
+    let mut any = false;
+    comp.visit_all(&mut |path, p| {
+        let Some(m) = p.modulator.as_mut() else { return };
+        any = true;
+        let mut remove = false;
         ui.horizontal(|ui| {
             ui.checkbox(&mut m.enabled, "");
             // Tiny live meter.
@@ -281,17 +280,15 @@ pub fn overview(ui: &mut egui::Ui, params: &mut Params, clock: Clock) {
             let v = if m.enabled { m.signal(clock) } else { 0.0 };
             ui.painter().rect_filled(r, 1.0, ui.visuals().extreme_bg_color);
             ui.painter().rect_filled(Rect::from_min_max(pos2(r.left(), r.bottom() - v * r.height()), r.max), 1.0, ACCENT);
-            ui.label(display_name(key));
+            ui.label(path);
             ui.label(RichText::new(format!("{} · {} · {:.0}%", m.shape.name(), rate_label(m.rate), m.depth * 100.0)).weak().small());
-            if ui.small_button("×").on_hover_text("Remove").clicked() {
-                remove = Some(*key);
-            }
+            remove = ui.small_button("×").on_hover_text("Remove").clicked();
         });
-    }
-    if let Some(k) = remove {
-        params.mods.remove(k);
-    }
-    if ui.small_button("Clear all automation").clicked() {
-        params.mods.clear();
+        if remove {
+            p.modulator = None;
+        }
+    });
+    if !any {
+        ui.label(RichText::new("Nothing automated yet. Click ~ next to any parameter.").weak());
     }
 }

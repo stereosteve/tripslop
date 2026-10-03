@@ -1,0 +1,594 @@
+//! GPU pipeline, per tick:
+//!
+//! ```text
+//! for each layer (bottom → top):
+//!     clip(s) ──clip pass (transform, fit, transition)──► layer tex
+//!     layer tex ──effect → effect → …──► (ping-pong)          (delay rings per effect)
+//!     comp ──composite (blend mode, opacity × crossfader)──► comp
+//! comp ──master effects──► comp ──final (master fader)──► output ─► screen / recorder
+//! ```
+//!
+//! GPU resources are keyed by the model's ids (clip, layer, effect) and created on demand;
+//! anything not used in a frame is freed.
+
+use std::collections::{HashMap, HashSet};
+
+use eframe::egui;
+use eframe::egui_wgpu::{self, wgpu};
+
+use crate::clip::{Clip, Media};
+use crate::composition::Composition;
+use crate::effects::{EFFECTS, Effect, EffectKind, HistorySource};
+use crate::modulation::Clock;
+
+pub const WIDTH: u32 = 1280;
+pub const HEIGHT: u32 = 720;
+const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+const RENDER: wgpu::TextureUsages = wgpu::TextureUsages::RENDER_ATTACHMENT
+    .union(wgpu::TextureUsages::TEXTURE_BINDING)
+    .union(wgpu::TextureUsages::COPY_SRC);
+
+struct Tex {
+    tex: wgpu::Texture,
+    view: wgpu::TextureView,
+}
+
+struct SourceTex {
+    tex: Tex,
+    size: (u32, u32),
+}
+
+struct Ring {
+    tex: wgpu::Texture,
+    view: wgpu::TextureView,
+    len: u32,
+    head: u32,
+}
+
+impl Ring {
+    fn layer_ago(&self, ago: u32) -> f32 {
+        ((self.head + self.len - ago % self.len) % self.len) as f32
+    }
+}
+
+struct Pipe {
+    pipeline: wgpu::RenderPipeline,
+    layout: wgpu::BindGroupLayout,
+}
+
+pub struct Renderer {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    sampler: wgpu::Sampler,
+    clip_pipe: Pipe,
+    composite_pipe: Pipe,
+    final_pipe: Pipe,
+    fx_pipes: HashMap<EffectKind, Pipe>,
+    uniforms: Vec<wgpu::Buffer>,
+    next_uniform: usize,
+    dummy_tex: Tex,
+    dummy_ring: wgpu::TextureView,
+    sources: HashMap<u64, SourceTex>,
+    layers: HashMap<u64, [Tex; 2]>,
+    rings: HashMap<u64, Ring>,
+    /// Composition ping-pong buffers (taken out of `self` while rendering).
+    comp: Option<[Tex; 2]>,
+    output: Tex,
+    pub display_id: egui::TextureId,
+}
+
+fn shader(device: &wgpu::Device, label: &str, parts: &[&str]) -> wgpu::ShaderModule {
+    let mut src = String::from(include_str!("shaders/common.wgsl"));
+    for p in parts {
+        src.push('\n');
+        src.push_str(p);
+    }
+    device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some(label),
+        source: wgpu::ShaderSource::Wgsl(src.into()),
+    })
+}
+
+/// Explicit layout: uniform, sampler, then the given textures (`true` = 2D array). Explicit
+/// so that shaders which ignore a binding (e.g. effects without history) still match.
+fn bind_layout(device: &wgpu::Device, textures: &[bool]) -> wgpu::BindGroupLayout {
+    let frag = wgpu::ShaderStages::FRAGMENT;
+    let mut entries = vec![
+        wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: frag,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 1,
+            visibility: frag,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        },
+    ];
+    for (i, array) in textures.iter().enumerate() {
+        entries.push(wgpu::BindGroupLayoutEntry {
+            binding: 2 + i as u32,
+            visibility: frag,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: if *array { wgpu::TextureViewDimension::D2Array } else { wgpu::TextureViewDimension::D2 },
+                multisampled: false,
+            },
+            count: None,
+        });
+    }
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: None, entries: &entries })
+}
+
+fn pipe(device: &wgpu::Device, label: &str, module: &wgpu::ShaderModule, blend: Option<wgpu::BlendState>, textures: &[bool]) -> Pipe {
+    let layout = bind_layout(device, textures);
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some(label),
+        bind_group_layouts: &[Some(&layout)],
+        immediate_size: 0,
+    });
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(label),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module,
+            entry_point: Some("vs_main"),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module,
+            entry_point: Some("fs_main"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: FORMAT,
+                blend,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    });
+    Pipe { pipeline, layout }
+}
+
+fn texture(device: &wgpu::Device, label: &str, w: u32, h: u32, layers: u32, usage: wgpu::TextureUsages) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: layers,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: FORMAT,
+        usage,
+        view_formats: &[],
+    })
+}
+
+fn tex2d(device: &wgpu::Device, label: &str, w: u32, h: u32, usage: wgpu::TextureUsages) -> Tex {
+    let tex = texture(device, label, w, h, 1, usage);
+    let view = tex.create_view(&Default::default());
+    Tex { tex, view }
+}
+
+fn ring(device: &wgpu::Device, len: u32) -> Ring {
+    let tex = texture(
+        device,
+        "history ring",
+        WIDTH,
+        HEIGHT,
+        len,
+        wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+    );
+    let view = tex.create_view(&wgpu::TextureViewDescriptor {
+        dimension: Some(wgpu::TextureViewDimension::D2Array),
+        ..Default::default()
+    });
+    Ring { tex, view, len, head: 0 }
+}
+
+fn copy_to_ring(enc: &mut wgpu::CommandEncoder, from: &wgpu::Texture, ring: &Ring) {
+    enc.copy_texture_to_texture(
+        from.as_image_copy(),
+        wgpu::TexelCopyTextureInfo {
+            texture: &ring.tex,
+            mip_level: 0,
+            origin: wgpu::Origin3d { x: 0, y: 0, z: ring.head },
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::Extent3d {
+            width: WIDTH,
+            height: HEIGHT,
+            depth_or_array_layers: 1,
+        },
+    );
+}
+
+fn pass(enc: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, clear: Option<wgpu::Color>, pipe: &Pipe, bg: &wgpu::BindGroup) {
+    let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: None,
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: target,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: clear.map_or(wgpu::LoadOp::Load, wgpu::LoadOp::Clear),
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+    rp.set_pipeline(&pipe.pipeline);
+    rp.set_bind_group(0, bg, &[]);
+    rp.draw(0..3, 0..1);
+}
+
+fn clear_pass(enc: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, color: wgpu::Color) {
+    enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("clear"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: target,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(color),
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+}
+
+impl Renderer {
+    pub fn new(rs: &egui_wgpu::RenderState) -> Self {
+        let device = rs.device.clone();
+        let queue = rs.queue.clone();
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("linear clamp"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
+        let clip_pipe = pipe(
+            &device,
+            "clip",
+            &shader(&device, "clip", &[include_str!("shaders/clip.wgsl")]),
+            Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+            &[false],
+        );
+        let composite_pipe = pipe(
+            &device,
+            "composite",
+            &shader(&device, "composite", &[include_str!("shaders/composite.wgsl")]),
+            None,
+            &[false, false],
+        );
+        let final_pipe = pipe(&device, "final", &shader(&device, "final", &[include_str!("shaders/final.wgsl")]), None, &[false]);
+        let header = include_str!("shaders/fx/header.wgsl");
+        let fx_pipes = EFFECTS
+            .iter()
+            .map(|d| (d.kind, pipe(&device, d.name, &shader(&device, d.name, &[header, d.shader]), None, &[false, true])))
+            .collect();
+
+        let dummy_tex = tex2d(&device, "dummy", 1, 1, wgpu::TextureUsages::TEXTURE_BINDING);
+        let dummy_ring = ring(&device, 1).view;
+        let comp = Some([
+            tex2d(&device, "comp a", WIDTH, HEIGHT, RENDER),
+            tex2d(&device, "comp b", WIDTH, HEIGHT, RENDER),
+        ]);
+        let output = tex2d(&device, "output", WIDTH, HEIGHT, RENDER);
+        let display_id = rs
+            .renderer
+            .write()
+            .register_native_texture(&device, &output.view, wgpu::FilterMode::Linear);
+
+        Self {
+            device,
+            queue,
+            sampler,
+            clip_pipe,
+            composite_pipe,
+            final_pipe,
+            fx_pipes,
+            uniforms: Vec::new(),
+            next_uniform: 0,
+            dummy_tex,
+            dummy_ring,
+            sources: HashMap::new(),
+            layers: HashMap::new(),
+            rings: HashMap::new(),
+            comp,
+            output,
+            display_id,
+        }
+    }
+
+    /// A fresh uniform buffer for this pass (each pass in a frame needs its own data).
+    fn uniform(&mut self, data: &[[f32; 4]]) -> usize {
+        if self.next_uniform == self.uniforms.len() {
+            self.uniforms.push(self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("pass uniforms"),
+                size: 256,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+        }
+        let i = self.next_uniform;
+        self.next_uniform += 1;
+        self.queue.write_buffer(&self.uniforms[i], 0, bytemuck::cast_slice(data));
+        i
+    }
+
+    fn bind(&self, layout: &wgpu::BindGroupLayout, ub: usize, views: &[&wgpu::TextureView]) -> wgpu::BindGroup {
+        let mut entries = vec![
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: self.uniforms[ub].as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(&self.sampler),
+            },
+        ];
+        for (i, v) in views.iter().enumerate() {
+            entries.push(wgpu::BindGroupEntry {
+                binding: 2 + i as u32,
+                resource: wgpu::BindingResource::TextureView(v),
+            });
+        }
+        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout,
+            entries: &entries,
+        })
+    }
+
+    /// Upload a clip's newest frame. Returns false if it has nothing to show yet.
+    fn upload(&mut self, clip: &mut Clip) -> bool {
+        if matches!(clip.media, Media::Generator(_)) {
+            return true;
+        }
+        if !self.sources.contains_key(&clip.id) {
+            clip.invalidate_upload();
+        }
+        if let Some(f) = clip.poll_frame() {
+            let size = (f.width, f.height);
+            let entry = self.sources.entry(clip.id);
+            let src = entry.or_insert_with(|| SourceTex {
+                tex: tex2d(
+                    &self.device,
+                    "clip source",
+                    size.0,
+                    size.1,
+                    wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                ),
+                size,
+            });
+            if src.size != size {
+                *src = SourceTex {
+                    tex: tex2d(
+                        &self.device,
+                        "clip source",
+                        size.0,
+                        size.1,
+                        wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    ),
+                    size,
+                };
+            }
+            self.queue.write_texture(
+                src.tex.tex.as_image_copy(),
+                &f.rgba,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * size.0),
+                    rows_per_image: Some(size.1),
+                },
+                wgpu::Extent3d {
+                    width: size.0,
+                    height: size.1,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+        self.sources.contains_key(&clip.id)
+    }
+
+    /// Run one effect from `src` into `dst`.
+    fn effect(&mut self, enc: &mut wgpu::CommandEncoder, e: &Effect, src: &Tex, dst: &Tex, clock: Clock) {
+        let def = e.def();
+        let mut taps = [0.0f32; 4];
+        if let Some(h) = def.history {
+            let ring = self.rings.entry(e.id).or_insert_with(|| ring(&self.device, h.frames));
+            if h.source == HistorySource::Input {
+                // The current input becomes tap "0 frames ago".
+                copy_to_ring(enc, &src.tex, ring);
+            }
+            let t = (h.taps)(&e.params);
+            for (i, ago) in t.iter().enumerate() {
+                // Output history: the newest stored frame is 1 frame ago.
+                let ago = if h.source == HistorySource::Output { (*ago).max(1) } else { *ago };
+                taps[i] = ring.layer_ago(ago);
+            }
+        }
+        let mut data = [[0.0f32; 4]; 9];
+        data[0] = [clock.time as f32, WIDTH as f32 / HEIGHT as f32, 1.0 / WIDTH as f32, 1.0 / HEIGHT as f32];
+        data[1] = [clock.beat as f32, clock.bpm, 0.0, 0.0];
+        data[2] = taps;
+        for (i, p) in e.params.iter().enumerate() {
+            data[3 + i / 4][i % 4] = p.get();
+        }
+        let ub = self.uniform(&data);
+        let pipe = &self.fx_pipes[&e.kind];
+        let ring_view = self.rings.get(&e.id).map(|r| &r.view).unwrap_or(&self.dummy_ring);
+        let bg = self.bind(&pipe.layout, ub, &[&src.view, ring_view]);
+        pass(enc, &dst.view, Some(wgpu::Color::TRANSPARENT), pipe, &bg);
+
+        if let Some(h) = def.history {
+            let ring = self.rings.get_mut(&e.id).unwrap();
+            if h.source == HistorySource::Output {
+                copy_to_ring(enc, &dst.tex, ring);
+            }
+            ring.head = (ring.head + 1) % ring.len;
+        }
+    }
+
+    /// Run an effect chain, ping-ponging between `bufs`. Returns the index holding the result.
+    fn chain(&mut self, enc: &mut wgpu::CommandEncoder, effects: &[Effect], bufs: &[Tex; 2], mut cur: usize, clock: Clock, used: &mut HashSet<u64>) -> usize {
+        for e in effects.iter().filter(|e| e.enabled) {
+            used.insert(e.id);
+            self.effect(enc, e, &bufs[cur], &bufs[1 - cur], clock);
+            cur = 1 - cur;
+        }
+        cur
+    }
+
+    pub fn render(&mut self, comp: &mut Composition, clock: Clock) {
+        self.next_uniform = 0;
+        let mut used_sources = HashSet::new();
+        let mut used_layers = HashSet::new();
+        let mut used_fx = HashSet::new();
+        let aspect = WIDTH as f32 / HEIGHT as f32;
+        let mut enc = self.device.create_command_encoder(&Default::default());
+
+        let comp_bufs = self.comp.take().expect("composition buffers");
+        clear_pass(&mut enc, &comp_bufs[0].view, wgpu::Color::BLACK);
+        let mut cur = 0;
+
+        for li in 0..comp.layers.len() {
+            if !comp.layer_audible(li) {
+                continue;
+            }
+            let gain = comp.side_gain(comp.layers[li].side);
+            let layer = &mut comp.layers[li];
+            let opacity = layer.opacity.get() * gain;
+            let draws = layer.draw_list();
+            if draws.is_empty() || opacity <= 0.0 {
+                continue;
+            }
+            used_layers.insert(layer.id);
+            let bufs = self
+                .layers
+                .remove(&layer.id)
+                .unwrap_or_else(|| [tex2d(&self.device, "layer a", WIDTH, HEIGHT, RENDER), tex2d(&self.device, "layer b", WIDTH, HEIGHT, RENDER)]);
+
+            // Clips -> layer texture.
+            clear_pass(&mut enc, &bufs[0].view, wgpu::Color::TRANSPARENT);
+            for (col, weight) in draws {
+                let clip = layer.clips[col].as_mut().unwrap();
+                used_sources.insert(clip.id);
+                if !self.upload(clip) {
+                    continue;
+                }
+                let (mode, tex_aspect, straight, gen_params) = match &clip.media {
+                    Media::Generator(g) => (1.0, 1.0, 0.0, [g.pattern.get(), g.freq.get(), g.speed.get(), g.hue.get()]),
+                    _ => {
+                        let s = self.sources[&clip.id].size;
+                        (0.0, s.0 as f32 / s.1 as f32, 1.0, [0.0; 4])
+                    }
+                };
+                let data = [
+                    [clock.time as f32, aspect, mode, weight],
+                    [layer.pos_x.get(), layer.pos_y.get(), layer.scale.get(), layer.rotation.get().to_radians()],
+                    [clip.fit as u32 as f32, tex_aspect, gen_params[0], gen_params[1]],
+                    [gen_params[2], gen_params[3], straight, 0.0],
+                ];
+                let ub = self.uniform(&data);
+                let view = self.sources.get(&clip.id).map(|s| &s.tex.view).unwrap_or(&self.dummy_tex.view);
+                let bg = self.bind(&self.clip_pipe.layout, ub, &[view]);
+                pass(&mut enc, &bufs[0].view, None, &self.clip_pipe, &bg);
+            }
+
+            // Layer effects.
+            let lc = self.chain(&mut enc, &layer.effects, &bufs, 0, clock, &mut used_fx);
+
+            // Composite onto the composition.
+            let ub = self.uniform(&[[layer.blend as u32 as f32, opacity, 0.0, 0.0]]);
+            let bg = self.bind(&self.composite_pipe.layout, ub, &[&comp_bufs[cur].view, &bufs[lc].view]);
+            pass(&mut enc, &comp_bufs[1 - cur].view, None, &self.composite_pipe, &bg);
+            cur = 1 - cur;
+            self.layers.insert(layer.id, bufs);
+        }
+
+        // Master effects.
+        cur = self.chain(&mut enc, &comp.effects, &comp_bufs, cur, clock, &mut used_fx);
+
+        let ub = self.uniform(&[[comp.master.get(), 0.0, 0.0, 0.0]]);
+        let bg = self.bind(&self.final_pipe.layout, ub, &[&comp_bufs[cur].view]);
+        pass(&mut enc, &self.output.view, None, &self.final_pipe, &bg);
+        self.comp = Some(comp_bufs);
+        self.queue.submit([enc.finish()]);
+
+        self.sources.retain(|id, _| used_sources.contains(id));
+        self.layers.retain(|id, _| used_layers.contains(id));
+        self.rings.retain(|id, _| used_fx.contains(id));
+    }
+
+    /// Forget all delay/feedback history.
+    pub fn clear_history(&mut self) {
+        self.rings.clear();
+    }
+
+    /// Device, queue and the final output texture, for recording.
+    pub fn output(&self) -> (&wgpu::Device, &wgpu::Queue, &wgpu::Texture) {
+        (&self.device, &self.queue, &self.output.tex)
+    }
+
+    /// Read back the current output frame (blocking).
+    pub fn snapshot(&self) -> Result<image::RgbaImage, String> {
+        let row = 4 * WIDTH;
+        let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("snapshot"),
+            size: (row * HEIGHT) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut enc = self.device.create_command_encoder(&Default::default());
+        enc.copy_texture_to_buffer(
+            self.output.tex.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buf,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row),
+                    rows_per_image: Some(HEIGHT),
+                },
+            },
+            wgpu::Extent3d {
+                width: WIDTH,
+                height: HEIGHT,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit([enc.finish()]);
+        buf.map_async(wgpu::MapMode::Read, .., |_| {});
+        let _ = self.device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
+        let data = buf.slice(..).get_mapped_range().map_err(|e| format!("{e:?}"))?.to_vec();
+        image::RgbaImage::from_raw(WIDTH, HEIGHT, data).ok_or_else(|| "snapshot size mismatch".into())
+    }
+}

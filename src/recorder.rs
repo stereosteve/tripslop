@@ -16,7 +16,7 @@ use std::thread::JoinHandle;
 
 use eframe::egui_wgpu::wgpu;
 
-use crate::engine::{HEIGHT, WIDTH};
+use crate::renderer::{HEIGHT, WIDTH};
 
 pub const FPS: u32 = 60;
 const STAGING_BUFFERS: usize = 4;
