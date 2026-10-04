@@ -78,6 +78,40 @@ delays) each allocate their own 32-frame delay buffer when you add them.
 Tip: the feedback rig's fractals need a seed that doesn't cover the whole frame. Scale the
 layer down or use a generator. With a full-frame opaque clip, the input simply covers the loop.
 
+**Custom shaders (live coding).** Paste a Shadertoy shader, or write your own, and it
+compiles as you type, like KodeLife. Add one from a grid cell's right-click menu
+(*Shader (GLSL)*), or as an effect (*+ Add effect → Custom shader*). You can also drop a
+`.glsl` / `.frag` / `.wgsl` file onto a cell.
+* **Shadertoy compatible** (single pass): `mainImage`, `iTime`, `iTimeDelta`, `iFrame`,
+  `iResolution`, `iMouse` (Alt-drag on the output monitor), `iDate`, `iChannelResolution`.
+  GLSL Sandbox style (`void main` + `gl_FragColor`, `time`, `resolution`, `mouse`,
+  `backbuffer`) works too.
+* **WGSL** also works. It's detected by `@fragment`, and your own entry point is used. It runs
+  in screen space (y down). It can use:
+  * `inputs.size` (`vec3f`), `inputs.time`, `inputs.mouse`, `inputs.date`, `inputs.frame`,
+    `inputs.time_delta`, `inputs.beat`, `inputs.bpm`
+  * `iChannel0`–`3` with the sampler `samp`
+  * sliders declared as `// @param speed 0 4 1` and read as `inputs.speed`
+
+  `src/shaders/marble.wgsl` pastes in unchanged, or run `cargo run --release -- src/shaders/marble.wgsl`.
+* **Channels**:
+  * `iChannel0`: the layer's input (when the shader is an effect)
+  * `iChannel1`: the shader's own previous frame (feedback)
+  * `iChannel2`: an RGBA noise texture
+  * `iChannel3`: last frame's composition output
+* **Sliders from code**: `uniform float amount; // min max default` (or `int`) becomes a
+  slider with the usual `~` automation.
+* **Tempo**: `iBeat` and `iBpm` expose the tempo clock.
+* **Errors** appear with their line numbers (marked red in the gutter), and the last working
+  version keeps running until you fix them. A bad shader can't crash the app, because the
+  code is compiled and validated by naga before it reaches the GPU.
+* **Alpha**: *Opaque*, *Luminance* (black becomes transparent) or *Shader alpha*.
+* The editor has templates, Load/Save of `.glsl` files, and Cmd/Ctrl+Enter to compile
+  immediately.
+* **Limits**: no Shadertoy multipass buffers (A–D), audio, video or cubemap inputs, and
+  samplers can't be passed into functions. naga is also stricter than WebGL; for example,
+  write `ivec2(p) % ivec2(4)`, not `ivec2(p) % 4`.
+
 **Automation.** Every parameter has a `~` button that attaches a signal generator:
 * Shapes: sine, triangle, saw up/down, square, sample & hold, smooth random drift, or a
   hand-drawn envelope.

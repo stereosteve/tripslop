@@ -6,6 +6,8 @@ use crate::clip::{Clip, Direction, Fit, LoopMode, Media, Sync};
 use crate::composition::{Blend, Composition, Quantize, Side};
 use crate::effects::{EFFECTS, Effect, EffectKind, FEEDBACK_PRESETS, apply_feedback_preset};
 use crate::modulation::Clock;
+use crate::shader::{Role, TEMPLATES};
+use crate::ui::shader_editor;
 use crate::ui::widgets::{self, ACCENT};
 
 fn section(ui: &mut egui::Ui, title: &str, open: bool, body: impl FnOnce(&mut egui::Ui)) {
@@ -70,7 +72,7 @@ pub fn effect_chain(ui: &mut egui::Ui, effects: &mut Vec<Effect>, owner: u64, cl
         egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, true)
             .show_header(ui, |ui| {
                 ui.checkbox(&mut e.enabled, "");
-                ui.label(RichText::new(e.def().name).strong().color(if e.enabled { ui.visuals().strong_text_color() } else { ui.visuals().weak_text_color() }));
+                ui.label(RichText::new(e.name()).strong().color(if e.enabled { ui.visuals().strong_text_color() } else { ui.visuals().weak_text_color() }));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.small_button("×").on_hover_text("Remove effect").clicked() {
                         remove = Some(i);
@@ -101,6 +103,15 @@ pub fn effect_chain(ui: &mut egui::Ui, effects: &mut Vec<Effect>, owner: u64, cl
                 for p in &mut e.params {
                     widgets::param(ui, p, clock);
                 }
+                if let Some(c) = e.custom.as_deref_mut() {
+                    ui.horizontal(|ui| {
+                        if ui.button("Edit code").clicked() {
+                            shader_editor::request_open(ui.ctx(), c.id);
+                        }
+                        shader_editor::status(ui, c);
+                    });
+                    shader_editor::params(ui, c, clock);
+                }
             });
     }
     if let Some(i) = remove {
@@ -129,6 +140,19 @@ pub fn effect_chain(ui: &mut egui::Ui, effects: &mut Vec<Effect>, owner: u64, cl
                 ui.close();
             }
         }
+        ui.separator();
+        ui.label(RichText::new("Code").small().weak());
+        ui.menu_button("Custom shader (GLSL)", |ui| {
+            for (name, role, code) in TEMPLATES {
+                let tag = if *role == Role::Effect { "  (uses input)" } else { "" };
+                if ui.button(format!("{name}{tag}")).clicked() {
+                    let e = Effect::custom(name, code);
+                    shader_editor::request_open(ui.ctx(), e.custom.as_ref().unwrap().id);
+                    effects.push(e);
+                    ui.close();
+                }
+            }
+        });
     });
 }
 
@@ -204,6 +228,17 @@ pub fn clip_panel(ui: &mut egui::Ui, clip: Option<&mut Clip>, clock: Clock) {
             }
         });
     }
+    if let Media::Shader(s) = &mut clip.media {
+        section(ui, "Shader", true, |ui| {
+            ui.horizontal(|ui| {
+                if ui.button("Edit code").clicked() {
+                    shader_editor::request_open(ui.ctx(), s.id);
+                }
+                shader_editor::status(ui, s);
+            });
+            shader_editor::params(ui, s, clock);
+        });
+    }
 
     section(ui, "Placement", true, |ui| {
         ui.horizontal(|ui| {
@@ -236,6 +271,9 @@ pub fn clip_panel(ui: &mut egui::Ui, clip: Option<&mut Clip>, clock: Clock) {
             }
             Media::Generator(_) => {
                 ui.label("Procedural generator");
+            }
+            Media::Shader(_) => {
+                ui.label("User GLSL shader");
             }
         };
     });

@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::modulation::Clock;
 use crate::param::{Param, Params, Spec};
 use crate::source::{self, Frame, Stream};
+use crate::shader::{CustomShader, Role};
 use crate::video::VideoMedia;
 
 pub fn next_id() -> u64 {
@@ -105,6 +106,8 @@ pub enum Media {
     Image { frame: Frame, uploaded: bool },
     Camera { index: u32, stream: Stream },
     Generator(Box<Generator>),
+    /// User GLSL (Shadertoy style).
+    Shader(Box<CustomShader>),
 }
 
 pub struct Clip {
@@ -156,7 +159,10 @@ impl Clip {
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or(name.clone());
-        let media = if source::is_video(path) {
+        let media = if source::is_shader(path) {
+            let code = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+            Media::Shader(Box::new(CustomShader::new(&stem, &code, Role::Source)))
+        } else if source::is_video(path) {
             Media::Video(VideoMedia::import(path, width, height)?)
         } else {
             Media::Image {
@@ -170,6 +176,10 @@ impl Clip {
     pub fn camera(index: u32, width: u32, height: u32) -> Result<Self, String> {
         let stream = Stream::camera(index, width, height)?;
         Ok(Self::new(format!("Camera {index}"), Media::Camera { index, stream }))
+    }
+
+    pub fn shader(name: &str, code: &str) -> Self {
+        Self::new(name.to_string(), Media::Shader(Box::new(CustomShader::new(name, code, Role::Source))))
     }
 
     pub fn generator(pattern: usize) -> Self {
@@ -226,10 +236,14 @@ impl Clip {
     pub fn tick(&mut self, dt: f64, clock: Clock, playing: bool) {
         self.speed.tick(clock);
         self.beats.tick(clock);
-        if let Media::Generator(g) = &mut self.media {
-            for p in [&mut g.pattern, &mut g.freq, &mut g.speed, &mut g.hue] {
-                p.tick(clock);
+        match &mut self.media {
+            Media::Generator(g) => {
+                for p in [&mut g.pattern, &mut g.freq, &mut g.speed, &mut g.hue] {
+                    p.tick(clock);
+                }
             }
+            Media::Shader(s) => s.tick(clock),
+            _ => {}
         }
         if !self.is_timeline() || !playing || self.finished {
             return;
@@ -286,7 +300,7 @@ impl Clip {
                 })
             }
             Media::Camera { stream, .. } => stream.poll(),
-            Media::Generator(_) => None,
+            Media::Generator(_) | Media::Shader(_) => None,
         }
     }
 
@@ -302,11 +316,21 @@ impl Params for Clip {
     fn visit_params(&mut self, f: &mut dyn FnMut(&str, &mut Param)) {
         f("speed", &mut self.speed);
         f("length (beats)", &mut self.beats);
-        if let Media::Generator(g) = &mut self.media {
-            f("pattern", &mut g.pattern);
-            f("frequency", &mut g.freq);
-            f("pattern speed", &mut g.speed);
-            f("hue", &mut g.hue);
+        match &mut self.media {
+            Media::Generator(g) => {
+                f("pattern", &mut g.pattern);
+                f("frequency", &mut g.freq);
+                f("pattern speed", &mut g.speed);
+                f("hue", &mut g.hue);
+            }
+            Media::Shader(s) => {
+                for p in &mut s.params {
+                    let label = p.spec.label;
+                    f(label, p);
+                }
+                f("alpha", &mut s.alpha);
+            }
+            _ => {}
         }
     }
 }

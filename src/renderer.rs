@@ -20,13 +20,16 @@ use crate::clip::{Clip, Media};
 use crate::composition::Composition;
 use crate::effects::{EFFECTS, Effect, EffectKind, HistorySource};
 use crate::modulation::Clock;
+use crate::shader::{CompileError, CustomShader};
 
 pub const WIDTH: u32 = 1280;
 pub const HEIGHT: u32 = 720;
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const RENDER: wgpu::TextureUsages = wgpu::TextureUsages::RENDER_ATTACHMENT
     .union(wgpu::TextureUsages::TEXTURE_BINDING)
-    .union(wgpu::TextureUsages::COPY_SRC);
+    .union(wgpu::TextureUsages::COPY_SRC)
+    .union(wgpu::TextureUsages::COPY_DST);
+const NOISE_SIZE: u32 = 256;
 
 struct Tex {
     tex: wgpu::Texture,
@@ -49,6 +52,19 @@ impl Ring {
     fn layer_ago(&self, ago: u32) -> f32 {
         ((self.head + self.len - ago % self.len) % self.len) as f32
     }
+}
+
+/// GPU state of one user shader.
+struct CustomGpu {
+    pipe: Option<Pipe>,
+    /// Output ping-pong (allocated when first drawn); the other one is `iChannel1`.
+    bufs: Option<[Tex; 2]>,
+    cur: usize,
+    frame: i32,
+    /// The effect input, flipped to GL orientation (`iChannel0`).
+    input_gl: Option<Tex>,
+    /// WGSL shaders run in screen space: no flips.
+    screen_space: bool,
 }
 
 struct Pipe {
@@ -75,6 +91,14 @@ pub struct Renderer {
     comp: Option<[Tex; 2]>,
     output: Tex,
     pub display_id: egui::TextureId,
+    // User shaders.
+    vs_module: wgpu::ShaderModule,
+    flip_pipe: Pipe,
+    repeat_sampler: wgpu::Sampler,
+    noise: Tex,
+    /// Last frame's output in GL orientation (`iChannel3`).
+    prev_output_gl: Tex,
+    custom: HashMap<u64, CustomGpu>,
 }
 
 fn shader(device: &wgpu::Device, label: &str, parts: &[&str]) -> wgpu::ShaderModule {
@@ -289,10 +313,50 @@ impl Renderer {
         let header = include_str!("shaders/fx/header.wgsl");
         let fx_pipes = EFFECTS
             .iter()
+            .filter(|d| !d.shader.is_empty())
             .map(|d| (d.kind, pipe(&device, d.name, &shader(&device, d.name, &[header, d.shader]), None, &[false, true])))
             .collect();
 
         let dummy_tex = tex2d(&device, "dummy", 1, 1, wgpu::TextureUsages::TEXTURE_BINDING);
+        let vs_module = shader(&device, "fullscreen vs", &[]);
+        let flip_pipe = pipe(&device, "flip", &shader(&device, "flip", &[include_str!("shaders/flip.wgsl")]), None, &[false]);
+        let repeat_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("linear repeat"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let noise = tex2d(
+            &device,
+            "noise",
+            NOISE_SIZE,
+            NOISE_SIZE,
+            wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        );
+        let noise_bytes: Vec<u8> = (0..NOISE_SIZE * NOISE_SIZE * 4)
+            .map(|i| {
+                let mut z = (i as u64).wrapping_mul(0x9e3779b97f4a7c15);
+                z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+                (z >> 56) as u8
+            })
+            .collect();
+        queue.write_texture(
+            noise.tex.as_image_copy(),
+            &noise_bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * NOISE_SIZE),
+                rows_per_image: Some(NOISE_SIZE),
+            },
+            wgpu::Extent3d {
+                width: NOISE_SIZE,
+                height: NOISE_SIZE,
+                depth_or_array_layers: 1,
+            },
+        );
+        let prev_output_gl = tex2d(&device, "previous output (GL)", WIDTH, HEIGHT, RENDER);
         let dummy_ring = ring(&device, 1).view;
         let comp = Some([
             tex2d(&device, "comp a", WIDTH, HEIGHT, RENDER),
@@ -322,6 +386,12 @@ impl Renderer {
             comp,
             output,
             display_id,
+            vs_module,
+            flip_pipe,
+            repeat_sampler,
+            noise,
+            prev_output_gl,
+            custom: HashMap::new(),
         }
     }
 
@@ -342,6 +412,10 @@ impl Renderer {
     }
 
     fn bind(&self, layout: &wgpu::BindGroupLayout, ub: usize, views: &[&wgpu::TextureView]) -> wgpu::BindGroup {
+        self.bind_with(&self.sampler, layout, ub, views)
+    }
+
+    fn bind_with(&self, sampler: &wgpu::Sampler, layout: &wgpu::BindGroupLayout, ub: usize, views: &[&wgpu::TextureView]) -> wgpu::BindGroup {
         let mut entries = vec![
             wgpu::BindGroupEntry {
                 binding: 0,
@@ -349,7 +423,7 @@ impl Renderer {
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: wgpu::BindingResource::Sampler(&self.sampler),
+                resource: wgpu::BindingResource::Sampler(sampler),
             },
         ];
         for (i, v) in views.iter().enumerate() {
@@ -456,13 +530,163 @@ impl Renderer {
     }
 
     /// Run an effect chain, ping-ponging between `bufs`. Returns the index holding the result.
-    fn chain(&mut self, enc: &mut wgpu::CommandEncoder, effects: &[Effect], bufs: &[Tex; 2], mut cur: usize, clock: Clock, used: &mut HashSet<u64>) -> usize {
-        for e in effects.iter().filter(|e| e.enabled) {
+    fn chain(&mut self, enc: &mut wgpu::CommandEncoder, effects: &mut [Effect], bufs: &[Tex; 2], mut cur: usize, clock: Clock, used: &mut HashSet<u64>) -> usize {
+        for e in effects.iter_mut().filter(|e| e.enabled) {
             used.insert(e.id);
-            self.effect(enc, e, &bufs[cur], &bufs[1 - cur], clock);
+            if let Some(c) = e.custom.as_deref_mut() {
+                used.insert(c.id);
+                self.run_custom(enc, c, Some(&bufs[cur]), &bufs[1 - cur], clock);
+            } else {
+                self.effect(enc, e, &bufs[cur], &bufs[1 - cur], clock);
+            }
             cur = 1 - cur;
         }
         cur
+    }
+
+    /// Compile a user shader's WGSL into a pipeline, catching GPU validation errors.
+    fn build_custom(&self, wgsl: &str, entry: &str) -> Result<Pipe, String> {
+        let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let fs = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("user shader"),
+            source: wgpu::ShaderSource::Wgsl(wgsl.into()),
+        });
+        let layout = bind_layout(&self.device, &[false; 4]);
+        let pipeline_layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("user shader"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        let pipeline = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("user shader"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &self.vs_module,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &fs,
+                entry_point: Some(entry),
+                compilation_options: Default::default(),
+                targets: &[Some(FORMAT.into())],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        match pollster::block_on(scope.pop()) {
+            Some(e) => Err(e.to_string()),
+            None => Ok(Pipe { pipeline, layout }),
+        }
+    }
+
+    fn flip(&mut self, enc: &mut wgpu::CommandEncoder, src: &Tex, dst: &Tex, mode: f32) {
+        let ub = self.uniform(&[[mode, 1.0, 0.0, 0.0]]);
+        let bg = self.bind(&self.flip_pipe.layout, ub, &[&src.view]);
+        pass(enc, &dst.view, Some(wgpu::Color::TRANSPARENT), &self.flip_pipe, &bg);
+    }
+
+    /// Compile a user shader if its code changed. Runs for every shader in the
+    /// composition each tick, whether or not it's being drawn, so the editor always
+    /// reflects the current code.
+    fn compile_custom(&mut self, shader: &mut CustomShader) {
+        let Some(compiled) = shader.poll_compile() else { return };
+        let built = self.build_custom(&compiled.wgsl, &compiled.entry);
+        let gpu = self.custom.entry(shader.id).or_insert_with(|| CustomGpu {
+            pipe: None,
+            bufs: None,
+            cur: 0,
+            frame: 0,
+            input_gl: None,
+            screen_space: false,
+        });
+        match built {
+            Ok(p) => {
+                gpu.pipe = Some(p);
+                gpu.screen_space = compiled.screen_space;
+                gpu.frame = 0;
+                shader.running = true;
+            }
+            Err(e) => {
+                shader.errors = vec![CompileError {
+                    line: None,
+                    message: format!("GPU rejected the shader: {e}"),
+                }]
+            }
+        }
+    }
+
+    /// Run a user shader. `input` (an effect's input) becomes `iChannel0`; output goes to `dst`.
+    fn run_custom(&mut self, enc: &mut wgpu::CommandEncoder, shader: &mut CustomShader, input: Option<&Tex>, dst: &Tex, clock: Clock) {
+        let Some(mut gpu) = self.custom.remove(&shader.id) else {
+            // Not compiled yet: pass the input through (or show nothing).
+            match input {
+                Some(i) => enc.copy_texture_to_texture(i.tex.as_image_copy(), dst.tex.as_image_copy(), i.tex.size()),
+                None => clear_pass(enc, &dst.view, wgpu::Color::TRANSPARENT),
+            }
+            return;
+        };
+        if gpu.pipe.is_none() {
+            // Nothing has compiled yet: pass the input through (or show nothing).
+            match input {
+                Some(i) => enc.copy_texture_to_texture(i.tex.as_image_copy(), dst.tex.as_image_copy(), i.tex.size()),
+                None => clear_pass(enc, &dst.view, wgpu::Color::TRANSPARENT),
+            }
+            self.custom.insert(shader.id, gpu);
+            return;
+        }
+
+        if let Some(inp) = input
+            && !gpu.screen_space
+        {
+            let gl = gpu.input_gl.take().unwrap_or_else(|| tex2d(&self.device, "user shader input", WIDTH, HEIGHT, RENDER));
+            self.flip(enc, inp, &gl, 3.0);
+            gpu.input_gl = Some(gl);
+        }
+
+        let (w, h) = (WIDTH as f32, HEIGHT as f32);
+        let mut data = [[0.0f32; 4]; 12];
+        data[0] = [w, h, 1.0, clock.time as f32];
+        data[1] = shader.mouse;
+        data[2] = date_now();
+        data[3] = [w, h, 1.0, 0.0];
+        data[4] = [w, h, 1.0, 0.0];
+        data[5] = [NOISE_SIZE as f32, NOISE_SIZE as f32, 1.0, 0.0];
+        data[6] = [w, h, 1.0, 0.0];
+        data[7] = [1.0 / 60.0, f32::from_bits(gpu.frame as u32), clock.beat as f32, clock.bpm];
+        for (i, p) in shader.params.iter().enumerate().take(crate::shader::MAX_PARAMS) {
+            data[8 + i / 4][i % 4] = p.get();
+        }
+        let ub = self.uniform(&data);
+        let pipe = gpu.pipe.as_ref().unwrap();
+        // GLSL sees GL-oriented copies; WGSL sees trippy's own (screen-space) textures.
+        let (ch0, ch3) = if gpu.screen_space {
+            (input.map(|t| &t.view).unwrap_or(&self.dummy_tex.view), &self.output.view)
+        } else {
+            (gpu.input_gl.as_ref().map(|t| &t.view).unwrap_or(&self.dummy_tex.view), &self.prev_output_gl.view)
+        };
+        let bufs = gpu.bufs.get_or_insert_with(|| {
+            [
+                tex2d(&self.device, "user shader a", WIDTH, HEIGHT, RENDER),
+                tex2d(&self.device, "user shader b", WIDTH, HEIGHT, RENDER),
+            ]
+        });
+        let prev = &bufs[1 - gpu.cur].view;
+        let bg = self.bind_with(&self.repeat_sampler, &pipe.layout, ub, &[ch0, prev, &self.noise.view, ch3]);
+        pass(enc, &bufs[gpu.cur].view, Some(wgpu::Color::TRANSPARENT), pipe, &bg);
+        let out = &bufs[gpu.cur];
+        let mode = shader.alpha.index() as f32;
+        let flip = if gpu.screen_space { 0.0 } else { 1.0 };
+        let ub = self.uniform(&[[mode, flip, 0.0, 0.0]]);
+        let bg = self.bind(&self.flip_pipe.layout, ub, &[&out.view]);
+        pass(enc, &dst.view, Some(wgpu::Color::TRANSPARENT), &self.flip_pipe, &bg);
+        gpu.cur = 1 - gpu.cur;
+        gpu.frame += 1;
+        self.custom.insert(shader.id, gpu);
     }
 
     pub fn render(&mut self, comp: &mut Composition, clock: Clock) {
@@ -470,7 +694,14 @@ impl Renderer {
         let mut used_sources = HashSet::new();
         let mut used_layers = HashSet::new();
         let mut used_fx = HashSet::new();
+        let mut used_custom = HashSet::new();
         let aspect = WIDTH as f32 / HEIGHT as f32;
+        // Compile every user shader, drawn or not; keep GPU state for all that exist.
+        let mut existing_shaders = HashSet::new();
+        comp.for_each_shader(&mut |s| {
+            existing_shaders.insert(s.id);
+            self.compile_custom(s);
+        });
         let mut enc = self.device.create_command_encoder(&Default::default());
 
         let comp_bufs = self.comp.take().expect("composition buffers");
@@ -499,11 +730,20 @@ impl Renderer {
             for (col, weight) in draws {
                 let clip = layer.clips[col].as_mut().unwrap();
                 used_sources.insert(clip.id);
-                if !self.upload(clip) {
+                if let Media::Shader(s) = &mut clip.media {
+                    used_custom.insert(s.id);
+                    let src = self.sources.remove(&clip.id).unwrap_or_else(|| SourceTex {
+                        tex: tex2d(&self.device, "shader clip", WIDTH, HEIGHT, RENDER),
+                        size: (WIDTH, HEIGHT),
+                    });
+                    self.run_custom(&mut enc, s, None, &src.tex, clock);
+                    self.sources.insert(clip.id, src);
+                } else if !self.upload(clip) {
                     continue;
                 }
                 let (mode, tex_aspect, straight, gen_params) = match &clip.media {
                     Media::Generator(g) => (1.0, 1.0, 0.0, [g.pattern.get(), g.freq.get(), g.speed.get(), g.hue.get()]),
+                    Media::Shader(_) => (0.0, aspect, 0.0, [0.0; 4]),
                     _ => {
                         let s = self.sources[&clip.id].size;
                         (0.0, s.0 as f32 / s.1 as f32, 1.0, [0.0; 4])
@@ -522,7 +762,7 @@ impl Renderer {
             }
 
             // Layer effects.
-            let lc = self.chain(&mut enc, &layer.effects, &bufs, 0, clock, &mut used_fx);
+            let lc = self.chain(&mut enc, &mut layer.effects, &bufs, 0, clock, &mut used_fx);
 
             // Composite onto the composition.
             let ub = self.uniform(&[[layer.blend as u32 as f32, opacity, 0.0, 0.0]]);
@@ -533,17 +773,29 @@ impl Renderer {
         }
 
         // Master effects.
-        cur = self.chain(&mut enc, &comp.effects, &comp_bufs, cur, clock, &mut used_fx);
+        cur = self.chain(&mut enc, &mut comp.effects, &comp_bufs, cur, clock, &mut used_fx);
 
         let ub = self.uniform(&[[comp.master.get(), 0.0, 0.0, 0.0]]);
         let bg = self.bind(&self.final_pipe.layout, ub, &[&comp_bufs[cur].view]);
         pass(&mut enc, &self.output.view, None, &self.final_pipe, &bg);
         self.comp = Some(comp_bufs);
+        // Keep a GL-oriented copy for user shaders' iChannel3.
+        let ub = self.uniform(&[[3.0, 1.0, 0.0, 0.0]]);
+        let bg = self.bind(&self.flip_pipe.layout, ub, &[&self.output.view]);
+        pass(&mut enc, &self.prev_output_gl.view, None, &self.flip_pipe, &bg);
         self.queue.submit([enc.finish()]);
 
         self.sources.retain(|id, _| used_sources.contains(id));
         self.layers.retain(|id, _| used_layers.contains(id));
         self.rings.retain(|id, _| used_fx.contains(id));
+        // Free frame buffers of shaders not drawn this frame; drop deleted shaders entirely.
+        self.custom.retain(|id, _| existing_shaders.contains(id));
+        for (id, gpu) in self.custom.iter_mut() {
+            if !used_fx.contains(id) && !used_custom.contains(id) {
+                gpu.bufs = None;
+                gpu.input_gl = None;
+            }
+        }
     }
 
     /// Forget all delay/feedback history.
@@ -591,4 +843,24 @@ impl Renderer {
         let data = buf.slice(..).get_mapped_range().map_err(|e| format!("{e:?}"))?.to_vec();
         image::RgbaImage::from_raw(WIDTH, HEIGHT, data).ok_or_else(|| "snapshot size mismatch".into())
     }
+}
+
+/// Shadertoy iDate: (year, month 0-11, day 1-31, seconds since midnight), local time ≈ UTC.
+fn date_now() -> [f32; 4] {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    let days = (secs / 86400.0).floor() as i64;
+    // Civil-from-days (Howard Hinnant).
+    let z = days + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + if month <= 2 { 1 } else { 0 };
+    [year as f32, (month - 1) as f32, day as f32, (secs - days as f64 * 86400.0) as f32]
 }

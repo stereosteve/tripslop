@@ -8,6 +8,7 @@ mod modulation;
 mod param;
 mod recorder;
 mod renderer;
+mod shader;
 mod source;
 mod ui;
 mod video;
@@ -55,8 +56,12 @@ fn main() -> eframe::Result {
             if demo {
                 app.load_demo();
             }
+            let any_files = !files.is_empty();
             for (col, f) in files.into_iter().enumerate() {
                 app.load_file(0, col, f);
+            }
+            if any_files && app.comp.layers[0].active.is_none() {
+                app.comp.layers[0].launch(0);
             }
             if record {
                 app.toggle_recording();
@@ -88,6 +93,10 @@ struct App {
     frame_count: u64,
     recorder: Option<Recorder>,
     finishing: Vec<Finishing>,
+    /// Shader open in the code editor.
+    editing: Option<u64>,
+    /// Pointer position (output pixels, y up) where the current iMouse drag started.
+    mouse_click: Option<[f32; 2]>,
     /// Testing hook: `TRIPPY_SNAPSHOT=<frames>:<out.png>` saves a frame and quits.
     auto_snapshot: Option<(u64, PathBuf)>,
 }
@@ -114,6 +123,8 @@ impl App {
             frame_count: 0,
             recorder: None,
             finishing: Vec::new(),
+            editing: None,
+            mouse_click: None,
             auto_snapshot: std::env::var("TRIPPY_SNAPSHOT").ok().and_then(|v| {
                 let (n, p) = v.split_once(':')?;
                 Some((n.parse().ok()?, PathBuf::from(p)))
@@ -206,7 +217,7 @@ impl App {
                     if let Some(path) = rfd::FileDialog::new()
                         .add_filter(
                             "media",
-                            &["png", "jpg", "jpeg", "gif", "webp", "bmp", "mp4", "mov", "m4v", "mkv", "webm", "avi"],
+                            &["png", "jpg", "jpeg", "gif", "webp", "bmp", "mp4", "mov", "m4v", "mkv", "webm", "avi", "glsl", "frag", "wgsl"],
                         )
                         .pick_file()
                     {
@@ -220,6 +231,15 @@ impl App {
                     }
                     Err(e) => self.status = format!("Error: {e}"),
                 },
+                GridAction::Shader { layer, col, template } => {
+                    let (name, _, code) = shader::TEMPLATES[template];
+                    let c = Clip::shader(name, code);
+                    if let clip::Media::Shader(s) = &c.media {
+                        self.editing = Some(s.id);
+                    }
+                    self.comp.set_clip(layer, col, c);
+                    self.grid.selected_clip = Some((layer, col));
+                }
                 GridAction::Generator { layer, col, pattern } => {
                     self.comp.set_clip(layer, col, Clip::generator(pattern));
                     self.grid.selected_clip = Some((layer, col));
@@ -494,6 +514,21 @@ impl App {
     /// Output monitor; drag / scroll moves and scales the selected layer.
     fn monitor(&mut self, ui: &mut egui::Ui) {
         let (resp, rect) = paint_output(ui, self.renderer.display_id);
+        // Alt-drag drives iMouse of the shader being edited.
+        let alt = ui.input(|i| i.modifiers.alt);
+        if alt && let Some(id) = self.editing && let Some(s) = self.comp.find_shader_mut(id) {
+            if let Some(p) = resp.interact_pointer_pos().filter(|_| resp.is_pointer_button_down_on()) {
+                let x = ((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0) * WIDTH as f32;
+                let y = (1.0 - (p.y - rect.top()) / rect.height()).clamp(0.0, 1.0) * HEIGHT as f32;
+                let click = *self.mouse_click.get_or_insert([x, y]);
+                s.mouse = [x, y, click[0], click[1]];
+            } else if self.mouse_click.take().is_some() {
+                // Shadertoy convention: negative click position once released.
+                s.mouse[2] = -s.mouse[2].abs();
+                s.mouse[3] = -s.mouse[3].abs();
+            }
+            return;
+        }
         let Some(layer) = self.comp.layers.get_mut(self.grid.selected_layer) else { return };
         if resp.dragged() {
             let d = resp.drag_delta();
@@ -586,6 +621,9 @@ impl eframe::App for App {
         self.handle_input(&ctx);
         self.render_frame();
         self.make_thumbnails(&ctx);
+        if let Some(id) = ui::shader_editor::take_request(&ctx) {
+            self.editing = Some(id);
+        }
         let tex = self.renderer.display_id;
         let clock = self.clock();
         let blink = (self.beat * 4.0).fract() < 0.5;
@@ -653,6 +691,9 @@ impl eframe::App for App {
             });
         }
 
+        if !self.perform {
+            ui::shader_editor::show(&ctx, &mut self.comp, &mut self.editing, clock);
+        }
         if let Some((n, path)) = self.auto_snapshot.clone()
             && self.frame_count >= n
         {

@@ -363,14 +363,14 @@ impl Composition {
         f("Master › master", &mut self.master);
         f("Master › crossfader", &mut self.crossfader);
         for e in &mut self.effects {
-            let name = e.def().name;
+            let name = e.name().to_string();
             e.visit_params(&mut |label, p| f(&format!("Master › {name} › {label}"), p));
         }
         for l in &mut self.layers {
             let lname = l.name.clone();
             l.visit_params(&mut |label, p| f(&format!("{lname} › {label}"), p));
             for e in &mut l.effects {
-                let name = e.def().name;
+                let name = e.name().to_string();
                 e.visit_params(&mut |label, p| f(&format!("{lname} › {name} › {label}"), p));
             }
             for c in l.clips.iter_mut().flatten() {
@@ -378,6 +378,52 @@ impl Composition {
                 c.visit_params(&mut |label, p| f(&format!("{lname} › {cname} › {label}"), p));
             }
         }
+    }
+}
+
+impl Composition {
+    /// Every user shader in the composition (clips and effects, drawn or not).
+    pub fn for_each_shader(&mut self, f: &mut dyn FnMut(&mut crate::shader::CustomShader)) {
+        for e in &mut self.effects {
+            if let Some(c) = e.custom.as_deref_mut() {
+                f(c);
+            }
+        }
+        for l in &mut self.layers {
+            for e in &mut l.effects {
+                if let Some(c) = e.custom.as_deref_mut() {
+                    f(c);
+                }
+            }
+            for clip in l.clips.iter_mut().flatten() {
+                if let crate::clip::Media::Shader(c) = &mut clip.media {
+                    f(c);
+                }
+            }
+        }
+    }
+
+    /// Find a user shader anywhere (clip or effect) by its id.
+    pub fn find_shader_mut(&mut self, id: u64) -> Option<&mut crate::shader::CustomShader> {
+        fn in_effects(effects: &mut [Effect], id: u64) -> Option<&mut crate::shader::CustomShader> {
+            effects.iter_mut().filter_map(|e| e.custom.as_deref_mut()).find(|c| c.id == id)
+        }
+        if let Some(c) = in_effects(&mut self.effects, id) {
+            return Some(c);
+        }
+        for l in &mut self.layers {
+            if let Some(c) = in_effects(&mut l.effects, id) {
+                return Some(c);
+            }
+            for clip in l.clips.iter_mut().flatten() {
+                if let crate::clip::Media::Shader(c) = &mut clip.media
+                    && c.id == id
+                {
+                    return Some(c);
+                }
+            }
+        }
+        None
     }
 }
 

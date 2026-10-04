@@ -5,6 +5,7 @@
 use crate::clip::next_id;
 use crate::modulation::Shape;
 use crate::param::{Param, Params, Spec};
+use crate::shader::{CustomShader, Role};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum EffectKind {
@@ -22,6 +23,8 @@ pub enum EffectKind {
     Crt,
     Strobe,
     Transform,
+    /// User GLSL (see `shader.rs`).
+    Shader,
 }
 
 /// Which frames the history ring keeps.
@@ -263,7 +266,20 @@ pub static EFFECTS: &[EffectDef] = &[
     },
 ];
 
+/// Registry entry for user shaders; rendering is special-cased (no built-in WGSL).
+static SHADER_DEF: EffectDef = EffectDef {
+    kind: EffectKind::Shader,
+    name: "Custom shader (GLSL)",
+    category: "Code",
+    specs: &[],
+    shader: "",
+    history: None,
+};
+
 pub fn def(kind: EffectKind) -> &'static EffectDef {
+    if kind == EffectKind::Shader {
+        return &SHADER_DEF;
+    }
     EFFECTS.iter().find(|d| d.kind == kind).expect("every kind is registered")
 }
 
@@ -272,6 +288,8 @@ pub struct Effect {
     pub kind: EffectKind,
     pub enabled: bool,
     pub params: Vec<Param>,
+    /// Code and state for `EffectKind::Shader`.
+    pub custom: Option<Box<CustomShader>>,
 }
 
 impl Effect {
@@ -281,6 +299,20 @@ impl Effect {
             kind,
             enabled: true,
             params: def(kind).specs.iter().map(|s| Param::new(*s)).collect(),
+            custom: None,
+        }
+    }
+
+    pub fn custom(name: &str, source: &str) -> Self {
+        let mut e = Self::new(EffectKind::Shader);
+        e.custom = Some(Box::new(CustomShader::new(name, source, Role::Effect)));
+        e
+    }
+
+    pub fn name(&self) -> &str {
+        match &self.custom {
+            Some(c) => &c.name,
+            None => self.def().name,
         }
     }
 
@@ -312,6 +344,13 @@ impl Params for Effect {
         for p in &mut self.params {
             let label = p.spec.label;
             f(label, p);
+        }
+        if let Some(c) = &mut self.custom {
+            for p in &mut c.params {
+                let label = p.spec.label;
+                f(label, p);
+            }
+            f("alpha", &mut c.alpha);
         }
     }
 }

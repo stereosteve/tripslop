@@ -17,6 +17,8 @@ pub enum GridAction {
     LoadFile { layer: usize, col: usize },
     Camera { layer: usize, col: usize, index: u32 },
     Generator { layer: usize, col: usize, pattern: usize },
+    /// New shader clip from `shader::TEMPLATES[template]`.
+    Shader { layer: usize, col: usize, template: usize },
     Remove { layer: usize, col: usize },
     Clear(usize),
     AddLayer,
@@ -152,6 +154,12 @@ impl GridView {
                     painter.circle_filled(thumb_rect.center(), 14.0, Color32::from(c1));
                     painter.text(thumb_rect.left_top() + vec2(4.0, 2.0), egui::Align2::LEFT_TOP, "GEN", egui::FontId::monospace(9.0), Color32::WHITE);
                 }
+                (None, Media::Shader(sh)) => {
+                    painter.rect_filled(thumb_rect, 3.0, Color32::from_rgb(30, 24, 48));
+                    painter.text(thumb_rect.left_top() + vec2(4.0, 2.0), egui::Align2::LEFT_TOP, "GLSL", egui::FontId::monospace(9.0), ACCENT);
+                    let mark = if !sh.errors.is_empty() { "error" } else { "{ }" };
+                    painter.text(thumb_rect.center(), egui::Align2::CENTER_CENTER, mark, egui::FontId::monospace(18.0), Color32::WHITE);
+                }
                 (None, Media::Camera { index, .. }) => {
                     painter.rect_filled(thumb_rect, 3.0, Color32::from_gray(40));
                     painter.text(thumb_rect.center(), egui::Align2::CENTER_CENTER, format!("CAM {index}"), egui::FontId::monospace(13.0), Color32::WHITE);
@@ -220,6 +228,15 @@ impl GridView {
                         ui.close();
                     }
                 }
+            });
+            ui.menu_button("Shader (GLSL)", |ui| {
+                for (i, (name, _, _)) in crate::shader::TEMPLATES.iter().enumerate() {
+                    if ui.button(*name).clicked() {
+                        actions.push(GridAction::Shader { layer: li, col, template: i });
+                        ui.close();
+                    }
+                }
+                ui.label(RichText::new("Or drop a .glsl / .frag file").small().weak());
             });
             ui.menu_button("Camera / capture", |ui| {
                 for index in 0..6 {
