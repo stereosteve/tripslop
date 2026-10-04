@@ -1,5 +1,7 @@
 //! The clip grid: layers are rows (top layer at the top), columns are scenes.
 
+use std::collections::HashMap;
+
 use eframe::egui::{self, Color32, Rect, RichText, Sense, Stroke, StrokeKind, pos2, vec2};
 
 use crate::clip::{Media, PATTERNS};
@@ -34,7 +36,8 @@ pub struct GridView {
 }
 
 impl GridView {
-    pub fn show(&mut self, ui: &mut egui::Ui, comp: &mut Composition, blink: bool) -> Vec<GridAction> {
+    /// `thumbs`: rendered preview icons for generator and shader clips, by clip id.
+    pub fn show(&mut self, ui: &mut egui::Ui, comp: &mut Composition, blink: bool, thumbs: &HashMap<u64, egui::TextureId>) -> Vec<GridAction> {
         let mut actions = Vec::new();
         self.cells.clear();
         ui.spacing_mut().item_spacing = vec2(3.0, 3.0);
@@ -65,7 +68,7 @@ impl GridView {
             ui.horizontal(|ui| {
                 self.layer_header(ui, comp, li, &mut actions);
                 for col in 0..comp.columns {
-                    self.cell(ui, comp, li, col, blink, &mut actions);
+                    self.cell(ui, comp, li, col, blink, thumbs, &mut actions);
                 }
             });
         }
@@ -128,7 +131,17 @@ impl GridView {
         });
     }
 
-    fn cell(&mut self, ui: &mut egui::Ui, comp: &mut Composition, li: usize, col: usize, blink: bool, actions: &mut Vec<GridAction>) {
+    #[allow(clippy::too_many_arguments)]
+    fn cell(
+        &mut self,
+        ui: &mut egui::Ui,
+        comp: &mut Composition,
+        li: usize,
+        col: usize,
+        blink: bool,
+        thumbs: &HashMap<u64, egui::TextureId>,
+        actions: &mut Vec<GridAction>,
+    ) {
         let (rect, resp) = ui.allocate_exact_size(CELL, Sense::click());
         self.cells.push(((li, col), rect));
         let layer = &comp.layers[li];
@@ -141,6 +154,28 @@ impl GridView {
 
         let thumb_rect = Rect::from_min_size(rect.min, vec2(CELL.x, CELL.y - 18.0));
         if let Some(clip) = layer.clips[col].as_ref() {
+            let procedural = matches!(clip.media, Media::Generator(_) | Media::Shader(_));
+            let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+            let gpu_thumb = thumbs.get(&clip.id).filter(|_| procedural);
+            if let Some(t) = gpu_thumb {
+                painter.rect_filled(thumb_rect, 3.0, Color32::BLACK);
+                painter.image(*t, thumb_rect, uv, Color32::WHITE);
+                let tag = match &clip.media {
+                    Media::Generator(_) => Some("GEN"),
+                    Media::Shader(_) => Some("GLSL"),
+                    _ => None,
+                };
+                if let Some(tag) = tag {
+                    let tr = Rect::from_min_size(thumb_rect.left_top(), vec2(30.0, 12.0));
+                    painter.rect_filled(tr, 2.0, Color32::from_black_alpha(160));
+                    painter.text(tr.left_center() + vec2(3.0, 0.0), egui::Align2::LEFT_CENTER, tag, egui::FontId::monospace(9.0), Color32::WHITE);
+                }
+                if let Media::Shader(sh) = &clip.media
+                    && !sh.errors.is_empty()
+                {
+                    painter.text(thumb_rect.center(), egui::Align2::CENTER_CENTER, "error", egui::FontId::proportional(12.0), Color32::RED);
+                }
+            } else {
             match (&clip.thumbnail, &clip.media) {
                 (Some(t), _) => {
                     painter.image(t.id(), thumb_rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
@@ -165,6 +200,7 @@ impl GridView {
                     painter.text(thumb_rect.center(), egui::Align2::CENTER_CENTER, format!("CAM {index}"), egui::FontId::monospace(13.0), Color32::WHITE);
                 }
                 _ => {}
+            }
             }
             if let Media::Video(v) = &clip.media {
                 let p = v.progress();

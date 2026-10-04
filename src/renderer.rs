@@ -30,6 +30,18 @@ const RENDER: wgpu::TextureUsages = wgpu::TextureUsages::RENDER_ATTACHMENT
     .union(wgpu::TextureUsages::COPY_SRC)
     .union(wgpu::TextureUsages::COPY_DST);
 const NOISE_SIZE: u32 = 256;
+pub const THUMB_W: u32 = 192;
+pub const THUMB_H: u32 = 108;
+/// Moment at which generator / shader previews are rendered (seconds, beats).
+const PREVIEW_TIME: f64 = 2.0;
+
+/// A small GPU texture shown in the clip grid.
+struct Thumb {
+    tex: Tex,
+    id: egui::TextureId,
+    /// What the preview was rendered from; re-render only when this changes.
+    signature: Option<u64>,
+}
 
 struct Tex {
     tex: wgpu::Texture,
@@ -99,6 +111,12 @@ pub struct Renderer {
     /// Last frame's output in GL orientation (`iChannel3`).
     prev_output_gl: Tex,
     custom: HashMap<u64, CustomGpu>,
+    // Clip grid thumbnails.
+    egui_renderer: std::sync::Arc<egui::mutex::RwLock<egui_wgpu::Renderer>>,
+    thumbs: HashMap<u64, Thumb>,
+    /// GL-oriented scratch target for shader previews.
+    preview_gl: Tex,
+    tick: u64,
 }
 
 fn shader(device: &wgpu::Device, label: &str, parts: &[&str]) -> wgpu::ShaderModule {
@@ -357,6 +375,7 @@ impl Renderer {
             },
         );
         let prev_output_gl = tex2d(&device, "previous output (GL)", WIDTH, HEIGHT, RENDER);
+        let preview_gl = tex2d(&device, "shader preview", THUMB_W, THUMB_H, RENDER);
         let dummy_ring = ring(&device, 1).view;
         let comp = Some([
             tex2d(&device, "comp a", WIDTH, HEIGHT, RENDER),
@@ -392,6 +411,10 @@ impl Renderer {
             noise,
             prev_output_gl,
             custom: HashMap::new(),
+            egui_renderer: rs.renderer.clone(),
+            thumbs: HashMap::new(),
+            preview_gl,
+            tick: 0,
         }
     }
 
@@ -648,19 +671,7 @@ impl Renderer {
             gpu.input_gl = Some(gl);
         }
 
-        let (w, h) = (WIDTH as f32, HEIGHT as f32);
-        let mut data = [[0.0f32; 4]; 12];
-        data[0] = [w, h, 1.0, clock.time as f32];
-        data[1] = shader.mouse;
-        data[2] = date_now();
-        data[3] = [w, h, 1.0, 0.0];
-        data[4] = [w, h, 1.0, 0.0];
-        data[5] = [NOISE_SIZE as f32, NOISE_SIZE as f32, 1.0, 0.0];
-        data[6] = [w, h, 1.0, 0.0];
-        data[7] = [1.0 / 60.0, f32::from_bits(gpu.frame as u32), clock.beat as f32, clock.bpm];
-        for (i, p) in shader.params.iter().enumerate().take(crate::shader::MAX_PARAMS) {
-            data[8 + i / 4][i % 4] = p.get();
-        }
+        let data = shader_uniforms(shader, WIDTH, HEIGHT, gpu.frame, clock);
         let ub = self.uniform(&data);
         let pipe = gpu.pipe.as_ref().unwrap();
         // GLSL sees GL-oriented copies; WGSL sees trippy's own (screen-space) textures.
@@ -783,7 +794,9 @@ impl Renderer {
         let ub = self.uniform(&[[3.0, 1.0, 0.0, 0.0]]);
         let bg = self.bind(&self.flip_pipe.layout, ub, &[&self.output.view]);
         pass(&mut enc, &self.prev_output_gl.view, None, &self.flip_pipe, &bg);
+        self.previews(&mut enc, comp);
         self.queue.submit([enc.finish()]);
+        self.tick += 1;
 
         self.sources.retain(|id, _| used_sources.contains(id));
         self.layers.retain(|id, _| used_layers.contains(id));
@@ -794,6 +807,89 @@ impl Renderer {
             if !used_fx.contains(id) && !used_custom.contains(id) {
                 gpu.bufs = None;
                 gpu.input_gl = None;
+            }
+        }
+    }
+
+    fn ensure_thumb(&mut self, clip_id: u64) {
+        if !self.thumbs.contains_key(&clip_id) {
+            let tex = tex2d(&self.device, "thumbnail", THUMB_W, THUMB_H, RENDER);
+            let id = self.egui_renderer.write().register_native_texture(&self.device, &tex.view, wgpu::FilterMode::Linear);
+            self.thumbs.insert(clip_id, Thumb { tex, id, signature: None });
+        }
+    }
+
+    /// Thumbnail texture for a clip, if one has been rendered.
+    pub fn thumbnails(&self) -> HashMap<u64, egui::TextureId> {
+        self.thumbs.iter().map(|(k, t)| (*k, t.id)).collect()
+    }
+
+    /// Single-frame preview icons for generator and shader clips, rendered at a fixed
+    /// moment. They're redrawn only when the content changes (a shader recompiles, or a
+    /// generator's settings change), never by playback or automation. Also frees the
+    /// thumbnails of deleted clips.
+    fn previews(&mut self, enc: &mut wgpu::CommandEncoder, comp: &mut Composition) {
+        let clock = Clock {
+            beat: PREVIEW_TIME * 2.0,
+            time: PREVIEW_TIME,
+            bpm: 120.0,
+        };
+        let mut existing = HashSet::new();
+        for layer in &comp.layers {
+            for clip in layer.clips.iter().flatten() {
+                existing.insert(clip.id);
+                let signature = match &clip.media {
+                    Media::Generator(g) => {
+                        let mut h = std::collections::hash_map::DefaultHasher::new();
+                        for p in [&g.pattern, &g.freq, &g.speed, &g.hue] {
+                            std::hash::Hash::hash(&p.value.to_bits(), &mut h);
+                        }
+                        std::hash::Hasher::finish(&h)
+                    }
+                    // Only once a working version exists.
+                    Media::Shader(sh) if self.custom.get(&sh.id).is_some_and(|g| g.pipe.is_some()) => {
+                        sh.compiled_rev.unwrap_or(0)
+                    }
+                    _ => continue,
+                };
+                if self.thumbs.get(&clip.id).is_some_and(|t| t.signature == Some(signature)) {
+                    continue;
+                }
+                self.ensure_thumb(clip.id);
+                match &clip.media {
+                    Media::Generator(g) => {
+                        let data = [
+                            [clock.time as f32, WIDTH as f32 / HEIGHT as f32, 1.0, 1.0],
+                            [0.0, 0.0, 1.0, 0.0],
+                            [0.0, 1.0, g.pattern.value, g.freq.value],
+                            [g.speed.value, g.hue.value, 0.0, 0.0],
+                        ];
+                        let ub = self.uniform(&data);
+                        let bg = self.bind(&self.clip_pipe.layout, ub, &[&self.dummy_tex.view]);
+                        pass(enc, &self.thumbs[&clip.id].tex.view, Some(wgpu::Color::TRANSPARENT), &self.clip_pipe, &bg);
+                    }
+                    Media::Shader(sh) => {
+                        let screen_space = self.custom[&sh.id].screen_space;
+                        let data = shader_uniforms(sh, THUMB_W, THUMB_H, 0, clock);
+                        let ub = self.uniform(&data);
+                        let pipe = self.custom[&sh.id].pipe.as_ref().unwrap();
+                        let d = &self.dummy_tex.view;
+                        let bg = self.bind_with(&self.repeat_sampler, &pipe.layout, ub, &[d, d, &self.noise.view, d]);
+                        pass(enc, &self.preview_gl.view, Some(wgpu::Color::TRANSPARENT), pipe, &bg);
+                        let flip = if screen_space { 0.0 } else { 1.0 };
+                        let ub = self.uniform(&[[sh.alpha.index() as f32, flip, 0.0, 0.0]]);
+                        let bg = self.bind(&self.flip_pipe.layout, ub, &[&self.preview_gl.view]);
+                        pass(enc, &self.thumbs[&clip.id].tex.view, Some(wgpu::Color::TRANSPARENT), &self.flip_pipe, &bg);
+                    }
+                    _ => unreachable!(),
+                }
+                self.thumbs.get_mut(&clip.id).unwrap().signature = Some(signature);
+            }
+        }
+        let gone: Vec<u64> = self.thumbs.keys().filter(|k| !existing.contains(k)).copied().collect();
+        for k in gone {
+            if let Some(t) = self.thumbs.remove(&k) {
+                self.egui_renderer.write().free_texture(&t.id);
             }
         }
     }
@@ -863,4 +959,26 @@ fn date_now() -> [f32; 4] {
     let month = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = yoe + era * 400 + if month <= 2 { 1 } else { 0 };
     [year as f32, (month - 1) as f32, day as f32, (secs - days as f64 * 86400.0) as f32]
+}
+
+/// Uniform block for user shaders (layout matches `shader.rs`'s GLSL and WGSL preludes).
+fn shader_uniforms(shader: &CustomShader, width: u32, height: u32, frame: i32, clock: Clock) -> [[f32; 4]; 12] {
+    let (w, h) = (width as f32, height as f32);
+    // iMouse is in output pixels; scale it to the render size.
+    let sx = w / WIDTH as f32;
+    let sy = h / HEIGHT as f32;
+    let m = shader.mouse;
+    let mut data = [[0.0f32; 4]; 12];
+    data[0] = [w, h, 1.0, clock.time as f32];
+    data[1] = [m[0] * sx, m[1] * sy, m[2] * sx, m[3] * sy];
+    data[2] = date_now();
+    data[3] = [w, h, 1.0, 0.0];
+    data[4] = [w, h, 1.0, 0.0];
+    data[5] = [NOISE_SIZE as f32, NOISE_SIZE as f32, 1.0, 0.0];
+    data[6] = [w, h, 1.0, 0.0];
+    data[7] = [1.0 / 60.0, f32::from_bits(frame as u32), clock.beat as f32, clock.bpm];
+    for (i, p) in shader.params.iter().enumerate().take(crate::shader::MAX_PARAMS) {
+        data[8 + i / 4][i % 4] = p.get();
+    }
+    data
 }

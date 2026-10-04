@@ -659,7 +659,8 @@ impl eframe::App for App {
             egui::Panel::top("transport").show(ui, |ui| self.transport_bar(ui));
             egui::Panel::top("grid").resizable(true).default_size(330.0).show(ui, |ui| {
                 egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
-                    let actions = self.grid.show(ui, &mut self.comp, blink);
+                    let thumbs = self.renderer.thumbnails();
+                    let actions = self.grid.show(ui, &mut self.comp, blink, &thumbs);
                     self.handle_grid(actions);
                 });
             });
