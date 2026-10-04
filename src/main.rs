@@ -33,6 +33,25 @@ const TICK: f64 = 1.0 / 60.0;
 
 const USAGE: &str = "usage: tripslop [--demo] [--record] [--script FILE] [--fixed-step | --realtime] [MEDIA...]";
 
+/// Window / dock icon: the color flower, rasterized centered on a square transparent canvas.
+fn app_icon() -> egui::IconData {
+    const SIZE: u32 = 512;
+    let svg = include_bytes!("../logos/tripslop-flower-color.svg");
+    let tree = resvg::usvg::Tree::from_data(svg, &resvg::usvg::Options::default()).expect("flower logo svg");
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(SIZE, SIZE).unwrap();
+    let (w, h) = (tree.size().width(), tree.size().height());
+    let scale = SIZE as f32 * 0.9 / w.max(h);
+    let (dx, dy) = ((SIZE as f32 - w * scale) / 2.0, (SIZE as f32 - h * scale) / 2.0);
+    let xf = resvg::tiny_skia::Transform::from_scale(scale, scale).post_translate(dx, dy);
+    resvg::render(&tree, xf, &mut pixmap.as_mut());
+    // tiny-skia is premultiplied; IconData wants straight alpha.
+    let rgba = pixmap.pixels().iter().flat_map(|p| {
+        let c = p.demultiply();
+        [c.red(), c.green(), c.blue(), c.alpha()]
+    });
+    egui::IconData { rgba: rgba.collect(), width: SIZE, height: SIZE }
+}
+
 fn main() -> eframe::Result {
     let mut files: Vec<PathBuf> = Vec::new();
     let mut record = false;
@@ -76,7 +95,8 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_title("tripslop")
             .with_inner_size([1680.0, 1000.0])
-            .with_drag_and_drop(true),
+            .with_drag_and_drop(true)
+            .with_icon(app_icon()),
         ..Default::default()
     };
     eframe::run_native(
@@ -85,6 +105,7 @@ fn main() -> eframe::Result {
         Box::new(move |cc| {
             let rs = cc.wgpu_render_state.as_ref().ok_or("tripslop needs the wgpu renderer")?;
             cc.egui_ctx.set_theme(egui::ThemePreference::Dark);
+            egui_extras::install_image_loaders(&cc.egui_ctx);
             let mut app = App::new(Renderer::new(rs));
             app.fixed_step = fixed_step;
             app.script = events.into_iter().map(|event| automation::Pending { event, done: false }).collect();
@@ -554,7 +575,8 @@ impl App {
 
     fn transport_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("tripslop").strong().color(ui::widgets::ACCENT));
+            ui.add(egui::Image::new(egui::include_image!("../logos/tripslop-wordmark-color.svg")).fit_to_exact_size(egui::vec2(72.0, 26.0)))
+                .on_hover_text("tripslop");
             ui.separator();
             let play = if self.comp.playing { "⏸" } else { "▶" };
             if ui.button(play).on_hover_text("Play / pause all clips (Space)").clicked() {
