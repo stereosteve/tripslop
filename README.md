@@ -68,7 +68,7 @@ has frequency, speed and hue controls.
 | --- | --- |
 | Feedback | **Feedback / Fractal**: N scaled, rotated copies of the delayed output with a keyer, hue drift and symmetry. It has presets: Tunnel, Sierpinski, Mandala, Slow trails, Spiral galaxy, Hall of mirrors, Melt |
 | Time | Echo trails, RGB time split |
-| Space | Kaleidoscope, Mirror, Transform (zoom/rotate/tile), Wave warp, **Shape projector** (the layer mapped onto a spinning 3D prism, pyramid or diamond with 3–12 sides; size, height, rotation and beat-synced spin on each axis, per-face or wrapped mapping, lighting) |
+| Space | Kaleidoscope, Mirror, Transform (zoom/rotate/tile), Wave warp, **Shape projector** (the layer mapped onto a spinning 3D prism, pyramid or diamond with 3–12 sides; size, height, rotation and beat-synced spin on each axis, per-face or wrapped mapping, lighting), **Projection mapping** (a projector throws the layer at a spinning prism, pyramid, diamond or sphere seen from another angle, so the image bends across the faces; projector angle, elevation and zoom, plus an optional back wall that catches the rest of the image along with the object's shadow) |
 | Color | Color (hue/sat/contrast/brightness/gamma/invert), Luma key, Pixelate / posterize |
 | Stylize | Blur, Edges, CRT, Strobe (beat-synced) |
 
@@ -246,7 +246,7 @@ or `beat`.
 * `master/master`, `master/crossfader` or `master/EFFECT/PARAM`
 
 `LAYER` is a number or a name. Effects can also be given as `fxN`. Names match
-case-insensitively by prefix, so `2/feedback/rot` works.
+case-insensitively by prefix, so `2/feedback/rot` works. Paths can contain spaces without quotes (`set 1/shape/spin y 0.5`).
 
 **Tests:**
 * `cargo test` runs the unit tests (no window).

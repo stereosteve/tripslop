@@ -1,0 +1,42 @@
+# Projection mapping: a projector throws the input at a spinning object, seen from another
+# angle. A checkerboard makes the distortion easy to read.
+
+generator 1 1 Checker
+launch 1 1
+set 1/clip/frequency 8
+set 1/clip/pattern speed 0
+add-effect 1 "projection mapping"
+set "1/projection/spin y" 0              # fixed poses for comparable stills
+
+at 10  snapshot target/script-out/projection/1-cube-default.png
+
+# Projector exactly where the viewer is: the image must look undistorted, only cut to shape.
+at 11  set "1/projection/projector angle" 0
+at 11  set "1/projection/projector elevation" 0
+at 20  snapshot target/script-out/projection/2-cube-projector-at-viewer.png
+
+at 21  set "1/projection/projector angle" -55
+at 30  snapshot target/script-out/projection/3-cube-projector-left.png
+
+at 31  set 1/projection/shape 3          # sphere
+at 31  set "1/projection/projector angle" 40
+at 40  snapshot target/script-out/projection/4-sphere.png
+
+at 41  set 1/projection/shape 1          # pyramid, no wall, over transparent
+at 41  set 1/projection/wall 0
+at 41  set 1/projection/background 0
+at 50  snapshot target/script-out/projection/5-pyramid-no-wall.png
+
+# The real thing: a photo projected onto a rotating hexagonal prism.
+at 51  load 1 2 samples/pillars-of-creation.jpg
+at 51  launch 1 2
+at 51  set 1/projection/shape 0
+at 51  set 1/projection/sides 6
+at 51  set 1/projection/wall 1
+at 51  set 1/projection/background 1
+at 51  set "1/projection/spin y" 0.25
+at 80  snapshot target/script-out/projection/6-photo-hex-a.png
+at 110 snapshot target/script-out/projection/7-photo-hex-b.png
+
+at 111 assert 1/projection/sides == 6
+quit

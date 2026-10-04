@@ -202,17 +202,18 @@ fn idx(s: Option<&String>, what: &str) -> Result<usize, String> {
     n.checked_sub(1).ok_or_else(|| format!("{what} is 1-based"))
 }
 
-fn parse_query(w: &[String]) -> Result<(Query, usize), String> {
+/// Everything in `w` is the query (parameter paths may contain spaces, quoted or not).
+fn parse_query(w: &[String]) -> Result<Query, String> {
     let first = w.first().ok_or("missing what to read")?;
     Ok(match first.as_str() {
-        "playhead" => (Query::Playhead(idx(w.get(1), "layer")?), 2),
-        "active" => (Query::Active(idx(w.get(1), "layer")?), 2),
-        "pad" => (Query::Pad(parse_pad(w.get(1).ok_or("missing pad")?)?), 2),
-        "errors" => (Query::Errors(idx(w.get(1), "layer")?, idx(w.get(2), "column")?), 3),
-        "layers" => (Query::Layers, 1),
-        "bpm" => (Query::Bpm, 1),
-        "beat" => (Query::Beat, 1),
-        path => (Query::Param(path.to_string()), 1),
+        "playhead" => Query::Playhead(idx(w.get(1), "layer")?),
+        "active" => Query::Active(idx(w.get(1), "layer")?),
+        "pad" => Query::Pad(parse_pad(&w[1..].join(" "))?),
+        "errors" => Query::Errors(idx(w.get(1), "layer")?, idx(w.get(2), "column")?),
+        "layers" => Query::Layers,
+        "bpm" => Query::Bpm,
+        "beat" => Query::Beat,
+        _ => Query::Param(w.join(" ")),
     })
 }
 
@@ -233,7 +234,13 @@ fn parse_cmd(w: &[String]) -> Result<Vec<Cmd>, String> {
             let layer = if target == "master" { None } else { Some(idx(w.get(1), "layer")?) };
             one(Cmd::AddEffect(layer, w.get(2).ok_or("missing effect name")?.clone()))
         }
-        "set" => one(Cmd::Set(w.get(1).ok_or("missing parameter path")?.clone(), num(w.get(2), "value")?)),
+        // The value is the last word; the path is everything before it (spaces allowed).
+        "set" => {
+            if w.len() < 3 {
+                return Err("set needs a parameter path and a value".into());
+            }
+            one(Cmd::Set(w[1..w.len() - 1].join(" "), num(w.last(), "value")?))
+        }
         "bpm" => one(Cmd::Bpm(num(w.get(1), "bpm")?)),
         "quantize" => one(Cmd::Quantize(w.get(1).ok_or("missing off/beat/bar")?.clone())),
         "play" => one(Cmd::Play(true)),
@@ -258,12 +265,15 @@ fn parse_cmd(w: &[String]) -> Result<Vec<Cmd>, String> {
             Some("stop") => one(Cmd::Record(false)),
             _ => Err("record needs start / stop".into()),
         },
-        "print" => one(Cmd::Print(parse_query(&w[1..])?.0)),
+        "print" => one(Cmd::Print(parse_query(&w[1..])?)),
+        // assert WHAT OP VALUE, where WHAT may contain spaces.
         "assert" => {
-            let (q, used) = parse_query(&w[1..])?;
-            let op = w.get(1 + used).and_then(|s| Op::parse(s)).ok_or("assert needs an operator: == != < <= > >= ~=")?;
-            let v: f64 = num(w.get(2 + used), "expected value")?;
-            one(Cmd::Assert(q, op, v))
+            if w.len() < 4 {
+                return Err("assert needs: what, operator, value".into());
+            }
+            let op = Op::parse(&w[w.len() - 2]).ok_or("assert needs an operator: == != < <= > >= ~=")?;
+            let v: f64 = num(w.last(), "expected value")?;
+            one(Cmd::Assert(parse_query(&w[1..w.len() - 2])?, op, v))
         }
         "quit" => one(Cmd::Quit),
         other => Err(format!("unknown command {other:?} in {:?}", rest())),
@@ -337,6 +347,14 @@ mod tests {
                 (When::Seconds(10.0), Cmd::Quit),
             ]
         );
+    }
+
+    #[test]
+    fn paths_with_spaces_need_no_quotes() {
+        let ev = parse("set 1/shape/spin y 0.5\nassert 1/clip/pattern speed ~= 0\nprint Fractal/feedback/rotate °\n").unwrap();
+        assert_eq!(ev[0].cmd, Cmd::Set("1/shape/spin y".into(), 0.5));
+        assert_eq!(ev[1].cmd, Cmd::Assert(Query::Param("1/clip/pattern speed".into()), Op::Approx, 0.0));
+        assert_eq!(ev[2].cmd, Cmd::Print(Query::Param("Fractal/feedback/rotate °".into())));
     }
 
     #[test]

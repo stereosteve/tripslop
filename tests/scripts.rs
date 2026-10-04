@@ -60,3 +60,9 @@ fn punch_tour() {
 fn shape_projector() {
     run("scripts/shape.tripslop");
 }
+
+#[test]
+#[ignore = "opens a window; needs a GPU"]
+fn projection_mapping() {
+    run("scripts/projection.tripslop");
+}
