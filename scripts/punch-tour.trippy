@@ -1,0 +1,86 @@
+# Every punch-in pad in turn on the demo set: held for 4 beats, snapshot 3 beats in,
+# and checked to engage fully and release fully.
+
+demo
+
+at 2b hold Q 4b                       # Stutter
+at 5b assert pad Q == 1
+at 5b snapshot target/script-out/punch/01-stutter.png
+at 7b assert pad Q == 0
+
+at 8b hold W 4b                       # Chase
+at 11b assert pad W == 1
+at 11b snapshot target/script-out/punch/02-chase.png
+at 13b assert pad W == 0
+
+at 14b hold E 4b                       # Mirror split
+at 17b assert pad E == 1
+at 17b snapshot target/script-out/punch/03-mirror-split.png
+at 19b assert pad E == 0
+
+at 20b hold R 4b                       # Pump
+at 23b assert pad R == 1
+at 23b snapshot target/script-out/punch/04-pump.png
+at 25b assert pad R == 0
+
+at 26b hold T 4b                       # Tape stop
+at 29b assert pad T == 1
+at 29b snapshot target/script-out/punch/05-tape-stop.png
+at 31b assert pad T == 0
+
+at 32b hold Y 4b                       # Reverse
+at 35b assert pad Y == 1
+at 35b snapshot target/script-out/punch/06-reverse.png
+at 37b assert pad Y == 0
+
+at 38b hold U 4b                       # Echo build
+at 41b assert pad U == 1
+at 41b snapshot target/script-out/punch/07-echo-build.png
+at 43b assert pad U == 0
+
+at 44b hold I 4b                       # Riser
+at 47b assert pad I == 1
+at 47b snapshot target/script-out/punch/08-riser.png
+at 49b assert pad I == 0
+
+at 50b hold A 4b                       # Strobe split
+at 53b assert pad A == 1
+at 53b snapshot target/script-out/punch/09-strobe-split.png
+at 55b assert pad A == 0
+
+at 56b hold S 4b                       # Kaleido spin
+at 59b assert pad S == 1
+at 59b snapshot target/script-out/punch/10-kaleido-spin.png
+at 61b assert pad S == 0
+
+at 62b hold D 4b                       # Tunnel
+at 65b assert pad D == 1
+at 65b snapshot target/script-out/punch/11-tunnel.png
+at 67b assert pad D == 0
+
+at 68b hold F 4b                       # Fractal bloom
+at 71b assert pad F == 1
+at 71b snapshot target/script-out/punch/12-fractal-bloom.png
+at 73b assert pad F == 0
+
+at 74b hold G 4b                       # Glitch
+at 77b assert pad G == 1
+at 77b snapshot target/script-out/punch/13-glitch.png
+at 79b assert pad G == 0
+
+at 80b hold H 4b                       # Invert flip
+at 83b assert pad H == 1
+at 83b snapshot target/script-out/punch/14-invert-flip.png
+at 85b assert pad H == 0
+
+at 86b hold J 4b                       # Wash out
+at 89b assert pad J == 1
+at 89b snapshot target/script-out/punch/15-wash-out.png
+at 91b assert pad J == 0
+
+at 92b hold K 4b                       # Trance gate
+at 95b assert pad K == 1
+at 95b snapshot target/script-out/punch/16-trance-gate.png
+at 97b assert pad K == 0
+
+at 98b quit

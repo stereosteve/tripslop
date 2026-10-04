@@ -48,6 +48,8 @@ const RELEASE_SECS: f32 = 0.15;
 pub struct Pad {
     pub key_held: bool,
     pub mouse_held: bool,
+    /// Held by an automation script (`--script`).
+    pub script_held: bool,
     pub latched: bool,
     /// Smoothed 0..1 envelope.
     pub amount: f32,
@@ -63,7 +65,7 @@ pub struct Pad {
 
 impl Pad {
     pub fn active(&self) -> bool {
-        self.key_held || self.mouse_held || self.latched
+        self.key_held || self.mouse_held || self.script_held || self.latched
     }
 
     /// Get (or create) this pad's `slot`-th effect for a layer, and include it this tick.
@@ -431,7 +433,7 @@ mod tests {
     /// and fully releases afterwards.
     #[test]
     fn every_pad_runs_and_releases() {
-        for i in 0..PUNCHES.len() {
+        for (i, def) in PUNCHES.iter().enumerate() {
             let mut c = comp();
             let mut p = Punch::new();
             p.pads[i].key_held = true;
@@ -446,7 +448,7 @@ mod tests {
             for t in 600..700 {
                 p.update(&mut c, clock(t as f64 / 30.0), 1.0 / 60.0);
             }
-            assert_eq!(p.pads[i].amount, 0.0, "{} didn't release", PUNCHES[i].name);
+            assert_eq!(p.pads[i].amount, 0.0, "{} didn't release", def.name);
             assert!(p.master_effects().is_empty());
             assert_eq!(c.master_perf, 1.0);
             for l in &c.layers {

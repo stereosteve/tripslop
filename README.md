@@ -193,6 +193,70 @@ They never modify your set: release a pad and everything is exactly as it was.
 **Output window** opens a second window you can drag to a projector and double-click to make
 fullscreen.
 
+## Scripts and testing
+
+`--script FILE` runs timed commands against the real app. Use it for automated tests and CI,
+for capturing stills, or to set up a performance.
+
+```
+cargo run --release -- --script scripts/smoke.trippy
+```
+
+Scripts run in **fixed-step** mode: the 60 Hz clock advances by simulated ticks rather than
+wall time. That makes results independent of machine speed, and runs finish faster than real
+time. `--realtime` turns this off and `--fixed-step` forces it on without a script.
+
+The process exits with status **1** if an `assert` fails or a command errors. A bad script
+exits with **2** before opening a window.
+
+```text
+# comments start with #
+demo                          # runs at time 0
+at 1.25b launch-scene 2       # times: frames (default), Ns seconds, Nb beats
+at +4b   hold Q 4b            # +N = relative to the line above; hold = pad down, up 4 beats later
+set Fractal/feedback/rotate 15
+assert active 1 == 2
+at 600   snapshot target/script-out/end.png
+screenshot target/script-out/ui.png
+quit
+```
+
+Layers and columns are **1-based**, like the UI.
+
+| Command | |
+| --- | --- |
+| `demo` | load the demo set |
+| `launch-scene N` · `launch L C` · `stop L` | launch a scene / a clip; stop a layer |
+| `load L C PATH` · `generator L C NAME` · `shader L C TEMPLATE` · `camera L C INDEX` | put media in a cell (layers are created as needed) |
+| `add-effect L NAME` · `add-effect master NAME` | add an effect by name; `shader:TEMPLATE` adds a code effect |
+| `set PATH VALUE` | set a parameter (see paths below) |
+| `bpm N` · `quantize off/beat/bar` · `play` · `pause` | transport |
+| `pad KEY down/up/latch/unlatch` · `hold KEY DURATION` | punch-in pads, by key, name or number |
+| `select L C` · `tab layer/composition` · `open-editor L C` | UI state, for screenshots |
+| `snapshot PATH` · `screenshot PATH` · `record start/stop` | output frame, full window, video |
+| `print WHAT` · `assert WHAT OP VALUE` · `quit` | checks; `OP` is one of `== != < <= > >= ~=` |
+
+**`WHAT`** is either a parameter path or one of: `playhead L`, `active L` (1-based column, 0
+for none), `pad KEY` (envelope 0..1), `errors L C` (shader compile errors), `layers`, `bpm`
+or `beat`.
+
+**Parameter paths** have one of these forms:
+* `LAYER/PARAM`, `LAYER/EFFECT/PARAM`, `LAYER/clip/PARAM` (the playing clip) or
+  `LAYER/clipN/PARAM`
+* `master/master`, `master/crossfader` or `master/EFFECT/PARAM`
+
+`LAYER` is a number or a name. Effects can also be given as `fxN`. Names match
+case-insensitively by prefix, so `2/feedback/rot` works.
+
+**Tests:**
+* `cargo test` runs the unit tests (no window).
+* `cargo test --release -- --ignored` also runs the scripts in `scripts/` (smoke, shaders,
+  punch tour) as end-to-end tests. These need a GPU and a window session. Captures go to
+  `target/script-out/`.
+
+For a quick single still, use `TRIPPY_SNAPSHOT=<frames>:<out.png>`. It saves the output after
+that many frames and quits.
+
 ## How it works
 
 ```

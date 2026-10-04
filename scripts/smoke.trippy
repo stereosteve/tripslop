@@ -1,0 +1,31 @@
+# Smoke test: the demo set, quantized scene launches, parameters, captures.
+# Run from the repo root:  cargo run --release -- --script scripts/smoke.trippy
+
+demo
+assert layers == 3
+assert active 1 == 1
+assert Fractal/feedback/copies == 3     # the Sierpinski preset on layer 2
+assert bpm == 120
+
+# Launches are quantized to the beat in the demo: requested mid-beat, fired on beat 2.
+at 1.25b launch-scene 2
+at 1.5b  assert active 1 == 1
+at 2.5b  assert active 1 == 2
+at 2.5b  assert active 3 == 0           # the Overlay layer's cell in scene 2 is empty
+
+# Parameters by path: layer number or name, effect / clip, parameter (case-insensitive prefix).
+set 1/opacity 0.5
+assert 1/opacity ~= 0.5
+set Overlay/kaleido/segments 8
+assert 3/kaleidoscope/segments == 8
+set master/crossfader 0.25
+assert master/crossfader ~= 0.25
+
+at 3b    launch-scene 4
+at 4.5b  assert active 1 == 4
+at 4.5b  assert 1/clip/speed ~= 0.5     # the bouncing half-speed jellyfish
+at 5b    assert playhead 1 > 0
+
+at 6b    snapshot target/script-out/smoke/output.png
+at 6b    screenshot target/script-out/smoke/ui.png
+at 6b    quit

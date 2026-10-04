@@ -1,6 +1,7 @@
 //! trippy — a live video mixer: layered clip grid with scenes, per-layer effects and an
 //! emulated analog video-feedback rig.
 
+mod automation;
 mod clip;
 mod composition;
 mod effects;
@@ -9,6 +10,7 @@ mod param;
 mod punch;
 mod recorder;
 mod renderer;
+mod script;
 mod shader;
 mod source;
 mod ui;
@@ -29,17 +31,47 @@ use ui::grid::{GridAction, GridView};
 
 const TICK: f64 = 1.0 / 60.0;
 
+const USAGE: &str = "usage: trippy [--demo] [--record] [--script FILE] [--fixed-step | --realtime] [MEDIA...]";
+
 fn main() -> eframe::Result {
     let mut files: Vec<PathBuf> = Vec::new();
     let mut record = false;
     let mut demo = false;
-    for arg in std::env::args().skip(1) {
+    let mut script_path: Option<PathBuf> = None;
+    let mut fixed_step: Option<bool> = None;
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
         match arg.as_str() {
             "--record" => record = true,
             "--demo" => demo = true,
+            "--script" => match args.next() {
+                Some(p) => script_path = Some(PathBuf::from(p)),
+                None => exit_with(USAGE, 2),
+            },
+            "--fixed-step" => fixed_step = Some(true),
+            "--realtime" => fixed_step = Some(false),
+            "-h" | "--help" => exit_with(USAGE, 0),
+            a if a.starts_with("--") => exit_with(&format!("unknown option {a}\n{USAGE}"), 2),
             _ => files.push(PathBuf::from(arg)),
         }
     }
+    let mut events = Vec::new();
+    if let Some(path) = &script_path {
+        let src = std::fs::read_to_string(path).unwrap_or_else(|e| exit_with(&format!("{}: {e}", path.display()), 2));
+        events = script::parse(&src).unwrap_or_else(|e| exit_with(&format!("{}: {e}", path.display()), 2));
+    }
+    // Shortcut kept for quick checks: TRIPPY_SNAPSHOT=<frames>:<out.png>.
+    if let Some((n, p)) = std::env::var("TRIPPY_SNAPSHOT").ok().and_then(|v| {
+        let (n, p) = v.split_once(':')?;
+        Some((n.parse::<u64>().ok()?, PathBuf::from(p)))
+    }) {
+        for cmd in [script::Cmd::Snapshot(p), script::Cmd::Quit] {
+            events.push(script::Event { at: script::When::Frame(n), cmd, line: 0 });
+        }
+    }
+    // Scripts run in fixed-step mode unless told otherwise: one tick per frame, so results
+    // don't depend on machine speed.
+    let fixed_step = fixed_step.unwrap_or(script_path.is_some());
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("trippy")
@@ -54,6 +86,8 @@ fn main() -> eframe::Result {
             let rs = cc.wgpu_render_state.as_ref().ok_or("trippy needs the wgpu renderer")?;
             cc.egui_ctx.set_theme(egui::ThemePreference::Dark);
             let mut app = App::new(Renderer::new(rs));
+            app.fixed_step = fixed_step;
+            app.script = events.into_iter().map(|event| automation::Pending { event, done: false }).collect();
             if demo {
                 app.load_demo();
             }
@@ -69,7 +103,23 @@ fn main() -> eframe::Result {
             }
             Ok(Box::new(app))
         }),
-    )
+    )?;
+    if let Some(s) = automation::summary() {
+        println!("{s}");
+    }
+    if automation::FAILED.load(std::sync::atomic::Ordering::Relaxed) {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn exit_with(msg: &str, code: i32) -> ! {
+    if code == 0 {
+        println!("{msg}");
+    } else {
+        eprintln!("{msg}");
+    }
+    std::process::exit(code)
 }
 
 #[derive(PartialEq, Eq, Clone, Copy)]
@@ -99,8 +149,16 @@ struct App {
     editing: Option<u64>,
     /// Pointer position (output pixels, y up) where the current iMouse drag started.
     mouse_click: Option<[f32; 2]>,
-    /// Testing hook: `TRIPPY_SNAPSHOT=<frames>:<out.png>` saves a frame and quits.
-    auto_snapshot: Option<(u64, PathBuf)>,
+    /// `--script` events (see `script.rs`).
+    script: Vec<automation::Pending>,
+    /// One simulation tick per UI frame instead of real time (deterministic; for scripts).
+    fixed_step: bool,
+    /// Output frame to save after the current tick renders.
+    pending_snapshot: Option<PathBuf>,
+    /// Full-window screenshot to save (egui delivers it a frame later).
+    pending_screenshot: Option<PathBuf>,
+    screenshot_requested: bool,
+    quit_requested: bool,
 }
 
 impl App {
@@ -128,10 +186,12 @@ impl App {
             finishing: Vec::new(),
             editing: None,
             mouse_click: None,
-            auto_snapshot: std::env::var("TRIPPY_SNAPSHOT").ok().and_then(|v| {
-                let (n, p) = v.split_once(':')?;
-                Some((n.parse().ok()?, PathBuf::from(p)))
-            }),
+            script: Vec::new(),
+            fixed_step: false,
+            pending_snapshot: None,
+            pending_screenshot: None,
+            screenshot_requested: false,
+            quit_requested: false,
         }
     }
 
@@ -144,14 +204,17 @@ impl App {
     }
 
     fn load_file(&mut self, layer: usize, col: usize, path: PathBuf) {
-        match Clip::open(&path, WIDTH, HEIGHT) {
-            Ok(c) => {
-                self.status = format!("Loaded {} into {} / column {}", c.name, self.comp.layers[layer].name, col + 1);
-                self.comp.set_clip(layer, col, c);
-                self.grid.selected_clip = Some((layer, col));
-            }
-            Err(e) => self.status = format!("Error: {e}"),
+        if let Err(e) = self.try_load(layer, col, &path) {
+            self.status = format!("Error: {e}");
         }
+    }
+
+    fn try_load(&mut self, layer: usize, col: usize, path: &std::path::Path) -> Result<(), String> {
+        let c = Clip::open(path, WIDTH, HEIGHT)?;
+        self.status = format!("Loaded {} into {} / column {}", c.name, self.comp.layers[layer].name, col + 1);
+        self.comp.set_clip(layer, col, c);
+        self.grid.selected_clip = Some((layer, col));
+        Ok(())
     }
 
     /// Example set built from `samples/`.
@@ -418,22 +481,51 @@ impl App {
     fn render_frame(&mut self) {
         let now = Instant::now();
         let dt = now.duration_since(self.last_frame).as_secs_f64();
-        if dt < TICK {
+        let ticks = if self.fixed_step {
+            // As many ticks as fit in a short budget per drawn frame, so scripted runs don't
+            // depend on how often the OS redraws the window (macOS throttles hidden windows).
+            self.last_frame = now;
+            let budget = Duration::from_millis(12);
+            let mut n = 0;
+            while n == 0 || (now.elapsed() < budget && !self.quit_requested && self.pending_screenshot.is_none()) {
+                self.tick_once();
+                n += 1;
+            }
+            if dt > 0.0 {
+                self.fps = self.fps * 0.95 + (1.0 / dt as f32) * 0.05;
+            }
             return;
+        } else {
+            if dt < TICK {
+                return;
+            }
+            let t = ((dt / TICK) as u32).min(3);
+            self.last_frame = if dt > TICK * 4.0 { now } else { self.last_frame + Duration::from_secs_f64(TICK * t as f64) };
+            t
+        };
+        if dt > 0.0 {
+            self.fps = self.fps * 0.95 + (1.0 / dt as f32) * 0.05;
         }
-        let ticks = ((dt / TICK) as u32).min(3);
-        self.last_frame = if dt > TICK * 4.0 { now } else { self.last_frame + Duration::from_secs_f64(TICK * ticks as f64) };
-        self.fps = self.fps * 0.95 + (1.0 / dt as f32) * 0.05;
         for _ in 0..ticks {
-            let prev_beat = self.beat;
-            self.beat += TICK * self.comp.bpm as f64 / 60.0;
-            self.sim_time += TICK;
-            self.frame_count += 1;
-            let clock = self.clock();
-            self.punch.update(&mut self.comp, clock, TICK);
-            self.comp.tick(TICK, prev_beat, clock);
-            self.renderer.render(&mut self.comp, &mut self.punch, clock);
-            self.capture_frame();
+            self.tick_once();
+        }
+    }
+
+    /// One 60Hz step: script events, punch-ins, composition, render, captures.
+    fn tick_once(&mut self) {
+        self.run_script();
+        let prev_beat = self.beat;
+        self.beat += TICK * self.comp.bpm as f64 / 60.0;
+        self.sim_time += TICK;
+        self.frame_count += 1;
+        let clock = self.clock();
+        self.punch.update(&mut self.comp, clock, TICK);
+        self.comp.tick(TICK, prev_beat, clock);
+        self.renderer.render(&mut self.comp, &mut self.punch, clock);
+        self.capture_frame();
+        if let Some(path) = self.pending_snapshot.take() {
+            self.save_snapshot(Some(path));
+            println!("{} {}", automation_stamp(self.frame_count, self.beat), self.status);
         }
     }
 
@@ -601,6 +693,10 @@ impl App {
     }
 }
 
+fn automation_stamp(frame: u64, beat: f64) -> String {
+    format!("[f{frame} b{beat:.2}]")
+}
+
 fn unix_time() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -722,12 +818,38 @@ impl eframe::App for App {
         if !self.perform {
             ui::shader_editor::show(&ctx, &mut self.comp, &mut self.editing, clock);
         }
-        if let Some((n, path)) = self.auto_snapshot.clone()
-            && self.frame_count >= n
+        // Script screenshots: ask egui for the window image, save it when it arrives.
+        if self.pending_screenshot.is_some() && !self.screenshot_requested {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
+            self.screenshot_requested = true;
+        }
+        let shot = ctx.input(|i| {
+            i.raw.events.iter().find_map(|e| match e {
+                egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                _ => None,
+            })
+        });
+        if let Some(img) = shot
+            && let Some(path) = self.pending_screenshot.take()
         {
-            self.save_snapshot(Some(path));
+            self.screenshot_requested = false;
+            let [w, h] = img.size;
+            let rgba: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
+            match image::RgbaImage::from_raw(w as u32, h as u32, rgba).map(|i| i.save(&path)) {
+                Some(Ok(())) => println!("{} saved screenshot {}", automation_stamp(self.frame_count, self.beat), path.display()),
+                _ => {
+                    eprintln!("could not save screenshot {}", path.display());
+                    automation::FAILED.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        }
+        if self.quit_requested && self.pending_screenshot.is_none() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
-        ctx.request_repaint_after(Duration::from_secs_f64(1.0 / 120.0));
+        if self.fixed_step {
+            ctx.request_repaint();
+        } else {
+            ctx.request_repaint_after(Duration::from_secs_f64(1.0 / 120.0));
+        }
     }
 }
