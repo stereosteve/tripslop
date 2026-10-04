@@ -11,3 +11,4 @@ image = { version = "0.25.10", default-features = false, features = ["png", "jpe
 naga = { version = "30.0.1", features = ["glsl-in", "wgsl-in", "wgsl-out"] }
 pollster = "1.0.1"
 rfd = "0.17.2"
+serde_json = "1.0.151"

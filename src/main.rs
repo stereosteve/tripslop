@@ -217,7 +217,7 @@ impl App {
                     if let Some(path) = rfd::FileDialog::new()
                         .add_filter(
                             "media",
-                            &["png", "jpg", "jpeg", "gif", "webp", "bmp", "mp4", "mov", "m4v", "mkv", "webm", "avi", "glsl", "frag", "wgsl"],
+                            &["png", "jpg", "jpeg", "gif", "webp", "bmp", "mp4", "mov", "m4v", "mkv", "webm", "avi", "glsl", "frag", "fs", "isf", "wgsl"],
                         )
                         .pick_file()
                     {

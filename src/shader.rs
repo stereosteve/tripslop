@@ -1,4 +1,4 @@
-//! User shaders, written or pasted at runtime (Shadertoy and GLSL Sandbox style).
+//! User shaders, written or pasted at runtime: Shadertoy, GLSL Sandbox, ISF (VDMX) and WGSL.
 //!
 //! The user's GLSL is wrapped in a GLSL 4.50 template that provides Shadertoy's inputs,
 //! compiled with naga (so errors come back as messages with line numbers instead of GPU
@@ -58,9 +58,49 @@ const SANDBOX_HEADER: &str = "#define time iTime
 const SHADERTOY_FOOTER: &str = "
 void main() {
     vec4 _trippy_c = vec4(0.0, 0.0, 0.0, 1.0);
+    /*globals*/
     mainImage(_trippy_c, gl_FragCoord.xy);
     _trippy_out = _trippy_c;
 }
+";
+
+/// ISF (Interactive Shader Format, as used by VDMX): same bindings, but trippy's own uniforms
+/// get private names, since ISF code often declares its own `iResolution` / `iTime`.
+const ISF_HEADER: &str = "#version 450
+layout(set = 0, binding = 0, std140) uniform TrippyUniforms {
+    vec3 _trippy_iResolution;
+    float _trippy_iTime;
+    vec4 _trippy_iMouse;
+    vec4 _trippy_iDate;
+    vec4 _trippy_chres[4];
+    float _trippy_iTimeDelta;
+    int _trippy_iFrame;
+    float _trippy_iBeat;
+    float _trippy_iBpm;
+    vec4 _trippy_p[4];
+};
+layout(set = 0, binding = 1) uniform sampler _trippy_samp;
+layout(set = 0, binding = 2) uniform texture2D _trippy_ch0;
+layout(set = 0, binding = 3) uniform texture2D _trippy_ch1;
+layout(set = 0, binding = 4) uniform texture2D _trippy_ch2;
+layout(set = 0, binding = 5) uniform texture2D _trippy_ch3;
+layout(location = 0) out vec4 _trippy_out;
+#define TIME _trippy_iTime
+#define TIMEDELTA _trippy_iTimeDelta
+#define RENDERSIZE (_trippy_iResolution.xy)
+#define FRAMEINDEX _trippy_iFrame
+#define DATE _trippy_iDate
+#define PASSINDEX 0
+#define gl_FragColor _trippy_out
+#define isf_FragNormCoord (gl_FragCoord.xy / RENDERSIZE)
+#define vv_FragNormCoord isf_FragNormCoord
+#define IMG_NORM_PIXEL(img, c) texture(img, c)
+#define IMG_PIXEL(img, c) texture(img, (c) / RENDERSIZE)
+#define IMG_THIS_NORM_PIXEL(img) texture(img, isf_FragNormCoord)
+#define IMG_THIS_PIXEL(img) texture(img, isf_FragNormCoord)
+#define IMG_SIZE(img) vec2(textureSize(img, 0))
+#define texture2D texture
+#define texture2DRect(img, c) texture(img, (c) / RENDERSIZE)
 ";
 
 /// Names the template already provides; `uniform` declarations of these are dropped.
@@ -78,13 +118,15 @@ pub enum Dialect {
     Sandbox,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub struct ParamDecl {
     pub name: String,
     pub int: bool,
     pub min: f32,
     pub max: f32,
     pub default: f32,
+    /// Named options (a dropdown); the value is the index.
+    pub choices: Vec<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -95,6 +137,8 @@ pub enum Lang {
 }
 
 pub struct Prepared {
+    /// Problems found before compiling (e.g. bad ISF JSON).
+    pub errors: Vec<CompileError>,
     pub lang: Lang,
     /// Full shader source handed to the compiler.
     pub code: String,
@@ -135,14 +179,15 @@ pub fn prepare(user: &str) -> Prepared {
     if lang_of(user) == Lang::Wgsl {
         return prepare_wgsl(user);
     }
+    if let Some(json) = isf_json(user) {
+        return prepare_isf(user, json);
+    }
     let dialect = if user.contains("mainImage") { Dialect::Shadertoy } else { Dialect::Sandbox };
     let mut params = Vec::new();
-    let mut body = String::new();
     let user_lines = user.lines().count();
-    for line in user.lines() {
-        body.push_str(&rewrite_line(line, &mut params));
-        body.push('\n');
-    }
+    let mut lines: Vec<String> = user.lines().map(|l| rewrite_line(l, &mut params, &[])).collect();
+    let hoisted = hoist_global_initializers(&mut lines, dialect == Dialect::Sandbox);
+    let body: String = lines.iter().map(|l| format!("{l}\n")).collect();
     let mut header = HEADER.to_string();
     if dialect == Dialect::Sandbox {
         header.push_str(SANDBOX_HEADER);
@@ -151,9 +196,10 @@ pub fn prepare(user: &str) -> Prepared {
     let mut glsl = header;
     glsl.push_str(&body);
     if dialect == Dialect::Shadertoy {
-        glsl.push_str(SHADERTOY_FOOTER);
+        glsl.push_str(&SHADERTOY_FOOTER.replace("/*globals*/", &hoisted.join(" ")));
     }
     Prepared {
+        errors: Vec::new(),
         lang: Lang::Glsl,
         code: glsl,
         header_lines,
@@ -187,10 +233,10 @@ fn prepare_wgsl(user: &str) -> Prepared {
         };
         params.push(ParamDecl {
             name: name.to_string(),
-            int: false,
             min,
             max,
             default: nums.get(2).copied().unwrap_or(min).clamp(min, max),
+            ..Default::default()
         });
     }
     let mut fields = String::new();
@@ -222,6 +268,7 @@ fn prepare_wgsl(user: &str) -> Prepared {
     );
     let header_lines = prelude.matches('\n').count();
     Prepared {
+        errors: Vec::new(),
         lang: Lang::Wgsl,
         code: format!("{prelude}{user}\n"),
         header_lines,
@@ -230,7 +277,8 @@ fn prepare_wgsl(user: &str) -> Prepared {
     }
 }
 
-fn rewrite_line(line: &str, params: &mut Vec<ParamDecl>) -> String {
+/// `skip`: extra names whose `uniform` declarations are dropped (ISF inputs).
+fn rewrite_line(line: &str, params: &mut Vec<ParamDecl>, skip: &[String]) -> String {
     let t = line.trim_start();
     if t.starts_with("#version") || t.starts_with("#extension") || t.starts_with("precision ") {
         return String::new();
@@ -247,7 +295,7 @@ fn rewrite_line(line: &str, params: &mut Vec<ParamDecl>) -> String {
         return line.to_string();
     };
     let name = name.split('[').next().unwrap_or(name);
-    if BUILTINS.contains(&name) {
+    if BUILTINS.contains(&name) || skip.iter().any(|s| s == name) {
         return String::new();
     }
     if !(ty == "float" || ty == "int") || !is_ident(name) || params.len() >= MAX_PARAMS {
@@ -268,8 +316,9 @@ fn rewrite_line(line: &str, params: &mut Vec<ParamDecl>) -> String {
         min,
         max,
         default,
+        ..Default::default()
     });
-    let slot = format!("_trippy_p[{}].{}", i / 4, ["x", "y", "z", "w"][i % 4]);
+    let slot = slot(i);
     if int {
         format!("#define {name} int({slot})")
     } else {
@@ -277,8 +326,280 @@ fn rewrite_line(line: &str, params: &mut Vec<ParamDecl>) -> String {
     }
 }
 
+const GLSL_TYPES: &[&str] = &[
+    "float", "int", "uint", "bool", "vec2", "vec3", "vec4", "ivec2", "ivec3", "ivec4", "uvec2", "uvec3", "uvec4",
+    "bvec2", "bvec3", "bvec4", "mat2", "mat3", "mat4", "mat2x2", "mat2x3", "mat2x4", "mat3x2", "mat3x3", "mat3x4",
+    "mat4x2", "mat4x3", "mat4x4",
+];
+
+/// naga accepts global variables with initializers (`float t = iTime * 0.5;`) but never
+/// actually stores the value, so they read as zero. Rewrite each such line into a plain
+/// declaration and return the assignments, to be run at the start of `main` (in order).
+/// Line count is preserved. When `inject_into_main` is set (shaders with their own
+/// `void main`), the assignments are appended to the line holding main's opening brace.
+fn hoist_global_initializers(lines: &mut [String], inject_into_main: bool) -> Vec<String> {
+    let mut assigns = Vec::new();
+    let mut depth = 0i32;
+    let mut in_block = false;
+    let mut main_seen = false;
+    let mut main_brace: Option<usize> = None;
+    for (n, line) in lines.iter_mut().enumerate() {
+        let depth_at_start = depth;
+        // Code on this line with comments removed, and brace tracking.
+        let mut code = String::new();
+        let chars: Vec<char> = line.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            if in_block {
+                if chars[i] == '*' && chars.get(i + 1) == Some(&'/') {
+                    in_block = false;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+                continue;
+            }
+            match (chars[i], chars.get(i + 1)) {
+                ('/', Some('/')) => break,
+                ('/', Some('*')) => {
+                    in_block = true;
+                    i += 2;
+                    continue;
+                }
+                ('{', _) => {
+                    if main_seen && main_brace.is_none() && depth == 0 {
+                        main_brace = Some(n);
+                    }
+                    depth += 1;
+                }
+                ('}', _) => depth -= 1,
+                _ => {}
+            }
+            code.push(chars[i]);
+            i += 1;
+        }
+        let t = code.trim();
+        if depth_at_start == 0 && !main_seen && t.starts_with("void") && t.contains("main") && !t.contains("mainImage") {
+            let after_void = t[4..].trim_start();
+            if after_void.starts_with("main") && after_void[4..].trim_start().starts_with('(') {
+                main_seen = true;
+                if t.contains('{') && main_brace.is_none() {
+                    main_brace = Some(n);
+                }
+            }
+        }
+        if depth_at_start != 0 || t.starts_with('#') || !t.ends_with(';') {
+            continue;
+        }
+        // `[precision] TYPE NAME = EXPR;` (single declarator, not const / uniform / in / out).
+        let mut words = t.split_whitespace().filter(|w| !matches!(*w, "highp" | "mediump" | "lowp"));
+        let Some(ty) = words.next() else { continue };
+        if !GLSL_TYPES.contains(&ty) {
+            continue;
+        }
+        let rest = t[t.find(ty).unwrap() + ty.len()..].trim_start();
+        let Some((name, expr)) = rest.split_once('=') else { continue };
+        let name = name.trim();
+        let expr = expr.trim().trim_end_matches(';').trim();
+        if !is_ident(name) || expr.is_empty() || expr.contains(';') || has_top_level_comma(expr) {
+            continue;
+        }
+        assigns.push(format!("{name} = {expr};"));
+        *line = format!("{ty} {name};");
+    }
+    if inject_into_main && !assigns.is_empty() {
+        if let Some(n) = main_brace {
+            let joined = assigns.join(" ");
+            lines[n].push_str(&format!(" {joined}"));
+        }
+        return Vec::new();
+    }
+    assigns
+}
+
+fn has_top_level_comma(expr: &str) -> bool {
+    let mut depth = 0;
+    for c in expr.chars() {
+        match c {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth -= 1,
+            ',' if depth == 0 => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+fn slot(i: usize) -> String {
+    format!("_trippy_p[{}].{}", i / 4, ["x", "y", "z", "w"][i % 4])
+}
+
+/// The ISF JSON header, if the code starts with one. `Err` if it looks like ISF but the
+/// JSON doesn't parse.
+fn isf_json(user: &str) -> Option<Result<serde_json::Value, CompileError>> {
+    let start = user.find(|c: char| !c.is_whitespace())?;
+    let rest = user[start..].strip_prefix("/*")?;
+    let end = rest.find("*/")?;
+    let text = &rest[..end];
+    if !text.trim_start().starts_with('{') {
+        return None;
+    }
+    match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(v) if v.is_object() => Some(Ok(v)),
+        Ok(_) => None,
+        Err(e) if text.contains("\"INPUTS\"") || text.contains("ISFVSN") || text.contains("\"DESCRIPTION\"") => {
+            // JSON line 1 is the line with the opening `/*`.
+            let first = user[..start].matches('\n').count() + 1;
+            Some(Err(CompileError {
+                line: Some(first + e.line().saturating_sub(1)),
+                message: format!("ISF header JSON: {e}"),
+            }))
+        }
+        Err(_) => None,
+    }
+}
+
+/// ISF: the JSON `INPUTS` become sliders (float), toggles (bool/event), dropdowns (long),
+/// x/y sliders (point2D) and r/g/b/a sliders (color). Images map to channels: the first
+/// image (usually `inputImage`) is `iChannel0` (the layer input), others the composition.
+fn prepare_isf(user: &str, json: Result<serde_json::Value, CompileError>) -> Prepared {
+    let mut errors = Vec::new();
+    let json = json.unwrap_or_else(|e| {
+        errors.push(e);
+        serde_json::Value::Null
+    });
+    let mut params: Vec<ParamDecl> = Vec::new();
+    let mut defines = String::new();
+    let mut names: Vec<String> = Vec::new();
+    let mut images = 0;
+    let f = |v: &serde_json::Value| v.as_f64().map(|x| x as f32).or_else(|| v.as_bool().map(|b| if b { 1.0 } else { 0.0 }));
+    let arr = |v: &serde_json::Value| -> Option<Vec<f32>> { v.as_array().map(|a| a.iter().filter_map(|x| x.as_f64().map(|x| x as f32)).collect()) };
+    for input in json["INPUTS"].as_array().into_iter().flatten() {
+        let (Some(name), Some(ty)) = (input["NAME"].as_str(), input["TYPE"].as_str()) else { continue };
+        if !is_ident(name) {
+            errors.push(CompileError { line: None, message: format!("ISF input name {name:?} isn't a valid identifier") });
+            continue;
+        }
+        names.push(name.to_string());
+        let mut add = |decl: ParamDecl| {
+            params.push(decl);
+            slot(params.len() - 1)
+        };
+        let define = match ty {
+            "float" => {
+                let min = f(&input["MIN"]).unwrap_or(0.0);
+                let max = f(&input["MAX"]).unwrap_or(1.0).max(min + 1e-6);
+                let default = f(&input["DEFAULT"]).unwrap_or(min).clamp(min, max);
+                let s = add(ParamDecl { name: name.into(), min, max, default, ..Default::default() });
+                format!("({s})")
+            }
+            "bool" | "event" => {
+                let default = f(&input["DEFAULT"]).unwrap_or(0.0).clamp(0.0, 1.0);
+                let s = add(ParamDecl { name: name.into(), int: true, min: 0.0, max: 1.0, default, choices: vec!["Off".into(), "On".into()] });
+                format!("({s} > 0.5)")
+            }
+            "long" => {
+                let values: Vec<i64> = match input["VALUES"].as_array() {
+                    Some(v) => v.iter().filter_map(|x| x.as_f64().map(|x| x as i64)).collect(),
+                    None => {
+                        let lo = f(&input["MIN"]).unwrap_or(0.0) as i64;
+                        let hi = (f(&input["MAX"]).unwrap_or(lo as f32 + 4.0) as i64).max(lo);
+                        (lo..=hi).collect()
+                    }
+                };
+                let values = if values.is_empty() { vec![0] } else { values };
+                let labels: Vec<String> = match input["LABELS"].as_array() {
+                    Some(l) if l.len() == values.len() => l.iter().map(|x| x.as_str().map(str::to_string).unwrap_or_else(|| x.to_string())).collect(),
+                    _ => values.iter().map(|v| v.to_string()).collect(),
+                };
+                let def_val = f(&input["DEFAULT"]).map(|x| x as i64).unwrap_or(values[0]);
+                let def_idx = values.iter().position(|v| *v == def_val).unwrap_or(0);
+                let s = add(ParamDecl {
+                    name: name.into(),
+                    int: true,
+                    min: 0.0,
+                    max: (values.len() - 1) as f32,
+                    default: def_idx as f32,
+                    choices: labels,
+                });
+                // Index -> value via a small helper function.
+                let mut helper = format!("int _trippy_long_{name}(float i) {{ int k = int(i + 0.5);");
+                for (j, v) in values.iter().enumerate() {
+                    helper.push_str(&format!(" if (k == {j}) return {v};"));
+                }
+                helper.push_str(&format!(" return {}; }}\n", values[0]));
+                defines.push_str(&helper);
+                format!("_trippy_long_{name}({s})")
+            }
+            "point2D" => {
+                let min = arr(&input["MIN"]).filter(|a| a.len() >= 2).unwrap_or(vec![0.0, 0.0]);
+                let max = arr(&input["MAX"]).filter(|a| a.len() >= 2).unwrap_or(vec![1.0, 1.0]);
+                let def = arr(&input["DEFAULT"]).filter(|a| a.len() >= 2).unwrap_or(vec![(min[0] + max[0]) / 2.0, (min[1] + max[1]) / 2.0]);
+                let sx = add(ParamDecl { name: format!("{name}.x"), min: min[0], max: max[0].max(min[0] + 1e-6), default: def[0].clamp(min[0], max[0].max(min[0])), ..Default::default() });
+                let sy = add(ParamDecl { name: format!("{name}.y"), min: min[1], max: max[1].max(min[1] + 1e-6), default: def[1].clamp(min[1], max[1].max(min[1])), ..Default::default() });
+                format!("vec2({sx}, {sy})")
+            }
+            "color" => {
+                let def = arr(&input["DEFAULT"]).filter(|a| a.len() >= 4).unwrap_or(vec![1.0, 1.0, 1.0, 1.0]);
+                let s: Vec<String> = ["r", "g", "b", "a"]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| add(ParamDecl { name: format!("{name} {c}"), min: 0.0, max: 1.0, default: def[i].clamp(0.0, 1.0), ..Default::default() }))
+                    .collect();
+                format!("vec4({}, {}, {}, {})", s[0], s[1], s[2], s[3])
+            }
+            "image" => {
+                images += 1;
+                let ch = if images == 1 { 0 } else { 3 };
+                format!("sampler2D(_trippy_ch{ch}, _trippy_samp)")
+            }
+            "audio" | "audioFFT" => "sampler2D(_trippy_ch2, _trippy_samp)".into(),
+            other => {
+                errors.push(CompileError { line: None, message: format!("ISF input type {other:?} ({name}) isn't supported") });
+                continue;
+            }
+        };
+        defines.push_str(&format!("#define {name} {define}\n"));
+    }
+    if params.len() > MAX_PARAMS {
+        errors.push(CompileError {
+            line: None,
+            message: format!("too many ISF inputs: they need {} slider slots, the limit is {MAX_PARAMS}", params.len()),
+        });
+    }
+    // A single persistent pass is ISF's way of doing feedback: its target is our previous frame.
+    if let Some(passes) = json["PASSES"].as_array() {
+        if passes.len() > 1 {
+            errors.push(CompileError {
+                line: None,
+                message: format!("ISF multi-pass shaders ({} PASSES) aren't supported yet", passes.len()),
+            });
+        } else if let Some(target) = passes.first().and_then(|p| p["TARGET"].as_str()).filter(|t| is_ident(t)) {
+            names.push(target.to_string());
+            defines.push_str(&format!("#define {target} sampler2D(_trippy_ch1, _trippy_samp)\n"));
+        }
+    }
+
+    let mut lines: Vec<String> = user.lines().map(|l| rewrite_line(l, &mut params, &names)).collect();
+    hoist_global_initializers(&mut lines, true);
+    let body: String = lines.iter().map(|l| format!("{l}\n")).collect();
+    let header = format!("{ISF_HEADER}{defines}");
+    let header_lines = header.matches('\n').count();
+    Prepared {
+        errors,
+        lang: Lang::Glsl,
+        code: format!("{header}{body}"),
+        header_lines,
+        user_lines: user.lines().count(),
+        params,
+    }
+}
+
 /// User code -> validated naga module -> WGSL for wgpu.
 pub fn compile(p: &Prepared) -> Result<Compiled, Vec<CompileError>> {
+    if !p.errors.is_empty() {
+        return Err(p.errors.clone());
+    }
     let src = &p.code;
     let map_line = |full: u32| -> Option<usize> {
         let l = full as usize;
@@ -452,6 +773,14 @@ impl CustomShader {
                 if d.int {
                     spec = spec.int();
                 }
+                if !d.choices.is_empty() {
+                    // Reuse the existing (leaked) option list when it hasn't changed.
+                    let choices: &'static [&'static str] = match prev {
+                        Some(p) if p.spec.choices.len() == d.choices.len() && p.spec.choices.iter().zip(&d.choices).all(|(a, b)| *a == b) => p.spec.choices,
+                        _ => Box::leak(d.choices.iter().map(|c| &*Box::leak(c.clone().into_boxed_str())).collect::<Vec<&'static str>>().into_boxed_slice()),
+                    };
+                    spec = Spec::choice(label, choices, d.default as usize);
+                }
                 match prev {
                     Some(prev) => {
                         let mut p = prev.clone();
@@ -614,6 +943,31 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
 ",
     ),
     (
+        "ISF filter (VDMX format)",
+        Role::Effect,
+        r#"/*{
+  "DESCRIPTION": "ISF / VDMX format: the JSON INPUTS become sliders, toggles and dropdowns.",
+  "CATEGORIES": ["Filter"],
+  "INPUTS": [
+    { "NAME": "inputImage", "TYPE": "image" },
+    { "NAME": "amount", "TYPE": "float", "DEFAULT": 0.02, "MIN": 0.0, "MAX": 0.1 },
+    { "NAME": "invert", "TYPE": "bool", "DEFAULT": false },
+    { "NAME": "tint", "TYPE": "color", "DEFAULT": [1.0, 0.8, 1.0, 1.0] }
+  ]
+}*/
+
+void main() {
+    vec2 uv = isf_FragNormCoord;
+    vec2 d = vec2(amount * sin(TIME + uv.y * 10.0), 0.0);
+    vec4 c = IMG_NORM_PIXEL(inputImage, uv);
+    c.r = IMG_NORM_PIXEL(inputImage, uv + d).r;
+    c.b = IMG_NORM_PIXEL(inputImage, uv - d).b;
+    if (invert) c.rgb = c.a - c.rgb;
+    gl_FragColor = c * tint;
+}
+"#,
+    ),
+    (
         "GLSL Sandbox style",
         Role::Source,
         "#ifdef GL_ES
@@ -657,9 +1011,9 @@ mod tests {
         assert_eq!(
             p.params,
             vec![
-                ParamDecl { name: "speed".into(), int: false, min: 0.0, max: 4.0, default: 1.0 },
-                ParamDecl { name: "count".into(), int: true, min: 1.0, max: 8.0, default: 1.0 },
-                ParamDecl { name: "plain".into(), int: false, min: 0.0, max: 1.0, default: 0.0 },
+                ParamDecl { name: "speed".into(), int: false, min: 0.0, max: 4.0, default: 1.0, choices: vec![] },
+                ParamDecl { name: "count".into(), int: true, min: 1.0, max: 8.0, default: 1.0, choices: vec![] },
+                ParamDecl { name: "plain".into(), int: false, min: 0.0, max: 1.0, default: 0.0, choices: vec![] },
             ]
         );
         compile(&p).unwrap();
@@ -684,7 +1038,7 @@ mod tests {
     fn wgsl_with_params_and_own_entry_point() {
         let p = prepare("// @param speed 0 4 2\n@fragment\nfn frag(@builtin(position) pos: vec4f) -> @location(0) vec4f {\n    return vec4f(inputs.time * inputs.speed, pos.x / inputs.size.x, 0.0, 1.0);\n}\n");
         assert_eq!(p.lang, Lang::Wgsl);
-        assert_eq!(p.params[0], ParamDecl { name: "speed".into(), int: false, min: 0.0, max: 4.0, default: 2.0 });
+        assert_eq!(p.params[0], ParamDecl { name: "speed".into(), int: false, min: 0.0, max: 4.0, default: 2.0, choices: vec![] });
         let c = compile(&p).unwrap();
         assert_eq!(c.entry, "frag");
         assert!(c.screen_space);
@@ -703,6 +1057,124 @@ mod tests {
         let Ok(code) = std::fs::read_to_string("src/shaders/marble.wgsl") else { return };
         let c = compile(&prepare(&code)).unwrap_or_else(|e| panic!("{e:#?}"));
         assert_eq!(c.entry, "fragmentMain");
+    }
+
+    /// An ISF generator as pasted from VDMX (echophons, via glslsandbox): JSON inputs, its own
+    /// `iResolution` global initialised from `RENDERSIZE`, `gl_FragColor`.
+    const ISF_GENERATOR: &str = r#"/*{
+    "CREDIT": "by echophons",
+    "CATEGORIES": [ "generator" ],
+    "INPUTS": [
+        { "NAME": "k", "TYPE": "float", "DEFAULT": 0.3, "MIN": 0.001, "MAX": 0.999 },
+        { "NAME": "h", "TYPE": "float", "DEFAULT": 0.5, "MIN": 0.0, "MAX": 1.0 },
+        { "NAME": "mouse", "TYPE": "point2D" }
+    ]
+}*/
+//uniform vec2 mouse;
+vec3   iResolution = vec3(RENDERSIZE, 1.0);
+float  iGlobalTime = TIME;
+float gTime = iGlobalTime*0.5;
+
+void main( void )
+{
+    vec2 res = iResolution.xy;
+    vec2 mou = mouse.xy;
+    mou.x = sin(gTime * k) + h;
+    vec2 z = ((-res+2.0 * gl_FragCoord.xy) / res.y);
+    float f = 1.0;
+    for( int i = 0; i < 24; i++)
+    {
+        float d = dot(z,z);
+        z = (vec2( z.x, -z.y ) / d) + mou * h;
+        f = max( f-d, dot(z,z));
+    }
+    gl_FragColor = vec4(min(vec3(f), 1.0),1.0);
+}
+"#;
+
+    #[test]
+    fn global_initializers_are_hoisted_into_main() {
+        let mut lines: Vec<String> = [
+            "/*{ \"braces\": { } }*/",
+            "vec3 R = vec3(RENDERSIZE, 1.0); // comment",
+            "const float K = 2.0;",
+            "float a = 1.0, b = 2.0;",
+            "float t = R.x * f(1.0, 2.0);",
+            "void main( void )",
+            "{",
+            "    float local = 3.0;",
+            "}",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        hoist_global_initializers(&mut lines, true);
+        assert_eq!(lines[1], "vec3 R;");
+        assert_eq!(lines[2], "const float K = 2.0;", "const stays");
+        assert_eq!(lines[3], "float a = 1.0, b = 2.0;", "multiple declarators left alone");
+        assert_eq!(lines[4], "float t;");
+        assert_eq!(lines[6], "{ R = vec3(RENDERSIZE, 1.0); t = R.x * f(1.0, 2.0);");
+        assert_eq!(lines[7], "    float local = 3.0;", "locals untouched");
+    }
+
+    #[test]
+    fn isf_generator_inputs_and_globals() {
+        let p = prepare(ISF_GENERATOR);
+        let names: Vec<&str> = p.params.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, ["k", "h", "mouse.x", "mouse.y"]);
+        assert_eq!((p.params[0].min, p.params[0].max, p.params[0].default), (0.001, 0.999, 0.3));
+        compile(&p).unwrap_or_else(|e| panic!("{e:#?}"));
+    }
+
+    #[test]
+    fn isf_filter_with_every_input_type() {
+        let code = r#"/*{
+  "ISFVSN": "2",
+  "CATEGORIES": ["Filter"],
+  "INPUTS": [
+    { "NAME": "inputImage", "TYPE": "image" },
+    { "NAME": "amount", "TYPE": "float", "DEFAULT": 0.5 },
+    { "NAME": "invert", "TYPE": "bool", "DEFAULT": true },
+    { "NAME": "mode", "TYPE": "long", "VALUES": [0, 5, 9], "LABELS": ["A", "B", "C"], "DEFAULT": 5 },
+    { "NAME": "tint", "TYPE": "color", "DEFAULT": [1.0, 0.5, 0.25, 1.0] },
+    { "NAME": "center", "TYPE": "point2D", "DEFAULT": [0.5, 0.5], "MIN": [0, 0], "MAX": [1, 1] }
+  ]
+}*/
+void main() {
+    vec4 c = IMG_THIS_PIXEL(inputImage);
+    vec2 uv = isf_FragNormCoord;
+    c = IMG_NORM_PIXEL(inputImage, mix(uv, center, amount));
+    if (invert) c.rgb = 1.0 - c.rgb;
+    if (mode == 9) c.rgb *= tint.rgb;
+    gl_FragColor = c * vec4(IMG_SIZE(inputImage) / RENDERSIZE, 1.0, 1.0);
+}
+"#;
+        let p = prepare(code);
+        let mode = p.params.iter().find(|d| d.name == "mode").unwrap();
+        assert_eq!(mode.choices, ["A", "B", "C"]);
+        assert_eq!(mode.default, 1.0, "DEFAULT 5 is the second value");
+        assert_eq!(p.params.len(), 1 + 1 + 1 + 4 + 2);
+        compile(&p).unwrap_or_else(|e| panic!("{e:#?}"));
+    }
+
+    #[test]
+    fn isf_bad_json_points_at_the_line() {
+        let p = prepare("/*{\n  \"INPUTS\": [\n    { \"NAME\": \"a\" \"TYPE\": \"float\" }\n  ]\n}*/\nvoid main() { gl_FragColor = vec4(1.0); }\n");
+        let errs = compile(&p).unwrap_err();
+        assert_eq!(errs[0].line, Some(3), "{errs:?}");
+    }
+
+    #[test]
+    fn isf_multipass_is_reported() {
+        let p = prepare("/*{ \"INPUTS\": [], \"PASSES\": [ {\"TARGET\": \"a\"}, {} ] }*/\nvoid main() { gl_FragColor = vec4(1.0); }\n");
+        let errs = compile(&p).unwrap_err();
+        assert!(errs[0].message.contains("multi-pass"), "{errs:?}");
+    }
+
+    #[test]
+    fn isf_persistent_pass_is_feedback() {
+        let p = prepare("/*{ \"INPUTS\": [], \"PASSES\": [ {\"TARGET\": \"lastFrame\", \"PERSISTENT\": true} ] }*/\nvoid main() { gl_FragColor = IMG_THIS_PIXEL(lastFrame) * 0.9; }\n");
+        compile(&p).unwrap_or_else(|e| panic!("{e:#?}"));
     }
 
     #[test]

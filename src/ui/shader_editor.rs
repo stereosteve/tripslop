@@ -85,7 +85,7 @@ fn editor(ui: &mut egui::Ui, s: &mut CustomShader, clock: Clock) {
             }
         });
         if ui.button("Load…").clicked()
-            && let Some(path) = rfd::FileDialog::new().add_filter("Shader", &["glsl", "frag", "fs", "shader", "wgsl", "txt"]).pick_file()
+            && let Some(path) = rfd::FileDialog::new().add_filter("Shader", &["glsl", "frag", "fs", "isf", "shader", "wgsl", "txt"]).pick_file()
         {
             match std::fs::read_to_string(&path) {
                 Ok(code) => {
@@ -178,7 +178,7 @@ fn code_area(ui: &mut egui::Ui, s: &mut CustomShader) {
 
 fn help(ui: &mut egui::Ui) {
     let mono = |t: &str| RichText::new(t).monospace();
-    ui.label("Paste a Shadertoy shader (single pass), a GLSL Sandbox shader, or WGSL.");
+    ui.label("Paste a Shadertoy shader (single pass), a GLSL Sandbox shader, an ISF / VDMX .fs shader, or WGSL.");
     ui.label(mono("void mainImage(out vec4 fragColor, in vec2 fragCoord)"));
     ui.add_space(4.0);
     ui.label(RichText::new("Inputs").strong());
@@ -196,6 +196,12 @@ fn help(ui: &mut egui::Ui) {
     ui.label(mono("uniform float amount; // min max default"));
     ui.label(mono("uniform int count;    // 1 8 3"));
     ui.label("Each becomes a slider with automation (the ~ button).");
+    ui.add_space(4.0);
+    ui.label(RichText::new("ISF (VDMX .fs)").strong());
+    ui.label("Detected by the /*{ JSON }*/ header. INPUTS become controls: float → slider, bool/event → toggle, long → dropdown, point2D → x/y sliders, color → r/g/b/a sliders.");
+    ui.label(mono("TIME TIMEDELTA RENDERSIZE FRAMEINDEX DATE isf_FragNormCoord gl_FragColor"));
+    ui.label(mono("IMG_NORM_PIXEL(img, uv) IMG_PIXEL(img, px) IMG_THIS_PIXEL(img) IMG_SIZE(img)"));
+    ui.label("The first image input (e.g. inputImage) is the layer input; other images are the composition. A single PERSISTENT pass target is the shader's previous frame. Multi-pass isn't supported yet.");
     ui.add_space(4.0);
     ui.label(RichText::new("WGSL").strong());
     ui.label("Detected by @fragment; your own entry point is used. Screen space: pos.y grows downward.");

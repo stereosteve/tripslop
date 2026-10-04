@@ -81,11 +81,23 @@ layer down or use a generator. With a full-frame opaque clip, the input simply c
 **Custom shaders (live coding).** Paste a Shadertoy shader, or write your own, and it
 compiles as you type, like KodeLife. Add one from a grid cell's right-click menu
 (*Shader (GLSL)*), or as an effect (*+ Add effect → Custom shader*). You can also drop a
-`.glsl` / `.frag` / `.wgsl` file onto a cell.
+`.glsl` / `.frag` / `.fs` / `.wgsl` file onto a cell.
 * **Shadertoy compatible** (single pass): `mainImage`, `iTime`, `iTimeDelta`, `iFrame`,
   `iResolution`, `iMouse` (Alt-drag on the output monitor), `iDate`, `iChannelResolution`.
   GLSL Sandbox style (`void main` + `gl_FragColor`, `time`, `resolution`, `mouse`,
   `backbuffer`) works too.
+* **ISF** (the VDMX `.fs` format) works too. It's detected by its `/*{ JSON }*/` header.
+  * `INPUTS` become controls:
+    * `float` → a slider
+    * `bool` / `event` → a toggle
+    * `long` → a dropdown of its `LABELS`
+    * `point2D` → x/y sliders
+    * `color` → r/g/b/a sliders
+  * Built-ins: `TIME`, `TIMEDELTA`, `RENDERSIZE`, `FRAMEINDEX`, `DATE`, `isf_FragNormCoord`,
+    and the `IMG_NORM_PIXEL` / `IMG_PIXEL` / `IMG_THIS_PIXEL` / `IMG_SIZE` macros.
+  * The first `image` input (e.g. `inputImage`) is the layer input.
+  * A single `PERSISTENT` pass target is the shader's own previous frame. Multi-pass ISF isn't
+    supported yet.
 * **WGSL** also works. It's detected by `@fragment`, and your own entry point is used. It runs
   in screen space (y down). It can use:
   * `inputs.size` (`vec3f`), `inputs.time`, `inputs.mouse`, `inputs.date`, `inputs.frame`,

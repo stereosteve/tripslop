@@ -22,11 +22,11 @@ const VIDEO_EXTS: &[&str] = &[
     "mp4", "mov", "m4v", "mkv", "webm", "avi", "gif", "mpg", "mpeg", "wmv", "flv", "ts", "mts",
 ];
 
-/// Fragment shader files: GLSL (Shadertoy / GLSL Sandbox style) or WGSL.
+/// Fragment shader files: GLSL (Shadertoy / GLSL Sandbox / ISF) or WGSL.
 pub fn is_shader(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
-        .map(|e| matches!(e.to_ascii_lowercase().as_str(), "glsl" | "frag" | "fs" | "shader" | "wgsl"))
+        .map(|e| matches!(e.to_ascii_lowercase().as_str(), "glsl" | "frag" | "fs" | "isf" | "shader" | "wgsl"))
         .unwrap_or(false)
 }
 
