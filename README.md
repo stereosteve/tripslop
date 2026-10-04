@@ -68,7 +68,7 @@ has frequency, speed and hue controls.
 | --- | --- |
 | Feedback | **Feedback / Fractal**: N scaled, rotated copies of the delayed output with a keyer, hue drift and symmetry. It has presets: Tunnel, Sierpinski, Mandala, Slow trails, Spiral galaxy, Hall of mirrors, Melt |
 | Time | Echo trails, RGB time split |
-| Space | Kaleidoscope, Mirror, Transform (zoom/rotate/tile), Wave warp |
+| Space | Kaleidoscope, Mirror, Transform (zoom/rotate/tile), Wave warp, **Shape projector** (the layer mapped onto a spinning 3D prism, pyramid or diamond with 3–12 sides; size, height, rotation and beat-synced spin on each axis, per-face or wrapped mapping, lighting) |
 | Color | Color (hue/sat/contrast/brightness/gamma/invert), Luma key, Pixelate / posterize |
 | Stylize | Blur, Edges, CRT, Strobe (beat-synced) |
 

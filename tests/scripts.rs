@@ -54,3 +54,9 @@ fn shaders() {
 fn punch_tour() {
     run("scripts/punch-tour.tripslop");
 }
+
+#[test]
+#[ignore = "opens a window; needs a GPU"]
+fn shape_projector() {
+    run("scripts/shape.tripslop");
+}

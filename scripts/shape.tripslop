@@ -1,0 +1,44 @@
+# Shape projector: the input mapped onto spinning solids.
+
+load 1 1 samples/pillars-of-creation.jpg
+launch 1 1
+add-effect 1 "shape projector"
+set 1/shape/background 2               # black, so the solid reads clearly
+set "1/shape/spin y" 0                   # fixed poses for comparable stills
+set "1/shape/rotate y" 30
+
+at 10  snapshot target/script-out/shape/1-cube.png
+
+at 11  set 1/shape/shape 1             # square pyramid
+at 20  snapshot target/script-out/shape/2-pyramid-4.png
+
+at 21  set 1/shape/sides 3             # tetrahedron
+at 30  snapshot target/script-out/shape/3-pyramid-3.png
+
+at 31  set 1/shape/shape 2             # octahedron
+at 31  set 1/shape/sides 4
+at 40  snapshot target/script-out/shape/4-bipyramid-4.png
+
+at 41  set 1/shape/shape 0             # hexagonal prism
+at 41  set 1/shape/sides 6
+at 50  snapshot target/script-out/shape/5-prism-6.png
+
+at 51  set 1/shape/sides 5             # pentagonal prism, image wrapped around the sides
+at 51  set 1/shape/mapping 1
+at 51  set 1/shape/height 0.7
+at 60  snapshot target/script-out/shape/6-prism-5-wrap.png
+
+at 61  set 1/shape/shape 2             # tall six-sided diamond over the original input
+at 61  set 1/shape/sides 6
+at 61  set 1/shape/mapping 0
+at 61  set 1/shape/height 1.8
+at 61  set 1/shape/background 1
+at 70  snapshot target/script-out/shape/7-diamond-6-over-input.png
+
+# Spin: beat-synced, so two stills a beat apart differ.
+at 71  set "1/shape/spin y" 0.5
+at 71  set "1/shape/spin x" 0.25
+at 71  set 1/shape/background 2
+at 100 snapshot target/script-out/shape/8-spin-a.png
+at 130 snapshot target/script-out/shape/9-spin-b.png
+at 131 quit
