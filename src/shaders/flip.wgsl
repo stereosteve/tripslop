@@ -1,4 +1,4 @@
-// Optional vertical flip between trippy's top-left textures and Shadertoy's bottom-left (GL)
+// Optional vertical flip between tripslop's top-left textures and Shadertoy's bottom-left (GL)
 // convention, plus an alpha mode for user shader output.
 
 struct FlipU {

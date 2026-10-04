@@ -21,29 +21,29 @@ pub const MAX_PARAMS: usize = 16;
 const COMPILE_DELAY: Duration = Duration::from_millis(350);
 
 const HEADER: &str = "#version 450
-layout(set = 0, binding = 0, std140) uniform TrippyUniforms {
+layout(set = 0, binding = 0, std140) uniform TripslopUniforms {
     vec3 iResolution;
     float iTime;
     vec4 iMouse;
     vec4 iDate;
-    vec4 _trippy_chres[4];
+    vec4 _tripslop_chres[4];
     float iTimeDelta;
     int iFrame;
     float iBeat;
     float iBpm;
-    vec4 _trippy_p[4];
+    vec4 _tripslop_p[4];
 };
-layout(set = 0, binding = 1) uniform sampler _trippy_samp;
-layout(set = 0, binding = 2) uniform texture2D _trippy_ch0;
-layout(set = 0, binding = 3) uniform texture2D _trippy_ch1;
-layout(set = 0, binding = 4) uniform texture2D _trippy_ch2;
-layout(set = 0, binding = 5) uniform texture2D _trippy_ch3;
-layout(location = 0) out vec4 _trippy_out;
-#define iChannel0 sampler2D(_trippy_ch0, _trippy_samp)
-#define iChannel1 sampler2D(_trippy_ch1, _trippy_samp)
-#define iChannel2 sampler2D(_trippy_ch2, _trippy_samp)
-#define iChannel3 sampler2D(_trippy_ch3, _trippy_samp)
-#define iChannelResolution _trippy_chres
+layout(set = 0, binding = 1) uniform sampler _tripslop_samp;
+layout(set = 0, binding = 2) uniform texture2D _tripslop_ch0;
+layout(set = 0, binding = 3) uniform texture2D _tripslop_ch1;
+layout(set = 0, binding = 4) uniform texture2D _tripslop_ch2;
+layout(set = 0, binding = 5) uniform texture2D _tripslop_ch3;
+layout(location = 0) out vec4 _tripslop_out;
+#define iChannel0 sampler2D(_tripslop_ch0, _tripslop_samp)
+#define iChannel1 sampler2D(_tripslop_ch1, _tripslop_samp)
+#define iChannel2 sampler2D(_tripslop_ch2, _tripslop_samp)
+#define iChannel3 sampler2D(_tripslop_ch3, _tripslop_samp)
+#define iChannelResolution _tripslop_chres
 #define iSampleRate 44100.0
 #define texture2D texture
 ";
@@ -52,46 +52,46 @@ const SANDBOX_HEADER: &str = "#define time iTime
 #define resolution (iResolution.xy)
 #define mouse (iMouse.xy / iResolution.xy)
 #define backbuffer iChannel1
-#define gl_FragColor _trippy_out
+#define gl_FragColor _tripslop_out
 ";
 
 const SHADERTOY_FOOTER: &str = "
 void main() {
-    vec4 _trippy_c = vec4(0.0, 0.0, 0.0, 1.0);
+    vec4 _tripslop_c = vec4(0.0, 0.0, 0.0, 1.0);
     /*globals*/
-    mainImage(_trippy_c, gl_FragCoord.xy);
-    _trippy_out = _trippy_c;
+    mainImage(_tripslop_c, gl_FragCoord.xy);
+    _tripslop_out = _tripslop_c;
 }
 ";
 
-/// ISF (Interactive Shader Format, as used by VDMX): same bindings, but trippy's own uniforms
+/// ISF (Interactive Shader Format, as used by VDMX): same bindings, but tripslop's own uniforms
 /// get private names, since ISF code often declares its own `iResolution` / `iTime`.
 const ISF_HEADER: &str = "#version 450
-layout(set = 0, binding = 0, std140) uniform TrippyUniforms {
-    vec3 _trippy_iResolution;
-    float _trippy_iTime;
-    vec4 _trippy_iMouse;
-    vec4 _trippy_iDate;
-    vec4 _trippy_chres[4];
-    float _trippy_iTimeDelta;
-    int _trippy_iFrame;
-    float _trippy_iBeat;
-    float _trippy_iBpm;
-    vec4 _trippy_p[4];
+layout(set = 0, binding = 0, std140) uniform TripslopUniforms {
+    vec3 _tripslop_iResolution;
+    float _tripslop_iTime;
+    vec4 _tripslop_iMouse;
+    vec4 _tripslop_iDate;
+    vec4 _tripslop_chres[4];
+    float _tripslop_iTimeDelta;
+    int _tripslop_iFrame;
+    float _tripslop_iBeat;
+    float _tripslop_iBpm;
+    vec4 _tripslop_p[4];
 };
-layout(set = 0, binding = 1) uniform sampler _trippy_samp;
-layout(set = 0, binding = 2) uniform texture2D _trippy_ch0;
-layout(set = 0, binding = 3) uniform texture2D _trippy_ch1;
-layout(set = 0, binding = 4) uniform texture2D _trippy_ch2;
-layout(set = 0, binding = 5) uniform texture2D _trippy_ch3;
-layout(location = 0) out vec4 _trippy_out;
-#define TIME _trippy_iTime
-#define TIMEDELTA _trippy_iTimeDelta
-#define RENDERSIZE (_trippy_iResolution.xy)
-#define FRAMEINDEX _trippy_iFrame
-#define DATE _trippy_iDate
+layout(set = 0, binding = 1) uniform sampler _tripslop_samp;
+layout(set = 0, binding = 2) uniform texture2D _tripslop_ch0;
+layout(set = 0, binding = 3) uniform texture2D _tripslop_ch1;
+layout(set = 0, binding = 4) uniform texture2D _tripslop_ch2;
+layout(set = 0, binding = 5) uniform texture2D _tripslop_ch3;
+layout(location = 0) out vec4 _tripslop_out;
+#define TIME _tripslop_iTime
+#define TIMEDELTA _tripslop_iTimeDelta
+#define RENDERSIZE (_tripslop_iResolution.xy)
+#define FRAMEINDEX _tripslop_iFrame
+#define DATE _tripslop_iDate
 #define PASSINDEX 0
-#define gl_FragColor _trippy_out
+#define gl_FragColor _tripslop_out
 #define isf_FragNormCoord (gl_FragCoord.xy / RENDERSIZE)
 #define vv_FragNormCoord isf_FragNormCoord
 #define IMG_NORM_PIXEL(img, c) texture(img, c)
@@ -243,11 +243,11 @@ fn prepare_wgsl(user: &str) -> Prepared {
     for i in 0..MAX_PARAMS {
         match params.get(i) {
             Some(p) => fields.push_str(&format!("    {}: f32,\n", p.name)),
-            None => fields.push_str(&format!("    _trippy_p{i}: f32,\n")),
+            None => fields.push_str(&format!("    _tripslop_p{i}: f32,\n")),
         }
     }
     let prelude = format!(
-        "struct TrippyInputs {{
+        "struct TripslopInputs {{
     size: vec3f,
     time: f32,
     mouse: vec4f,
@@ -258,7 +258,7 @@ fn prepare_wgsl(user: &str) -> Prepared {
     beat: f32,
     bpm: f32,
 {fields}}};
-@group(0) @binding(0) var<uniform> inputs: TrippyInputs;
+@group(0) @binding(0) var<uniform> inputs: TripslopInputs;
 @group(0) @binding(1) var samp: sampler;
 @group(0) @binding(2) var iChannel0: texture_2d<f32>;
 @group(0) @binding(3) var iChannel1: texture_2d<f32>;
@@ -431,7 +431,7 @@ fn has_top_level_comma(expr: &str) -> bool {
 }
 
 fn slot(i: usize) -> String {
-    format!("_trippy_p[{}].{}", i / 4, ["x", "y", "z", "w"][i % 4])
+    format!("_tripslop_p[{}].{}", i / 4, ["x", "y", "z", "w"][i % 4])
 }
 
 /// The ISF JSON header, if the code starts with one. `Err` if it looks like ISF but the
@@ -523,13 +523,13 @@ fn prepare_isf(user: &str, json: Result<serde_json::Value, CompileError>) -> Pre
                     choices: labels,
                 });
                 // Index -> value via a small helper function.
-                let mut helper = format!("int _trippy_long_{name}(float i) {{ int k = int(i + 0.5);");
+                let mut helper = format!("int _tripslop_long_{name}(float i) {{ int k = int(i + 0.5);");
                 for (j, v) in values.iter().enumerate() {
                     helper.push_str(&format!(" if (k == {j}) return {v};"));
                 }
                 helper.push_str(&format!(" return {}; }}\n", values[0]));
                 defines.push_str(&helper);
-                format!("_trippy_long_{name}({s})")
+                format!("_tripslop_long_{name}({s})")
             }
             "point2D" => {
                 let min = arr(&input["MIN"]).filter(|a| a.len() >= 2).unwrap_or(vec![0.0, 0.0]);
@@ -551,9 +551,9 @@ fn prepare_isf(user: &str, json: Result<serde_json::Value, CompileError>) -> Pre
             "image" => {
                 images += 1;
                 let ch = if images == 1 { 0 } else { 3 };
-                format!("sampler2D(_trippy_ch{ch}, _trippy_samp)")
+                format!("sampler2D(_tripslop_ch{ch}, _tripslop_samp)")
             }
-            "audio" | "audioFFT" => "sampler2D(_trippy_ch2, _trippy_samp)".into(),
+            "audio" | "audioFFT" => "sampler2D(_tripslop_ch2, _tripslop_samp)".into(),
             other => {
                 errors.push(CompileError { line: None, message: format!("ISF input type {other:?} ({name}) isn't supported") });
                 continue;
@@ -576,7 +576,7 @@ fn prepare_isf(user: &str, json: Result<serde_json::Value, CompileError>) -> Pre
             });
         } else if let Some(target) = passes.first().and_then(|p| p["TARGET"].as_str()).filter(|t| is_ident(t)) {
             names.push(target.to_string());
-            defines.push_str(&format!("#define {target} sampler2D(_trippy_ch1, _trippy_samp)\n"));
+            defines.push_str(&format!("#define {target} sampler2D(_tripslop_ch1, _tripslop_samp)\n"));
         }
     }
 

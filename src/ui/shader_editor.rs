@@ -7,7 +7,7 @@ use crate::modulation::Clock;
 use crate::shader::{CustomShader, Role, TEMPLATES};
 use crate::ui::widgets;
 
-const OPEN_REQUEST: &str = "trippy-open-shader";
+const OPEN_REQUEST: &str = "tripslop-open-shader";
 
 /// Ask the app to open the editor for a shader (from anywhere in the UI).
 pub fn request_open(ctx: &egui::Context, id: u64) {

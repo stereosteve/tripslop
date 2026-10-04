@@ -2,4 +2,6 @@
 *.png
 .juggler
 .DS_Store
+/tripslop-*.mp4
+# recordings made before the rename
 /trippy-*.mp4

@@ -11,13 +11,13 @@ const TIMEOUT: Duration = Duration::from_secs(180);
 
 fn run(script: &str) {
     let root = env!("CARGO_MANIFEST_DIR");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_trippy"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_tripslop"))
         .args(["--script", script])
         .current_dir(root)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("failed to start trippy");
+        .expect("failed to start tripslop");
     let start = Instant::now();
     let status = loop {
         if let Some(s) = child.try_wait().expect("wait failed") {
@@ -40,17 +40,17 @@ fn run(script: &str) {
 #[test]
 #[ignore = "opens a window; needs a GPU"]
 fn smoke() {
-    run("scripts/smoke.trippy");
+    run("scripts/smoke.tripslop");
 }
 
 #[test]
 #[ignore = "opens a window; needs a GPU"]
 fn shaders() {
-    run("scripts/shaders.trippy");
+    run("scripts/shaders.tripslop");
 }
 
 #[test]
 #[ignore = "opens a window; needs a GPU"]
 fn punch_tour() {
-    run("scripts/punch-tour.trippy");
+    run("scripts/punch-tour.tripslop");
 }

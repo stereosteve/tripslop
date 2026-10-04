@@ -1,4 +1,4 @@
-//! trippy — a live video mixer: layered clip grid with scenes, per-layer effects and an
+//! tripslop — a live video mixer: layered clip grid with scenes, per-layer effects and an
 //! emulated analog video-feedback rig.
 
 mod automation;
@@ -31,7 +31,7 @@ use ui::grid::{GridAction, GridView};
 
 const TICK: f64 = 1.0 / 60.0;
 
-const USAGE: &str = "usage: trippy [--demo] [--record] [--script FILE] [--fixed-step | --realtime] [MEDIA...]";
+const USAGE: &str = "usage: tripslop [--demo] [--record] [--script FILE] [--fixed-step | --realtime] [MEDIA...]";
 
 fn main() -> eframe::Result {
     let mut files: Vec<PathBuf> = Vec::new();
@@ -60,8 +60,8 @@ fn main() -> eframe::Result {
         let src = std::fs::read_to_string(path).unwrap_or_else(|e| exit_with(&format!("{}: {e}", path.display()), 2));
         events = script::parse(&src).unwrap_or_else(|e| exit_with(&format!("{}: {e}", path.display()), 2));
     }
-    // Shortcut kept for quick checks: TRIPPY_SNAPSHOT=<frames>:<out.png>.
-    if let Some((n, p)) = std::env::var("TRIPPY_SNAPSHOT").ok().and_then(|v| {
+    // Shortcut kept for quick checks: TRIPSLOP_SNAPSHOT=<frames>:<out.png>.
+    if let Some((n, p)) = std::env::var("TRIPSLOP_SNAPSHOT").ok().and_then(|v| {
         let (n, p) = v.split_once(':')?;
         Some((n.parse::<u64>().ok()?, PathBuf::from(p)))
     }) {
@@ -74,16 +74,16 @@ fn main() -> eframe::Result {
     let fixed_step = fixed_step.unwrap_or(script_path.is_some());
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("trippy")
+            .with_title("tripslop")
             .with_inner_size([1680.0, 1000.0])
             .with_drag_and_drop(true),
         ..Default::default()
     };
     eframe::run_native(
-        "trippy",
+        "tripslop",
         options,
         Box::new(move |cc| {
-            let rs = cc.wgpu_render_state.as_ref().ok_or("trippy needs the wgpu renderer")?;
+            let rs = cc.wgpu_render_state.as_ref().ok_or("tripslop needs the wgpu renderer")?;
             cc.egui_ctx.set_theme(egui::ThemePreference::Dark);
             let mut app = App::new(Renderer::new(rs));
             app.fixed_step = fixed_step;
@@ -429,7 +429,7 @@ impl App {
     }
 
     fn save_snapshot(&mut self, path: Option<PathBuf>) {
-        let path = path.unwrap_or_else(|| PathBuf::from(format!("trippy-{}.png", unix_time())));
+        let path = path.unwrap_or_else(|| PathBuf::from(format!("tripslop-{}.png", unix_time())));
         self.status = match self.renderer.snapshot().and_then(|img| img.save(&path).map_err(|e| e.to_string())) {
             Ok(()) => format!("Saved {}", path.display()),
             Err(e) => format!("Snapshot failed: {e}"),
@@ -444,7 +444,7 @@ impl App {
             self.finishing.push(fin);
             return;
         }
-        let path = std::env::current_dir().unwrap_or_default().join(format!("trippy-{}.mp4", unix_time()));
+        let path = std::env::current_dir().unwrap_or_default().join(format!("tripslop-{}.mp4", unix_time()));
         let (device, _, _) = self.renderer.output();
         match Recorder::start(device, path) {
             Ok(rec) => {
@@ -554,7 +554,7 @@ impl App {
 
     fn transport_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("trippy").strong().color(ui::widgets::ACCENT));
+            ui.label(RichText::new("tripslop").strong().color(ui::widgets::ACCENT));
             ui.separator();
             let play = if self.comp.playing { "⏸" } else { "▶" };
             if ui.button(play).on_hover_text("Play / pause all clips (Space)").clicked() {
@@ -752,9 +752,9 @@ impl eframe::App for App {
         if self.show_output {
             let mut open = true;
             ctx.show_viewport_immediate(
-                egui::ViewportId::from_hash_of("trippy output"),
+                egui::ViewportId::from_hash_of("tripslop output"),
                 egui::ViewportBuilder::default()
-                    .with_title("trippy output (double-click = fullscreen)")
+                    .with_title("tripslop output (double-click = fullscreen)")
                     .with_inner_size([960.0, 540.0]),
                 |ui, _class| {
                     let (resp, _) = paint_output(ui, tex);

@@ -675,7 +675,7 @@ impl Renderer {
         let data = shader_uniforms(shader, WIDTH, HEIGHT, gpu.frame, clock);
         let ub = self.uniform(&data);
         let pipe = gpu.pipe.as_ref().unwrap();
-        // GLSL sees GL-oriented copies; WGSL sees trippy's own (screen-space) textures.
+        // GLSL sees GL-oriented copies; WGSL sees tripslop's own (screen-space) textures.
         let (ch0, ch3) = if gpu.screen_space {
             (input.map(|t| &t.view).unwrap_or(&self.dummy_tex.view), &self.output.view)
         } else {

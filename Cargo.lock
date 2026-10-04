@@ -3224,7 +3224,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "trippy"
+name = "tripslop"
 version = "0.1.0"
 dependencies = [
  "bytemuck",

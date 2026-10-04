@@ -1,4 +1,4 @@
-# trippy
+# tripslop
 
 A live video mixer (VJ tool) in Rust, in the spirit of Resolume Avenue: a clip grid of layers
 × scenes, per-layer and master effect chains, blend modes, an A/B crossfader, clip loop modes,
@@ -136,7 +136,7 @@ The **Composition** tab lists everything that's automated.
 
 Press `Cmd/Ctrl+R` (or **⏺ Record**) to start and stop. Frames are captured straight from the
 renderer, so the file has no UI and doesn't drop frames. It's saved as
-`trippy-<timestamp>.mp4` (H.264, 1280×720, 60 fps) in the directory you launched from, using
+`tripslop-<timestamp>.mp4` (H.264, 1280×720, 60 fps) in the directory you launched from, using
 the hardware encoder on macOS and x264 elsewhere. The file is finalized even if you quit
 mid-recording. `--record` starts recording at launch. There's no audio.
 
@@ -199,7 +199,7 @@ fullscreen.
 for capturing stills, or to set up a performance.
 
 ```
-cargo run --release -- --script scripts/smoke.trippy
+cargo run --release -- --script scripts/smoke.tripslop
 ```
 
 Scripts run in **fixed-step** mode: the 60 Hz clock advances by simulated ticks rather than
@@ -254,7 +254,7 @@ case-insensitively by prefix, so `2/feedback/rot` works.
   punch tour) as end-to-end tests. These need a GPU and a window session. Captures go to
   `target/script-out/`.
 
-For a quick single still, use `TRIPPY_SNAPSHOT=<frames>:<out.png>`. It saves the output after
+For a quick single still, use `TRIPSLOP_SNAPSHOT=<frames>:<out.png>`. It saves the output after
 that many frames and quits.
 
 ## How it works

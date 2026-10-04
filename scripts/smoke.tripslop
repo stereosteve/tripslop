@@ -1,5 +1,5 @@
 # Smoke test: the demo set, quantized scene launches, parameters, captures.
-# Run from the repo root:  cargo run --release -- --script scripts/smoke.trippy
+# Run from the repo root:  cargo run --release -- --script scripts/smoke.tripslop
 
 demo
 assert layers == 3

@@ -1,4 +1,4 @@
-//! Test / automation scripts: `trippy --script file.trippy`.
+//! Test / automation scripts: `tripslop --script file.tripslop`.
 //!
 //! A script is a list of timed commands run against the live app, e.g.
 //!
