@@ -81,6 +81,34 @@ impl Fit {
     }
 }
 
+/// Momentary playback overrides from punch-in FX. Reset every tick by the punch engine;
+/// they never change the clip's own settings.
+#[derive(Clone, Copy, Debug)]
+pub struct ClipPerf {
+    /// Speed multiplier (tape stop ramps this to 0).
+    pub speed: f64,
+    pub reverse: bool,
+    /// Beat-repeat: loop `beats` beats starting at frame `anchor`, phase-locked to `start_beat`.
+    pub roll: Option<Roll>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Roll {
+    pub anchor: f64,
+    pub start_beat: f64,
+    pub beats: f64,
+}
+
+impl Default for ClipPerf {
+    fn default() -> Self {
+        Self {
+            speed: 1.0,
+            reverse: false,
+            roll: None,
+        }
+    }
+}
+
 pub const PATTERNS: &[&str] = &["Bars", "Rings", "Plasma", "Checker", "Dot", "Noise", "Solid"];
 
 pub struct Generator {
@@ -130,6 +158,7 @@ pub struct Clip {
     /// Frame index last handed to the GPU (or None if it needs an upload).
     pub shown_frame: Option<usize>,
     pub thumbnail: Option<eframe::egui::TextureHandle>,
+    pub perf: ClipPerf,
 }
 
 impl Clip {
@@ -150,6 +179,7 @@ impl Clip {
             last_random_beat: i64::MIN,
             shown_frame: None,
             thumbnail: None,
+            perf: ClipPerf::default(),
         }
     }
 
@@ -249,16 +279,22 @@ impl Clip {
             return;
         }
         let len = self.length() as f64;
-        let rate = match self.sync {
-            Sync::Timeline => self.fps() as f64,
-            // `len` frames over `beats` beats at the current tempo.
-            Sync::Bpm => len / self.beats.get().max(1.0) as f64 * clock.bpm as f64 / 60.0,
-        };
-        let dir = match self.direction {
+        let rate = self.rate(clock);
+        if let Some(r) = self.perf.roll {
+            // Beat repeat: the playhead is a function of the beat clock.
+            let frames_per_beat = rate * 60.0 / clock.bpm.max(1.0) as f64;
+            let offset = (clock.beat - r.start_beat).rem_euclid(r.beats.max(1e-3)) * frames_per_beat;
+            self.position = (r.anchor + offset).rem_euclid(len.max(1.0));
+            return;
+        }
+        let mut dir = match self.direction {
             Direction::Forward => 1.0,
             Direction::Reverse => -1.0,
             Direction::Paused => return,
         };
+        if self.perf.reverse {
+            dir = -dir;
+        }
         if self.loop_mode == LoopMode::Random {
             let beat = clock.beat.floor() as i64;
             if beat != self.last_random_beat {
@@ -266,11 +302,22 @@ impl Clip {
                 self.position = random_frame(self.id, beat, len);
             }
         }
-        let step = dt * rate * self.speed.get() as f64 * dir;
+        let step = dt * rate * dir;
         let (pos, bounce, finished) = advance(self.position, len, step, self.loop_mode, self.bounce);
         self.position = pos;
         self.bounce = bounce;
         self.finished = finished;
+    }
+
+    /// Playback rate in frames per second (speed, BPM sync and punch overrides included).
+    pub fn rate(&self, clock: Clock) -> f64 {
+        let len = self.length() as f64;
+        let base = match self.sync {
+            Sync::Timeline => self.fps() as f64,
+            // `len` frames over `beats` beats at the current tempo.
+            Sync::Bpm => len / self.beats.get().max(1.0) as f64 * clock.bpm as f64 / 60.0,
+        };
+        base * self.speed.get() as f64 * self.perf.speed
     }
 
     /// Whether the clip should currently be drawn.

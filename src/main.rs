@@ -6,6 +6,7 @@ mod composition;
 mod effects;
 mod modulation;
 mod param;
+mod punch;
 mod recorder;
 mod renderer;
 mod shader;
@@ -80,6 +81,7 @@ enum Tab {
 struct App {
     renderer: Renderer,
     comp: Composition,
+    punch: punch::Punch,
     grid: GridView,
     tab: Tab,
     sim_time: f64,
@@ -106,6 +108,7 @@ impl App {
         Self {
             renderer,
             comp: Composition::new(3, 8),
+            punch: punch::Punch::new(),
             grid: GridView {
                 selected_layer: 0,
                 selected_clip: None,
@@ -251,6 +254,7 @@ impl App {
                 GridAction::RemoveLayer(i) => {
                     if self.comp.layers.len() > 1 {
                         self.comp.layers.remove(i);
+                        self.punch.retain_layers(&self.comp);
                         self.grid.selected_layer = self.grid.selected_layer.min(self.comp.layers.len() - 1);
                         self.grid.selected_clip = None;
                     }
@@ -292,17 +296,37 @@ impl App {
             }
         }
 
-        if ctx.egui_wants_keyboard_input() {
+        // Punch-in pads: held while their key is down (not while typing, not with Cmd/Ctrl).
+        let typing = ctx.egui_wants_keyboard_input();
+        let (command, shift) = ctx.input(|i| (i.modifiers.command, i.modifiers.shift));
+        for (pad, def) in self.punch.pads.iter_mut().zip(punch::PUNCHES.iter()) {
+            let (down, pressed) = ctx.input(|i| (i.key_down(def.key), i.key_pressed(def.key)));
+            if typing || command {
+                pad.key_held = false;
+                continue;
+            }
+            if shift {
+                // Shift + key latches / unlatches instead of holding.
+                if pressed {
+                    pad.latched = !pad.latched;
+                }
+                pad.key_held = false;
+            } else {
+                pad.key_held = down;
+            }
+        }
+        if typing {
             return;
         }
         let pressed = |k: Key| ctx.input(|i| i.key_pressed(k));
+        let cmd = |k: Key| ctx.input(|i| i.modifiers.command && i.key_pressed(k));
         let scene_keys = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9];
         for (i, k) in scene_keys.iter().enumerate() {
             if pressed(*k) && i < self.comp.columns {
                 self.comp.launch(Launch::Column(i));
             }
         }
-        if pressed(Key::F) {
+        if cmd(Key::F) {
             self.perform = !self.perform;
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.perform));
         }
@@ -313,16 +337,16 @@ impl App {
         if pressed(Key::Space) {
             self.comp.playing = !self.comp.playing;
         }
-        if pressed(Key::T) {
+        if pressed(Key::Enter) {
             self.tap();
         }
-        if pressed(Key::C) {
+        if cmd(Key::K) {
             self.renderer.clear_history();
         }
-        if pressed(Key::R) {
+        if cmd(Key::R) {
             self.toggle_recording();
         }
-        if pressed(Key::S) {
+        if cmd(Key::S) {
             self.save_snapshot(None);
         }
         if (pressed(Key::Delete) || pressed(Key::Backspace))
@@ -406,8 +430,9 @@ impl App {
             self.sim_time += TICK;
             self.frame_count += 1;
             let clock = self.clock();
+            self.punch.update(&mut self.comp, clock, TICK);
             self.comp.tick(TICK, prev_beat, clock);
-            self.renderer.render(&mut self.comp, clock);
+            self.renderer.render(&mut self.comp, &mut self.punch, clock);
             self.capture_frame();
         }
     }
@@ -451,7 +476,7 @@ impl App {
             if ui.small_button("×2").clicked() {
                 self.comp.bpm = (self.comp.bpm * 2.0).min(300.0);
             }
-            if ui.button("Tap (T)").clicked() {
+            if ui.button("Tap (Enter)").clicked() {
                 self.tap();
             }
             if ui.button("Resync").on_hover_text("Make now beat 1").clicked() {
@@ -480,9 +505,9 @@ impl App {
             let rec_label = match &self.recorder {
                 Some(r) => {
                     let secs = r.frames / recorder::FPS as u64;
-                    RichText::new(format!("⏺ {}:{:02}  Stop (R)", secs / 60, secs % 60)).color(Color32::WHITE)
+                    RichText::new(format!("⏺ {}:{:02}  Stop (Cmd R)", secs / 60, secs % 60)).color(Color32::WHITE)
                 }
-                None => RichText::new("⏺ Record (R)"),
+                None => RichText::new("⏺ Record (Cmd R)"),
             };
             let mut rec_btn = egui::Button::new(rec_label);
             if self.recorder.is_some() {
@@ -491,15 +516,15 @@ impl App {
             if ui.add(rec_btn).clicked() {
                 self.toggle_recording();
             }
-            if ui.button("Snapshot (S)").clicked() {
+            if ui.button("Snapshot (Cmd S)").clicked() {
                 self.save_snapshot(None);
             }
             ui.toggle_value(&mut self.show_output, "🖵 Output window");
-            if ui.button("Perform (F)").clicked() {
+            if ui.button("Perform (Cmd F)").clicked() {
                 self.perform = true;
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
             }
-            if ui.button("Clear feedback (C)").clicked() {
+            if ui.button("Clear feedback (Cmd K)").clicked() {
                 self.renderer.clear_history();
             }
         });
@@ -669,6 +694,8 @@ impl eframe::App for App {
                 let h = ui.available_width() * HEIGHT as f32 / WIDTH as f32;
                 ui.allocate_ui(egui::vec2(ui.available_width(), h), |ui| self.monitor(ui));
                 self.crossfader(ui);
+                ui.add_space(8.0);
+                ui::punch::pads(ui, &mut self.punch);
             });
             egui::Panel::right("clip").resizable(true).default_size(380.0).show(ui, |ui| {
                 ui.label(RichText::new("Clip").strong());

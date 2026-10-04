@@ -20,6 +20,7 @@ use crate::clip::{Clip, Media};
 use crate::composition::Composition;
 use crate::effects::{EFFECTS, Effect, EffectKind, HistorySource};
 use crate::modulation::Clock;
+use crate::punch::Punch;
 use crate::shader::{CompileError, CustomShader};
 
 pub const WIDTH: u32 = 1280;
@@ -553,8 +554,8 @@ impl Renderer {
     }
 
     /// Run an effect chain, ping-ponging between `bufs`. Returns the index holding the result.
-    fn chain(&mut self, enc: &mut wgpu::CommandEncoder, effects: &mut [Effect], bufs: &[Tex; 2], mut cur: usize, clock: Clock, used: &mut HashSet<u64>) -> usize {
-        for e in effects.iter_mut().filter(|e| e.enabled) {
+    fn chain(&mut self, enc: &mut wgpu::CommandEncoder, effects: Vec<&mut Effect>, bufs: &[Tex; 2], mut cur: usize, clock: Clock, used: &mut HashSet<u64>) -> usize {
+        for e in effects.into_iter().filter(|e| e.enabled) {
             used.insert(e.id);
             if let Some(c) = e.custom.as_deref_mut() {
                 used.insert(c.id);
@@ -700,7 +701,7 @@ impl Renderer {
         self.custom.insert(shader.id, gpu);
     }
 
-    pub fn render(&mut self, comp: &mut Composition, clock: Clock) {
+    pub fn render(&mut self, comp: &mut Composition, punch: &mut Punch, clock: Clock) {
         self.next_uniform = 0;
         let mut used_sources = HashSet::new();
         let mut used_layers = HashSet::new();
@@ -725,9 +726,11 @@ impl Renderer {
             }
             let gain = comp.side_gain(comp.layers[li].side);
             let layer = &mut comp.layers[li];
-            let opacity = layer.opacity.get() * gain;
+            let opacity = layer.opacity.get() * gain * layer.perf.opacity;
             let draws = layer.draw_list();
-            if draws.is_empty() || opacity <= 0.0 {
+            // A layer faded to zero still renders (cheaply skipping the composite), so its
+            // effects keep their feedback history through punch-in gating.
+            if draws.is_empty() || (opacity <= 0.0 && layer.perf.opacity >= 1.0) {
                 continue;
             }
             used_layers.insert(layer.id);
@@ -762,7 +765,12 @@ impl Renderer {
                 };
                 let data = [
                     [clock.time as f32, aspect, mode, weight],
-                    [layer.pos_x.get(), layer.pos_y.get(), layer.scale.get(), layer.rotation.get().to_radians()],
+                    [
+                        layer.pos_x.get() + layer.perf.x,
+                        layer.pos_y.get() + layer.perf.y,
+                        layer.scale.get() * layer.perf.scale,
+                        (layer.rotation.get() + layer.perf.rotate).to_radians(),
+                    ],
                     [clip.fit as u32 as f32, tex_aspect, gen_params[0], gen_params[1]],
                     [gen_params[2], gen_params[3], straight, 0.0],
                 ];
@@ -773,20 +781,27 @@ impl Renderer {
             }
 
             // Layer effects.
-            let lc = self.chain(&mut enc, &mut layer.effects, &bufs, 0, clock, &mut used_fx);
+            // The layer's own chain, then any punch-in effects aimed at this layer.
+            let mut fx: Vec<&mut Effect> = layer.effects.iter_mut().collect();
+            fx.extend(punch.layer_effects(layer.id));
+            let lc = self.chain(&mut enc, fx, &bufs, 0, clock, &mut used_fx);
 
             // Composite onto the composition.
-            let ub = self.uniform(&[[layer.blend as u32 as f32, opacity, 0.0, 0.0]]);
-            let bg = self.bind(&self.composite_pipe.layout, ub, &[&comp_bufs[cur].view, &bufs[lc].view]);
-            pass(&mut enc, &comp_bufs[1 - cur].view, None, &self.composite_pipe, &bg);
-            cur = 1 - cur;
+            if opacity > 0.0 {
+                let ub = self.uniform(&[[layer.blend as u32 as f32, opacity, 0.0, 0.0]]);
+                let bg = self.bind(&self.composite_pipe.layout, ub, &[&comp_bufs[cur].view, &bufs[lc].view]);
+                pass(&mut enc, &comp_bufs[1 - cur].view, None, &self.composite_pipe, &bg);
+                cur = 1 - cur;
+            }
             self.layers.insert(layer.id, bufs);
         }
 
         // Master effects.
-        cur = self.chain(&mut enc, &mut comp.effects, &comp_bufs, cur, clock, &mut used_fx);
+        let mut fx: Vec<&mut Effect> = comp.effects.iter_mut().collect();
+        fx.extend(punch.master_effects());
+        cur = self.chain(&mut enc, fx, &comp_bufs, cur, clock, &mut used_fx);
 
-        let ub = self.uniform(&[[comp.master.get(), 0.0, 0.0, 0.0]]);
+        let ub = self.uniform(&[[comp.master.get() * comp.master_perf, 0.0, 0.0, 0.0]]);
         let bg = self.bind(&self.final_pipe.layout, ub, &[&comp_bufs[cur].view]);
         pass(&mut enc, &self.output.view, None, &self.final_pipe, &bg);
         self.comp = Some(comp_bufs);

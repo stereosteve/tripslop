@@ -79,6 +79,29 @@ impl Quantize {
     }
 }
 
+/// Momentary overrides from punch-in FX, reset every tick (never saved into the layer's
+/// own parameters).
+#[derive(Clone, Copy, Debug)]
+pub struct LayerPerf {
+    pub opacity: f32,
+    pub scale: f32,
+    pub rotate: f32,
+    pub x: f32,
+    pub y: f32,
+}
+
+impl Default for LayerPerf {
+    fn default() -> Self {
+        Self {
+            opacity: 1.0,
+            scale: 1.0,
+            rotate: 0.0,
+            x: 0.0,
+            y: 0.0,
+        }
+    }
+}
+
 pub struct Layer {
     pub id: u64,
     pub name: String,
@@ -99,6 +122,7 @@ pub struct Layer {
     pub bypass: bool,
     pub solo: bool,
     pub effects: Vec<Effect>,
+    pub perf: LayerPerf,
 }
 
 impl Layer {
@@ -121,11 +145,16 @@ impl Layer {
             bypass: false,
             solo: false,
             effects: Vec::new(),
+            perf: LayerPerf::default(),
         }
     }
 
     pub fn active_clip(&self) -> Option<&Clip> {
         self.active.and_then(|c| self.clips.get(c)?.as_ref())
+    }
+
+    pub fn active_clip_mut(&mut self) -> Option<&mut Clip> {
+        self.active.and_then(|c| self.clips.get_mut(c)?.as_mut())
     }
 
     /// Start the clip in `col` (restarting it if it's already playing). An empty cell clears
@@ -241,6 +270,8 @@ pub struct Composition {
     pub playing: bool,
     /// Column most recently launched as a scene.
     pub active_column: Option<usize>,
+    /// Momentary master-fader multiplier from punch-in FX.
+    pub master_perf: f32,
 }
 
 impl Composition {
@@ -256,6 +287,7 @@ impl Composition {
             pending: Vec::new(),
             playing: true,
             active_column: None,
+            master_perf: 1.0,
         }
     }
 

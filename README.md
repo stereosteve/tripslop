@@ -134,25 +134,60 @@ The **Composition** tab lists everything that's automated.
 
 ## Recording
 
-Press `R` (or **⏺ Record**) to start and stop. Frames are captured straight from the
+Press `Cmd/Ctrl+R` (or **⏺ Record**) to start and stop. Frames are captured straight from the
 renderer, so the file has no UI and doesn't drop frames. It's saved as
 `trippy-<timestamp>.mp4` (H.264, 1280×720, 60 fps) in the directory you launched from, using
 the hardware encoder on macOS and x264 elsewhere. The file is finalized even if you quit
 mid-recording. `--record` starts recording at launch. There's no audio.
 
+## Punch-in FX
+
+Inspired by the OP-Z / KO II punch-in effects: **hold** a pad for a momentary, beat-synced
+transformation, and release to snap back. Hold several at once to stack them, or
+**Shift+key / Shift+click** to latch a pad for hands-free builds. Pads ease in and out, and
+know how long they've been held, so builds intensify the longer you hold.
+
+Punches aren't just master effects. Each one is a small routine that can:
+* inject temporary effects into individual layers (alternating layers, the top layer, a
+  random layer each beat…)
+* gate or pump layers in beat-locked patterns
+* take over clip playback
+
+They never modify your set: release a pad and everything is exactly as it was.
+
+| Key | Pad | What it does |
+| --- | --- | --- |
+| Q | Stutter | Beat repeat on every clip: 1/2 beat, then 1/4, then 1/8 the longer you hold |
+| W | Chase | One layer visible at a time, stepping through the layers on 1/16s |
+| E | Mirror split | Alternate layers mirror sideways / vertically; the top layer turns kaleidoscope |
+| R | Pump | Each layer zoom-pumps on the beat, phase-shifted per layer |
+| T | Tape stop | Clips grind to a halt over a beat while the picture sags and drains |
+| Y | Reverse | Clips play backwards with an RGB time split and a hue flip |
+| U | Echo build | 1/16-note echo trails that thicken while held |
+| I | Riser | Two-bar build: zoom, blur and brightness climb; an accelerating strobe kicks in |
+| A | Strobe split | Even layers on the beat, odd layers on the off-beat |
+| S | Kaleido spin | Master kaleidoscope spinning with the beat |
+| D | Tunnel | Master feedback tunnel, turning the other way every bar |
+| F | Fractal bloom | The top layer blooms into a Sierpinski fractal; the others dim |
+| G | Glitch | Random per-layer jumps, a random layer pixelates, CRT master |
+| H | Invert flip | Layers invert in alternation, flipping every beat |
+| J | Wash out | Whiteout transition over a bar |
+| K | Trance gate | Master chopped by a 16-step gate |
+
 ## Controls
 
 | Key | Action |
 | --- | --- |
+| Q–I, A–K | punch-in FX (hold; Shift = latch) |
 | 1–9 | launch scene (column) |
 | Space | play / pause all clips |
-| T | tap tempo |
+| Enter | tap tempo |
 | ← / → | crossfader |
-| R | start / stop recording |
-| S | save a PNG snapshot |
-| C | clear all feedback / delay memory |
+| Cmd/Ctrl+R | start / stop recording |
+| Cmd/Ctrl+S | save a PNG snapshot |
+| Cmd/Ctrl+K | clear all feedback / delay memory |
+| Cmd/Ctrl+F, Esc | performance mode (fullscreen output only) |
 | Delete | remove the selected clip |
-| F / Esc | performance mode (fullscreen output only) |
 | drag / scroll on output | move / scale the selected layer |
 
 **Output window** opens a second window you can drag to a projector and double-click to make
