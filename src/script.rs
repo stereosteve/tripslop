@@ -426,7 +426,7 @@ fn parse_cmd(w: &[String]) -> Result<Vec<Cmd>, String> {
         }
         "select" => one(Cmd::Select(idx(w.get(1), "layer")?, idx(w.get(2), "column")?)),
         "open-editor" => one(Cmd::OpenEditor(idx(w.get(1), "layer")?, idx(w.get(2), "column")?)),
-        "tab" => one(Cmd::Tab(w.get(1).ok_or("missing layer/composition")?.clone())),
+        "tab" => one(Cmd::Tab(w.get(1).ok_or("missing layer/master/devices/modulators/code")?.clone())),
         "snapshot" => one(Cmd::Snapshot(PathBuf::from(w.get(1).ok_or("missing path")?))),
         "screenshot" => one(Cmd::Screenshot(PathBuf::from(w.get(1).ok_or("missing path")?))),
         "record" => match w.get(1).map(String::as_str) {

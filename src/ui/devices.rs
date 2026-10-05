@@ -64,10 +64,6 @@ pub fn master_chain(ui: &mut egui::Ui, comp: &mut Composition, clock: Clock, out
         }, |ui| {
             widgets::param_grid(ui, [&mut comp.master, &mut comp.crossfader], clock);
         });
-        let h = ui.available_height();
-        card(ui, Id::new("automation card"), 420.0, h, "Automation", |ui| {
-            ui.label(RichText::new("AUTOMATION").font(theme::semibold(11.0)).color(widgets::ACCENT));
-        }, |ui| widgets::overview(ui, comp, clock));
     });
 }
 

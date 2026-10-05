@@ -182,6 +182,14 @@ fn exit_with(msg: &str, code: i32) -> ! {
     std::process::exit(code)
 }
 
+/// What the device panel shows.
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum DeviceTab {
+    Devices,
+    Modulators,
+    Code,
+}
+
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum Tab {
     Layer,
@@ -194,6 +202,7 @@ struct App {
     punch: punch::Punch,
     grid: GridView,
     tab: Tab,
+    device_tab: DeviceTab,
     sim_time: f64,
     beat: f64,
     last_frame: Instant,
@@ -210,6 +219,8 @@ struct App {
     finishing: Vec<Finishing>,
     /// Shader open in the code editor.
     editing: Option<u64>,
+    /// `editing` as of the last frame (opening a new one switches to the Code tab).
+    shown_editing: Option<u64>,
     library: isf_library::Library,
     library_view: ui::library::LibraryView,
     show_library: bool,
@@ -246,6 +257,8 @@ impl App {
                 cells: Vec::new(),
             },
             tab: Tab::Layer,
+            device_tab: DeviceTab::Devices,
+            shown_editing: None,
             sim_time: 0.0,
             beat: 0.0,
             last_frame: Instant::now(),
@@ -1339,6 +1352,11 @@ impl eframe::App for App {
         if let Some(id) = ui::shader_editor::take_request(&ctx) {
             self.editing = Some(id);
         }
+        // A newly opened shader (from a button, the grid or a script) shows the Code tab.
+        if self.editing.is_some() && self.editing != self.shown_editing {
+            self.device_tab = DeviceTab::Code;
+        }
+        self.shown_editing = self.editing;
         let tex = self.renderer.display_id;
         let out_size = self.renderer.size();
         let clock = self.clock();
@@ -1435,11 +1453,51 @@ impl eframe::App for App {
                                 ui.label(RichText::new(format!("›  {}", clip.name)).color(theme::MUTED));
                             }
                         }
+                        ui.add_space(16.0);
+                        let mods = {
+                            let mut n = 0;
+                            self.comp.visit_all(&mut |_, _, p| n += usize::from(p.modulator.is_some()));
+                            n
+                        };
+                        let tab = |ui: &mut egui::Ui, current: &mut DeviceTab, t: DeviceTab, label: String| {
+                            let on = *current == t;
+                            let text = RichText::new(label).font(theme::semibold(13.0)).color(if on { theme::TEXT_STRONG } else { theme::MUTED });
+                            if ui.add(egui::Button::new(text).fill(if on { theme::CONTROL_HI } else { egui::Color32::TRANSPARENT }).stroke(egui::Stroke::NONE)).clicked() {
+                                *current = t;
+                            }
+                        };
+                        tab(ui, &mut self.device_tab, DeviceTab::Devices, "Devices".into());
+                        tab(ui, &mut self.device_tab, DeviceTab::Modulators, if mods > 0 { format!("Modulators {mods}") } else { "Modulators".into() });
+                        let code = match self.editing.and_then(|id| self.comp.find_shader_mut(id)) {
+                            Some(s) => format!("Code · {}", s.name),
+                            None => "Code".into(),
+                        };
+                        tab(ui, &mut self.device_tab, DeviceTab::Code, code);
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let hint = if master { "Click a layer header to edit its chain" } else { "Click Master (under the layers) for the master chain" };
                             ui.label(RichText::new(hint).small().color(theme::FAINT));
                         });
                     });
+                    match self.device_tab {
+                        DeviceTab::Modulators => {
+                            if let Some(ui::widgets::Jump(owner)) = ui::widgets::modulators(ui, &mut self.comp, clock) {
+                                match owner {
+                                    Some(l) => {
+                                        self.grid.selected_layer = l;
+                                        self.tab = Tab::Layer;
+                                    }
+                                    None => self.tab = Tab::Composition,
+                                }
+                                self.device_tab = DeviceTab::Devices;
+                            }
+                            return;
+                        }
+                        DeviceTab::Code => {
+                            ui::shader_editor::docked(ui, &mut self.comp, &mut self.editing, clock);
+                            return;
+                        }
+                        DeviceTab::Devices => {}
+                    }
                     if master {
                         let (size, gpu, clips) = (self.renderer.size(), self.renderer.gpu_memory(), self.clip_memory());
                         let mut resize = None;
@@ -1480,9 +1538,6 @@ impl eframe::App for App {
                 });
         }
 
-        if !self.perform {
-            ui::shader_editor::show(&ctx, &mut self.comp, &mut self.editing, clock);
-        }
         // Script screenshots: ask egui for the window image, save it when it arrives.
         if self.pending_screenshot.is_some() && !self.screenshot_requested {
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));

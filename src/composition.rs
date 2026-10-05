@@ -481,23 +481,25 @@ impl Composition {
     }
 
     /// Every parameter with a readable path, for the automation overview.
-    pub fn visit_all(&mut self, f: &mut dyn FnMut(&str, &mut Param)) {
-        f("Master › master", &mut self.master);
-        f("Master › crossfader", &mut self.crossfader);
+    /// Every parameter with a readable path ("Fractal › Feedback › rotate") and the index of
+    /// the layer it belongs to (`None` for the master).
+    pub fn visit_all(&mut self, f: &mut dyn FnMut(Option<usize>, &str, &mut Param)) {
+        f(None, "Master › master", &mut self.master);
+        f(None, "Master › crossfader", &mut self.crossfader);
         for e in &mut self.effects {
             let name = e.name().to_string();
-            e.visit_params(&mut |label, p| f(&format!("Master › {name} › {label}"), p));
+            e.visit_params(&mut |label, p| f(None, &format!("Master › {name} › {label}"), p));
         }
-        for l in &mut self.layers {
+        for (li, l) in self.layers.iter_mut().enumerate() {
             let lname = l.name.clone();
-            l.visit_params(&mut |label, p| f(&format!("{lname} › {label}"), p));
+            l.visit_params(&mut |label, p| f(Some(li), &format!("{lname} › {label}"), p));
             for e in &mut l.effects {
                 let name = e.name().to_string();
-                e.visit_params(&mut |label, p| f(&format!("{lname} › {name} › {label}"), p));
+                e.visit_params(&mut |label, p| f(Some(li), &format!("{lname} › {name} › {label}"), p));
             }
             for c in l.clips.iter_mut().flatten() {
                 let cname = c.name.clone();
-                c.visit_params(&mut |label, p| f(&format!("{lname} › {cname} › {label}"), p));
+                c.visit_params(&mut |label, p| f(Some(li), &format!("{lname} › {cname} › {label}"), p));
             }
         }
     }

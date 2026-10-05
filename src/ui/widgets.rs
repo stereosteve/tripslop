@@ -487,29 +487,85 @@ pub fn source_label(m: &Modulator) -> String {
     }
 }
 
-/// Compact list of every automated parameter in the composition.
-pub fn overview(ui: &mut egui::Ui, comp: &mut crate::composition::Composition, clock: Clock) {
+/// What a click in the Modulators list asks for: show that layer's chain (`Some`) or the
+/// master's (`None`).
+pub struct Jump(pub Option<usize>);
+
+/// The Modulators tab: every automated parameter, with a live plot of its signal. Click a
+/// row's name to jump to its device.
+pub fn modulators(ui: &mut egui::Ui, comp: &mut crate::composition::Composition, clock: Clock) -> Option<Jump> {
+    use crate::ui::theme;
+    let colors: Vec<Color32> = comp.layers.iter().map(|l| theme::layer_color(l.color)).collect();
+    let mut jump = None;
     let mut any = false;
-    comp.visit_all(&mut |path, p| {
-        let Some(m) = p.modulator.as_mut() else { return };
-        any = true;
-        let mut remove = false;
-        ui.horizontal(|ui| {
-            ui.checkbox(&mut m.enabled, "");
-            // Tiny live meter.
-            let (r, _) = ui.allocate_exact_size(vec2(8.0, 14.0), Sense::hover());
-            let v = if m.enabled { m.signal(clock) } else { 0.0 };
-            ui.painter().rect_filled(r, 1.0, ui.visuals().extreme_bg_color);
-            ui.painter().rect_filled(Rect::from_min_max(pos2(r.left(), r.bottom() - v * r.height()), r.max), 1.0, ACCENT);
-            ui.label(path);
-            ui.label(RichText::new(format!("{} · {} · {:.0}%", m.shape.name(), source_label(m), m.depth * 100.0)).weak().small());
-            remove = ui.small_button("×").on_hover_text("Remove").clicked();
+    egui::ScrollArea::vertical().id_salt("modulators").auto_shrink([false, false]).show(ui, |ui| {
+        egui::Grid::new("modulators grid").num_columns(7).spacing(vec2(14.0, 4.0)).min_row_height(32.0).show(ui, |ui| {
+            for h in ["", "SIGNAL", "TARGET", "SHAPE", "RATE", "DEPTH", ""] {
+                ui.label(RichText::new(h).font(theme::semibold(10.5)).color(theme::FAINT));
+            }
+            ui.end_row();
+            comp.visit_all(&mut |owner, path, p| {
+                let Some(m) = p.modulator.as_mut() else { return };
+                any = true;
+                ui.checkbox(&mut m.enabled, "").on_hover_text("On / off");
+                mini_plot(ui, m, clock, vec2(120.0, 28.0));
+                ui.horizontal(|ui| {
+                    ui.set_min_width(260.0);
+                    let c = owner.and_then(|i| colors.get(i).copied()).unwrap_or(theme::LIVE);
+                    let (r, _) = ui.allocate_exact_size(vec2(8.0, 8.0), Sense::hover());
+                    ui.painter().rect_filled(r, 2.0, c);
+                    let text = RichText::new(path).color(if m.enabled { theme::TEXT } else { theme::FAINT });
+                    if ui.add(egui::Label::new(text).sense(Sense::click())).on_hover_text("Show this device").clicked() {
+                        jump = Some(Jump(owner));
+                    }
+                });
+                ui.label(RichText::new(m.shape.name()).color(theme::MUTED));
+                ui.label(RichText::new(source_label(m)).color(theme::MUTED));
+                let mut pct = m.depth * 100.0;
+                if ui.add(egui::DragValue::new(&mut pct).range(0.0..=100.0).suffix("%").max_decimals(0)).changed() {
+                    m.depth = pct / 100.0;
+                }
+                if ui.small_button("×").on_hover_text("Remove automation").clicked() {
+                    p.modulator = None;
+                }
+                ui.end_row();
+            });
         });
-        if remove {
-            p.modulator = None;
+        if !any {
+            ui.add_space(12.0);
+            ui.label(RichText::new("Nothing automated yet. Right-click any knob → Automate…").color(theme::MUTED));
         }
     });
-    if !any {
-        ui.label(RichText::new("Nothing automated yet. Click ~ next to any parameter.").weak());
+    if any {
+        ui.ctx().request_repaint();
     }
+    jump
+}
+
+/// A small live plot: one cycle of the signal and a playhead, or the level for Audio.
+fn mini_plot(ui: &mut egui::Ui, m: &Modulator, clock: Clock, size: egui::Vec2) {
+    use crate::ui::theme;
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 3.0, theme::GROUND);
+    let color = if m.enabled { if m.shape == Shape::Audio { theme::AUDIO } else { ACCENT } } else { theme::FAINT };
+    let inner = rect.shrink2(vec2(2.0, 3.0));
+    if m.shape == Shape::Audio {
+        let v = if m.enabled { m.signal(clock) } else { 0.0 };
+        painter.rect_filled(Rect::from_min_size(inner.min, vec2(inner.width() * v, inner.height())), 2.0, color);
+        return;
+    }
+    let pos = m.position(clock);
+    let cycles = if m.shape.is_random() { 4.0 } else { 1.0 };
+    let start = pos.floor();
+    let to_y = |v: f32| inner.bottom() - v * inner.height();
+    let line: Vec<Pos2> = (0..=60)
+        .map(|i| {
+            let t = i as f32 / 60.0;
+            pos2(inner.left() + t * inner.width(), to_y(m.signal_at(start + t as f64 * cycles)))
+        })
+        .collect();
+    painter.add(egui::Shape::line(line, Stroke::new(1.5, color)));
+    let t = ((pos - start) / cycles) as f32;
+    painter.circle_filled(pos2(inner.left() + t * inner.width(), to_y(m.signal_at(pos))), 3.0, color);
 }

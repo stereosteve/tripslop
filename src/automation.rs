@@ -9,7 +9,7 @@ use crate::effects::{EFFECTS, Effect, EffectKind, apply_feedback_preset};
 use crate::param::{Param, Params};
 use crate::script::{Cmd, Event, Query, When};
 use crate::renderer::{MEDIA_HEIGHT, MEDIA_WIDTH};
-use crate::{App, Tab};
+use crate::{App, DeviceTab, Tab};
 
 /// Set when a script command fails or an assert doesn't hold; `main` exits with status 1.
 pub static FAILED: AtomicBool = AtomicBool::new(false);
@@ -259,10 +259,13 @@ impl App {
                 }
             }
             Cmd::Tab(t) => {
-                self.tab = match t.as_str() {
-                    "layer" => Tab::Layer,
-                    "composition" => Tab::Composition,
-                    _ => return Err(format!("tab {t:?}: use layer / composition")),
+                match t.as_str() {
+                    "layer" => self.tab = Tab::Layer,
+                    "composition" | "master" => self.tab = Tab::Composition,
+                    "devices" => self.device_tab = DeviceTab::Devices,
+                    "modulators" => self.device_tab = DeviceTab::Modulators,
+                    "code" => self.device_tab = DeviceTab::Code,
+                    _ => return Err(format!("tab {t:?}: use layer / master / devices / modulators / code")),
                 }
             }
             Cmd::Snapshot(p) => {

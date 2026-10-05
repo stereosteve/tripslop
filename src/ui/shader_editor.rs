@@ -5,7 +5,7 @@ use eframe::egui::{self, Color32, RichText, text::LayoutJob};
 use crate::composition::Composition;
 use crate::modulation::Clock;
 use crate::shader::{CustomShader, Role, TEMPLATES};
-use crate::ui::widgets;
+use crate::ui::{theme, widgets};
 
 const OPEN_REQUEST: &str = "tripslop-open-shader";
 
@@ -32,41 +32,38 @@ pub fn status(ui: &mut egui::Ui, s: &CustomShader) {
     }
 }
 
-/// The shader's sliders (from `uniform float x; // min max default`) and its alpha mode.
+/// The shader's controls (from `uniform float x; // min max default`) and its alpha mode.
 pub fn params(ui: &mut egui::Ui, s: &mut CustomShader, clock: Clock) {
     if s.params.is_empty() {
-        ui.label(RichText::new("No sliders. Add one with: uniform float amount; // 0 1 0.5").small().weak());
+        ui.label(RichText::new("No controls. Add one with: uniform float amount; // 0 1 0.5").small().weak());
     }
     widgets::param_grid(ui, s.params.iter_mut().chain([&mut s.alpha]), clock);
 }
 
-pub fn show(ctx: &egui::Context, comp: &mut Composition, open: &mut Option<u64>, clock: Clock) {
-    let Some(id) = *open else { return };
-    let Some(s) = comp.find_shader_mut(id) else {
+/// The Code tab of the device panel: the editor for the shader in `open`.
+pub fn docked(ui: &mut egui::Ui, comp: &mut Composition, open: &mut Option<u64>, clock: Clock) {
+    let Some(s) = open.and_then(|id| comp.find_shader_mut(id)) else {
         *open = None;
+        ui.add_space(12.0);
+        ui.label(RichText::new("No shader open. Click { } Edit code on a shader clip or effect, or add one: right-click a cell → Shader, or + on a chain → Custom shader.").color(theme::MUTED));
         return;
     };
-    let mut keep = true;
-    egui::Window::new(format!("Shader · {}", s.name))
-        .id(egui::Id::new("shader editor"))
-        .open(&mut keep)
-        .default_size([780.0, 720.0])
-        .resizable(true)
-        .show(ctx, |ui| editor(ui, s, clock));
-    if !keep {
+    if !editor(ui, s, clock) {
         *open = None;
     }
 }
 
-fn editor(ui: &mut egui::Ui, s: &mut CustomShader, clock: Clock) {
+/// Returns false when the user closed the editor.
+fn editor(ui: &mut egui::Ui, s: &mut CustomShader, clock: Clock) -> bool {
     if ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter)) {
         s.compile_requested = true;
     }
+    let mut keep = true;
 
-    ui.horizontal_wrapped(|ui| {
-        ui.add(egui::TextEdit::singleline(&mut s.name).desired_width(140.0));
+    ui.horizontal(|ui| {
+        ui.add(egui::TextEdit::singleline(&mut s.name).desired_width(160.0).font(theme::semibold(13.5)));
         ui.checkbox(&mut s.live, "Live").on_hover_text("Recompile automatically as you type");
-        if ui.button("Compile (Cmd/Ctrl+Enter)").clicked() {
+        if ui.button("Compile").on_hover_text("Cmd/Ctrl+Enter").clicked() {
             s.compile_requested = true;
         }
         ui.menu_button("Templates", |ui| {
@@ -103,27 +100,41 @@ fn editor(ui: &mut egui::Ui, s: &mut CustomShader, clock: Clock) {
             s.errors = vec![crate::shader::CompileError { line: None, message: e.to_string() }];
         }
         status(ui, s);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.button("×").on_hover_text("Close the editor").clicked() {
+                keep = false;
+            }
+            ui.label(RichText::new("Alt-drag on the monitor = iMouse").small().color(theme::FAINT));
+        });
     });
-    ui.separator();
 
-    // Bottom area first (errors, sliders, help) so the code gets the remaining height.
-    egui::Panel::bottom(egui::Id::new(("shader bottom", s.id)))
+    // Controls and help on the right, errors under the code, code in the middle.
+    egui::Panel::right(egui::Id::new(("shader side", s.id)))
         .resizable(true)
-        .default_size(230.0)
+        .default_size(300.0)
+        .frame(egui::Frame::new().inner_margin(egui::Margin { left: 10, ..Default::default() }))
         .show(ui, |ui| {
-            egui::ScrollArea::vertical().id_salt("shader bottom scroll").show(ui, |ui| {
-                for e in &s.errors {
-                    let loc = e.line.map(|l| format!("line {l}: ")).unwrap_or_default();
-                    ui.colored_label(Color32::from_rgb(255, 110, 110), format!("{loc}{}", e.message));
-                }
-                egui::CollapsingHeader::new(RichText::new("Sliders").strong())
-                    .default_open(true)
-                    .show(ui, |ui| params(ui, s, clock));
+            egui::ScrollArea::vertical().id_salt("shader side scroll").show(ui, |ui| {
+                params(ui, s, clock);
                 egui::CollapsingHeader::new(RichText::new("Help").strong()).show(ui, help);
             });
         });
-
-    code_area(ui, s);
+    if !s.errors.is_empty() {
+        egui::Panel::bottom(egui::Id::new(("shader errors", s.id)))
+            .resizable(true)
+            .default_size(64.0)
+            .frame(egui::Frame::new().fill(egui::Color32::from_rgb(0x2A, 0x12, 0x18)).inner_margin(6))
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical().id_salt("shader errors scroll").show(ui, |ui| {
+                    for e in &s.errors {
+                        let loc = e.line.map(|l| format!("line {l}: ")).unwrap_or_default();
+                        ui.label(RichText::new(format!("{loc}{}", e.message)).font(theme::mono(11.5)).color(theme::RECORD));
+                    }
+                });
+            });
+    }
+    egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::GROUND).corner_radius(4)).show(ui, |ui| code_area(ui, s));
+    keep
 }
 
 fn code_area(ui: &mut egui::Ui, s: &mut CustomShader) {
@@ -192,10 +203,10 @@ fn help(ui: &mut egui::Ui) {
     ui.label(RichText::new("Sliders").strong());
     ui.label(mono("uniform float amount; // min max default"));
     ui.label(mono("uniform int count;    // 1 8 3"));
-    ui.label("Each becomes a slider with automation (the ~ button).");
+    ui.label("Each becomes a knob; right-click it to automate.");
     ui.add_space(4.0);
     ui.label(RichText::new("ISF (VDMX .fs)").strong());
-    ui.label("Detected by the /*{ JSON }*/ header. INPUTS become controls: float → slider, bool/event → toggle, long → dropdown, point2D → x/y sliders, color → r/g/b/a sliders.");
+    ui.label("Detected by the /*{ JSON }*/ header. INPUTS become controls: float → knob, bool/event → toggle, long → dropdown, point2D → x/y knobs, color → r/g/b/a knobs.");
     ui.label(mono("TIME TIMEDELTA RENDERSIZE FRAMEINDEX DATE isf_FragNormCoord gl_FragColor"));
     ui.label(mono("IMG_NORM_PIXEL(img, uv) IMG_PIXEL(img, px) IMG_THIS_PIXEL(img) IMG_SIZE(img)"));
     ui.label("The first image input (e.g. inputImage) is the layer input; other images are the composition. A single PERSISTENT pass target is the shader's previous frame. Multi-pass isn't supported yet.");

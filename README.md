@@ -341,7 +341,7 @@ Layers and columns are **1-based**, like the UI.
 | `crossfade bank/layer [linear/smooth/cut]` · `side L a/b/off` | crossfader mode and curve; a layer's side |
 | `size WxH` (or `720p`, `1080p`) · `history LAYER/EFFECT full/half` | output size; an effect's history size |
 | `pad KEY down/up/latch/unlatch` · `hold KEY DURATION` | punch-in pads, by key, name or number |
-| `select L C` · `tab layer/composition` · `open-editor L C` | UI state, for screenshots |
+| `select L C` · `tab layer/master` · `tab devices/modulators/code` · `open-editor L C` | UI state, for screenshots |
 | `snapshot PATH` · `screenshot PATH` · `record start/stop` | output frame, full window, video |
 | `audio FILE.wav` · `audio off` | analyse a WAV file in step with the clock (deterministic) |
 | `automate PATH SHAPE [DEPTH] [BEATS]` · `automate PATH off` | attach automation: `sine`, `square`, `drift`, … or `audio:BAND` (e.g. `audio:kick`) |
