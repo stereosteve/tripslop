@@ -569,11 +569,6 @@
    "category": "Space"
   },
   {
-   "file": "gpt-cosmic-wave.fs",
-   "name": "GPT Cosmic Wave",
-   "category": "Space"
-  },
-  {
    "file": "InnerDimensionalMatrix.fs",
    "name": "Inner Dimensional Matrix",
    "category": "Space"
@@ -2331,11 +2326,6 @@
     "saturation": 1,
     "lightAngle": 3.768
    }
-  },
-  {
-   "file": "00-vangogh.fs",
-   "name": "Vangogh",
-   "category": "Patterns"
   },
   {
    "file": "92_WovenFabric.fs",

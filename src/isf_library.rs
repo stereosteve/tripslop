@@ -6,8 +6,11 @@
 //! bundled shader its display name, category and tuned starting values. Shaders it doesn't list
 //! (and everything in added folders) are classified from their ISF header instead.
 //!
-//! Every shader is test-compiled on a background thread, so the browser can hide the ones
-//! tripslop can't run yet (multi-pass, ...).
+//! Bundled shaders come pre-checked: `tripslop --bake-library` compiles each one on the GPU and
+//! renders its card picture, and those results (`assets/isf/baked.json`, `assets/isf/thumbs`)
+//! are baked into the binary too. Anything without a current bake (a folder shader, or a
+//! bundled one edited since) is test-compiled on a background thread instead, so the browser
+//! can hide the ones tripslop can't run yet (multi-pass, ...).
 
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
@@ -60,6 +63,8 @@ pub struct Entry {
     /// Starting values for parameters, by name.
     pub defaults: Vec<(String, f32)>,
     pub status: Status,
+    /// Pre-rendered card picture (JPEG), for bundled shaders with a current bake.
+    pub thumb: Option<&'static [u8]>,
 }
 
 impl Entry {
@@ -155,7 +160,9 @@ impl Library {
         self.sort();
         let (tx, rx) = channel();
         let dirs = self.dirs.clone();
-        let bundled: Vec<(String, Source, Kind)> = self.entries.iter().map(|e| (e.key.clone(), e.source.clone(), e.kind)).collect();
+        // Baked entries already know their status.
+        let bundled: Vec<(String, Source, Kind)> =
+            self.entries.iter().filter(|e| e.status == Status::Checking).map(|e| (e.key.clone(), e.source.clone(), e.kind)).collect();
         std::thread::spawn(move || scan_thread(dirs, bundled, tx));
         self.rx = Some(rx);
         self.scanning = true;
@@ -201,8 +208,20 @@ impl Library {
     }
 }
 
-/// The bundle, indexed by `library.json`, and the index's category order.
+/// FNV-1a: a hash of a shader's source that's the same on every build (std's isn't).
+pub fn source_hash(code: &str) -> String {
+    let h = code.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3));
+    format!("{h:016x}")
+}
+
+fn thumb_path(path: &str) -> String {
+    format!("{}.jpg", path.trim_end_matches(".fs"))
+}
+
+/// The bundle, indexed by `library.json`, and the index's category order. Shaders whose bake is
+/// current get its status and picture.
 fn bundle_entries() -> (Vec<Entry>, Vec<String>) {
+    let baked: serde_json::Value = serde_json::from_str(bundle::BAKED).unwrap_or_default();
     let index: serde_json::Value = serde_json::from_str(INDEX).expect("assets/isf/library.json is valid JSON");
     let order: Vec<String> = index["categories"].as_array().into_iter().flatten().filter_map(|c| c.as_str().map(String::from)).collect();
     let listed: Vec<&serde_json::Value> = index["shaders"].as_array().into_iter().flatten().collect();
@@ -212,6 +231,15 @@ fn bundle_entries() -> (Vec<Entry>, Vec<String>) {
             continue;
         }
         let Some(mut e) = read_entry(code, Source::Bundled(path), file_stem(path), None) else { continue };
+        let bake = &baked["shaders"][*path];
+        if bake["hash"].as_str() == Some(&source_hash(code)) {
+            e.status = match bake["status"].as_str() {
+                Some("ok") => Status::Ok,
+                _ => Status::Unsupported(bake["reason"].as_str().unwrap_or("doesn't compile").to_string()),
+            };
+            let tp = thumb_path(path);
+            e.thumb = bundle::THUMBS.iter().find(|(p, _)| *p == tp).map(|(_, jpg)| *jpg);
+        }
         if let Some(meta) = listed.iter().find(|m| m["file"] == *path) {
             if let Some(n) = meta["name"].as_str() {
                 e.name = n.to_string();
@@ -317,7 +345,58 @@ fn read_entry(code: &str, source: Source, name: String, folder: Option<String>) 
         credit: text("CREDIT"),
         defaults: Vec::new(),
         status: Status::Checking,
+        thumb: None,
     })
+}
+
+/// Re-check every bundled shader and write the results for the next build: `baked.json` and a
+/// card picture per working shader in `thumbs/`. `render` draws a card on the GPU, or says why
+/// the GPU rejects the shader. Returns a summary.
+pub fn bake(mut render: impl FnMut(&Entry) -> Result<image::RgbaImage, String>) -> Result<String, String> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/isf");
+    let thumbs = root.join("thumbs");
+    let _ = std::fs::remove_dir_all(&thumbs);
+    let (entries, _) = bundle_entries();
+    let mut shaders = serde_json::Map::new();
+    let (mut ok, mut bad) = (0, 0);
+    for e in &entries {
+        let Source::Bundled(path) = e.source else { continue };
+        let code = bundled(path).unwrap_or_default();
+        let status = match check(&e.source, e.kind) {
+            Status::Ok => render(e).and_then(|img| {
+                let out = thumbs.join(thumb_path(path));
+                std::fs::create_dir_all(out.parent().unwrap()).map_err(|err| err.to_string())?;
+                let rgb = image::DynamicImage::ImageRgba8(img).to_rgb8();
+                let file = std::fs::File::create(&out).map_err(|err| format!("{}: {err}", out.display()))?;
+                image::codecs::jpeg::JpegEncoder::new_with_quality(std::io::BufWriter::new(file), 85)
+                    .encode_image(&rgb)
+                    .map_err(|err| format!("writing {} failed: {err}", out.display()))
+            }),
+            Status::Unsupported(why) => Err(why),
+            Status::Checking => unreachable!(),
+        };
+        let mut rec = serde_json::Map::new();
+        rec.insert("hash".into(), source_hash(code).into());
+        match status {
+            Ok(()) => {
+                ok += 1;
+                rec.insert("status".into(), "ok".into());
+            }
+            Err(why) => {
+                bad += 1;
+                rec.insert("status".into(), "unsupported".into());
+                rec.insert("reason".into(), why.into());
+            }
+        }
+        shaders.insert(path.to_string(), rec.into());
+    }
+    let doc = serde_json::json!({
+        "//": "Generated by `cargo run --release -- --bake-library`; don't edit. Compile results for the bundled shaders (by source hash).",
+        "shaders": shaders,
+    });
+    let json = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())? + "\n";
+    std::fs::write(root.join("baked.json"), json).map_err(|e| e.to_string())?;
+    Ok(format!("baked {} shaders into {}: {ok} work, {bad} unsupported", ok + bad, root.display()))
 }
 
 /// The JSON object in the leading `/*{ ... }*/` comment.
@@ -422,6 +501,20 @@ mod tests {
         keys.sort();
         keys.dedup();
         assert_eq!(keys.len(), entries.len(), "duplicate keys");
+    }
+
+    #[test]
+    fn bake_is_current() {
+        let baked: serde_json::Value = serde_json::from_str(bundle::BAKED).unwrap_or_default();
+        let fix = "re-bake with `cargo run --release -- --bake-library`";
+        for (path, code) in bundle::FILES.iter().filter(|(p, _)| p.ends_with(".fs")) {
+            let bake = &baked["shaders"][*path];
+            assert_eq!(bake["hash"].as_str(), Some(source_hash(code).as_str()), "{path} changed since the last bake: {fix}");
+            if bake["status"] == "ok" {
+                assert!(bundle::THUMBS.iter().any(|(p, _)| *p == thumb_path(path)), "{path} has no card picture: {fix}");
+            }
+        }
+        assert!(bundle_entries().0.iter().all(|e| e.status != Status::Checking));
     }
 
     #[test]

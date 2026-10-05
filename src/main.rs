@@ -33,7 +33,8 @@ use ui::grid::{GridAction, GridView};
 const TICK: f64 = 1.0 / 60.0;
 
 const USAGE: &str =
-    "usage: tripslop [--demo] [--record] [--script FILE] [--isf DIR]... [--size WxH|720p|1080p] [--fixed-step | --realtime] [MEDIA...]";
+    "usage: tripslop [--demo] [--record] [--script FILE] [--isf DIR]... [--size WxH|720p|1080p] [--fixed-step | --realtime] [MEDIA...]
+       tripslop --bake-library   (re-check the bundled shaders and render their library pictures)";
 
 /// Window / dock icon: the color flower, rasterized centered on a square transparent canvas.
 fn app_icon() -> egui::IconData {
@@ -62,6 +63,7 @@ fn main() -> eframe::Result {
     let mut fixed_step: Option<bool> = None;
     let mut isf_dirs: Vec<PathBuf> = Vec::new();
     let mut size = None;
+    let mut bake = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -80,6 +82,7 @@ fn main() -> eframe::Result {
                 Some(Err(e)) => exit_with(&e, 2),
                 None => exit_with(USAGE, 2),
             },
+            "--bake-library" => bake = true,
             "--fixed-step" => fixed_step = Some(true),
             "--realtime" => fixed_step = Some(false),
             "-h" | "--help" => exit_with(USAGE, 0),
@@ -119,6 +122,14 @@ fn main() -> eframe::Result {
             let rs = cc.wgpu_render_state.as_ref().ok_or("tripslop needs the wgpu renderer")?;
             cc.egui_ctx.set_theme(egui::ThemePreference::Dark);
             egui_extras::install_image_loaders(&cc.egui_ctx);
+            if bake {
+                // A build-time chore that needs the GPU: write assets/isf/baked.json and thumbs/, then quit.
+                let mut renderer = Renderer::new(rs);
+                match isf_library::bake(|e| renderer.bake_library_card(e)) {
+                    Ok(summary) => exit_with(&summary, 0),
+                    Err(e) => exit_with(&format!("bake failed: {e}"), 1),
+                }
+            }
             let mut app = App::new(Renderer::new(rs), isf_dirs);
             app.fixed_step = fixed_step;
             if let Some(s) = size {

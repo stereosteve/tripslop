@@ -62,8 +62,8 @@ struct LibThumb {
     tex: Tex,
     id: egui::TextureId,
     shader: CustomShader,
-    /// Pipeline and whether it works in screen space; `None` if the GPU rejected it.
-    gpu: Option<(Pipe, bool)>,
+    /// Pipeline and whether it works in screen space, or why it can't run.
+    gpu: Result<(Pipe, bool), String>,
     rendered: bool,
     /// `library_previews` call that last asked for it.
     last_seen: u64,
@@ -1089,15 +1089,8 @@ impl Renderer {
                         continue;
                     }
                     let Some(entry) = lib.find(key).filter(|e| e.status == Status::Ok) else { continue };
-                    let Ok(mut shader) = entry.shader() else { continue };
-                    let gpu = shader.poll_compile().and_then(|c| self.build_custom(&c.wgsl, &c.entry).ok().map(|p| (p, c.screen_space)));
-                    let tex = tex2d(&self.device, "library card", LIB_W, LIB_H, RENDER);
-                    let id = self.egui_renderer.write().register_native_texture(&self.device, &tex.view, wgpu::FilterMode::Linear);
-                    let effect = entry.kind == Kind::Effect;
-                    if effect && self.lib_input.is_none() {
-                        self.lib_input = Some(self.library_input());
-                    }
-                    self.lib_thumbs.insert(key.to_string(), LibThumb { tex, id, shader, gpu, rendered: false, last_seen: self.lib_calls });
+                    let Ok(card) = self.library_card(entry) else { continue };
+                    self.lib_thumbs.insert(key.to_string(), card);
                 }
             }
             let t = if animate { PREVIEW_TIME + hovered.map_or(0.0, |(_, t)| t) } else { PREVIEW_TIME };
@@ -1120,6 +1113,42 @@ impl Renderer {
         }
     }
 
+    /// GPU state for a library card; `Err` if the shader can't be read.
+    fn library_card(&mut self, entry: &crate::isf_library::Entry) -> Result<LibThumb, String> {
+        let mut shader = entry.shader()?;
+        let gpu = match shader.poll_compile() {
+            Some(c) => self.build_custom(&c.wgsl, &c.entry).map(|p| (p, c.screen_space)),
+            None => Err(shader.errors.first().map(|e| e.message.clone()).unwrap_or_else(|| "doesn't compile".into())),
+        };
+        let tex = tex2d(&self.device, "library card", LIB_W, LIB_H, RENDER);
+        let id = self.egui_renderer.write().register_native_texture(&self.device, &tex.view, wgpu::FilterMode::Linear);
+        if entry.kind == Kind::Effect && self.lib_input.is_none() {
+            self.lib_input = Some(self.library_input());
+        }
+        Ok(LibThumb { tex, id, shader, gpu, rendered: false, last_seen: self.lib_calls })
+    }
+
+    /// Render a library shader's card picture once and read it back, for `--bake-library`.
+    /// `Err` says why the shader can't run.
+    pub fn bake_library_card(&mut self, entry: &crate::isf_library::Entry) -> Result<image::RgbaImage, String> {
+        let card = self.library_card(entry)?;
+        if let Err(e) = &card.gpu {
+            let e = e.clone();
+            self.egui_renderer.write().free_texture(&card.id);
+            return Err(e);
+        }
+        self.next_uniform = 0;
+        let key = format!("bake:{}", entry.key);
+        self.lib_thumbs.insert(key.clone(), card);
+        let mut enc = self.device.create_command_encoder(&Default::default());
+        self.draw_library_card(&mut enc, &key, PREVIEW_TIME, entry.kind == Kind::Effect);
+        self.queue.submit([enc.finish()]);
+        let card = self.lib_thumbs.remove(&key).unwrap();
+        let img = self.read_back(&card.tex.tex, (LIB_W, LIB_H));
+        self.egui_renderer.write().free_texture(&card.id);
+        img
+    }
+
     /// A rendered library card picture.
     pub fn library_thumb(&self, key: &str) -> Option<egui::TextureId> {
         self.lib_thumbs.get(key).filter(|t| t.rendered).map(|t| t.id)
@@ -1128,7 +1157,7 @@ impl Renderer {
     fn draw_library_card(&mut self, enc: &mut wgpu::CommandEncoder, key: &str, time: f64, effect: bool) {
         let clock = Clock { beat: time * 2.0, time, bpm: 120.0 };
         let Some(t) = self.lib_thumbs.get(key) else { return };
-        let Some((_, screen_space)) = &t.gpu else { return };
+        let Ok((_, screen_space)) = &t.gpu else { return };
         let screen_space = *screen_space;
         let frame = ((time - PREVIEW_TIME) * 60.0) as i32;
         let data = shader_uniforms(&t.shader, (LIB_W, LIB_H), (LIB_W, LIB_H), frame, clock);
@@ -1136,7 +1165,7 @@ impl Renderer {
         let ub = self.uniform(&data);
         let flip_ub = self.uniform(&[[alpha, if screen_space { 0.0 } else { 1.0 }, 0.0, 0.0]]);
         let t = &self.lib_thumbs[key];
-        let (pipe, _) = t.gpu.as_ref().unwrap();
+        let Ok((pipe, _)) = &t.gpu else { return };
         let d = &self.dummy_tex.view;
         let input = match (&self.lib_input, effect) {
             (Some(inp), true) => &inp[if screen_space { 0 } else { 1 }].view,
@@ -1234,7 +1263,11 @@ impl Renderer {
 
     /// Read back the current output frame (blocking).
     pub fn snapshot(&self) -> Result<image::RgbaImage, String> {
-        let (w, h) = self.size;
+        self.read_back(&self.output.tex, self.size)
+    }
+
+    /// Read back a texture (blocking).
+    fn read_back(&self, tex: &wgpu::Texture, (w, h): (u32, u32)) -> Result<image::RgbaImage, String> {
         let row = padded_row(w);
         let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("snapshot"),
@@ -1244,7 +1277,7 @@ impl Renderer {
         });
         let mut enc = self.device.create_command_encoder(&Default::default());
         enc.copy_texture_to_buffer(
-            self.output.tex.as_image_copy(),
+            tex.as_image_copy(),
             wgpu::TexelCopyBufferInfo {
                 buffer: &buf,
                 layout: wgpu::TexelCopyBufferLayout {

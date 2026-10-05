@@ -165,11 +165,14 @@ tags.
 * Shaders start with tuned settings where the library has them.
 * *Add folder…* (or `--isf DIR`, repeatable) also lists your own `.fs` files, filed by their
   `CATEGORIES`. Nothing outside the bundle is read unless you add it.
-* Every shader is test-compiled in the background. Ones tripslop can't run yet (multi-pass) are
-  hidden; *show unsupported* lists them struck through, with the reason on hover. Transitions
-  aren't supported yet.
-* To add a shader to the bundle, drop it in `assets/isf` and give it a name and category in
-  `assets/isf/library.json`.
+* Ones tripslop can't run yet (multi-pass) are hidden; *show unsupported* lists them struck
+  through, with the reason on hover. Transitions aren't supported yet.
+* The bundled shaders' pictures and compile results are made ahead of time by
+  `cargo run --release -- --bake-library` and built into the binary, so the library costs
+  nothing at startup. Only folder shaders (and bundled ones edited since the last bake) are
+  compiled in the background and drawn live.
+* To add a shader to the bundle, drop it in `assets/isf`, give it a name and category in
+  `assets/isf/library.json`, and re-bake. `cargo test` checks that the bake is current.
 * `cargo test --release isf_report -- --ignored --nocapture` prints a compatibility report for
   the bundle (plus a folder in `TRIPSLOP_ISF`, if set).
 

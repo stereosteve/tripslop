@@ -2,6 +2,7 @@
 //! Hover a card to see it move; drag it onto a grid cell (generators) or a layer (effects), or
 //! double-click it.
 
+use std::collections::HashMap;
 use std::time::Instant;
 
 use eframe::egui::{self, Color32, CornerRadius, Rect, RichText, Sense, Stroke, StrokeKind, TextStyle, TextWrapMode};
@@ -18,6 +19,9 @@ pub enum LibraryAction {
     Rescan,
 }
 
+/// Baked card pictures kept as textures; the longest unseen go first.
+const KEEP_BAKED: usize = 200;
+
 /// Narrowest a card gets before the grid drops a column.
 const MIN_CARD: f32 = 116.0;
 const GAP: f32 = 6.0;
@@ -28,8 +32,12 @@ pub struct LibraryView {
     /// `None` = all categories.
     pub category: Option<String>,
     pub show_unsupported: bool,
-    /// Cards on screen in the last frame (keys), for the renderer to draw.
+    /// Cards on screen in the last frame that need the renderer to draw their picture (no
+    /// baked one).
     pub visible: Vec<String>,
+    /// Decoded baked pictures, and the frame each was last on screen.
+    baked: HashMap<String, (egui::TextureHandle, u64)>,
+    frame: u64,
     /// The card under the pointer and since when.
     pub hovered: Option<(String, Instant)>,
 }
@@ -43,6 +51,8 @@ impl Default for LibraryView {
             show_unsupported: false,
             visible: Vec::new(),
             hovered: None,
+            baked: HashMap::new(),
+            frame: 0,
         }
     }
 }
@@ -56,6 +66,7 @@ impl LibraryView {
     pub fn show(&mut self, ui: &mut egui::Ui, lib: &Library, thumb: &dyn Fn(&str) -> Option<egui::TextureId>) -> Vec<LibraryAction> {
         let mut actions = Vec::new();
         self.visible.clear();
+        self.frame += 1;
         let mut hovered_now = None;
 
         ui.horizontal(|ui| {
@@ -166,6 +177,13 @@ impl LibraryView {
         };
         ui.label(RichText::new(hint).small().weak());
 
+        if self.baked.len() > KEEP_BAKED {
+            let mut ages: Vec<(u64, String)> = self.baked.iter().map(|(k, (_, seen))| (*seen, k.clone())).collect();
+            ages.sort();
+            for (_, k) in ages.into_iter().take(self.baked.len() - KEEP_BAKED) {
+                self.baked.remove(&k);
+            }
+        }
         match (hovered_now, &self.hovered) {
             (Some(k), Some((h, _))) if *h == k => {}
             (Some(k), _) => self.hovered = Some((k, Instant::now())),
@@ -226,12 +244,16 @@ impl LibraryView {
         if !ui.is_rect_visible(rect) {
             return;
         }
-        self.visible.push(e.key.clone());
+        if e.thumb.is_none() {
+            self.visible.push(e.key.clone());
+        }
         let pic = Rect::from_min_size(rect.min, egui::vec2(size.x, pic_h));
         let painter = ui.painter_at(rect);
         let radius = CornerRadius::same(4);
         painter.rect_filled(pic, radius, Color32::from_gray(24));
-        match thumb(&e.key) {
+        // The live picture while hovered (once the renderer has one), else the baked one.
+        let live = (resp.hovered() || e.thumb.is_none()).then(|| thumb(&e.key)).flatten();
+        match live.or_else(|| self.baked_texture(ui.ctx(), e)) {
             Some(id) => {
                 let tint = if ok { Color32::WHITE } else { Color32::from_gray(90) };
                 egui::Image::new((id, pic.size())).corner_radius(radius).tint(tint).paint_at(ui, pic);
@@ -281,6 +303,23 @@ impl LibraryView {
             actions.push(LibraryAction::Use(drag.clone()));
         }
         resp.dnd_set_drag_payload(drag);
+    }
+}
+
+impl LibraryView {
+    /// The entry's baked picture as a texture (decoded the first time it's on screen).
+    fn baked_texture(&mut self, ctx: &egui::Context, e: &Entry) -> Option<egui::TextureId> {
+        let jpg = e.thumb?;
+        if let Some((tex, seen)) = self.baked.get_mut(&e.key) {
+            *seen = self.frame;
+            return Some(tex.id());
+        }
+        let img = image::load_from_memory(jpg).ok()?.to_rgba8();
+        let color = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
+        let tex = ctx.load_texture(format!("library {}", e.key), color, egui::TextureOptions::LINEAR);
+        let id = tex.id();
+        self.baked.insert(e.key.clone(), (tex, self.frame));
+        Some(id)
     }
 }
 

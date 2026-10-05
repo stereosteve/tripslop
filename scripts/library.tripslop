@@ -10,12 +10,11 @@ library generators
 
 at 60  assert errors 1 1 == 0
 at 60  assert errors 2 1 == 0
-# Fixed-step runs many ticks per drawn frame, and the cards' pictures are drawn a few per
-# frame: leave plenty of ticks between views.
-at 3000 snapshot target/script-out/library/output.png
-at 3000 screenshot target/script-out/library/generators.png
-at 3100 library effects
-at 6000 screenshot target/script-out/library/effects.png
-at 6100 library generators three-body orbits
-at 9000 screenshot target/script-out/library/three-body.png
-at 9000 quit
+at 60 snapshot target/script-out/library/output.png
+at 60 screenshot target/script-out/library/generators.png
+# A screenshot arrives a frame or two after it's asked for: change views a few ticks later.
+at 65 library effects
+at 70 screenshot target/script-out/library/effects.png
+at 75 library generators three-body orbits
+at 80 screenshot target/script-out/library/three-body.png
+at 80 quit
