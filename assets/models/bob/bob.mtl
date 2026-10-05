@@ -1,0 +1,3 @@
+newmtl bob
+Kd 1 1 1
+map_Kd bob_diffuse.png

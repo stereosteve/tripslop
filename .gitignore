@@ -6,3 +6,4 @@
 # recordings made before the rename
 /trippy-*.mp4
 !docs/images/*.png
+!assets/models/**/*.png

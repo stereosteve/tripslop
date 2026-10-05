@@ -10,6 +10,8 @@ use eframe::egui::{self, Color32, Id, Rect, RichText, Sense, Stroke, StrokeKind,
 use crate::clip::{Clip, Direction, Fit, LoopMode, Media, Sync};
 use crate::composition::Composition;
 use crate::effects::{EFFECTS, Effect, EffectKind, FEEDBACK_PRESETS, apply_feedback_preset};
+use crate::isf_library::{Drag, Kind, Library, Status};
+use crate::model::ModelRef;
 use crate::modulation::Clock;
 use crate::param::Param;
 use crate::shader::{Role, TEMPLATES};
@@ -22,7 +24,7 @@ const GAP: f32 = 8.0;
 const KNOB_ROW_H: f32 = 74.0;
 
 /// The selected layer's chain. `clip_col`: the clip shown in the Source card.
-pub fn layer_chain(ui: &mut egui::Ui, comp: &mut Composition, li: usize, clip_col: Option<usize>, clock: Clock) {
+pub fn layer_chain(ui: &mut egui::Ui, comp: &mut Composition, lib: &Library, li: usize, clip_col: Option<usize>, clock: Clock) {
     let Some(layer) = comp.layers.get_mut(li) else {
         ui.label(RichText::new("No layer selected.").color(theme::MUTED));
         return;
@@ -32,8 +34,8 @@ pub fn layer_chain(ui: &mut egui::Ui, comp: &mut Composition, li: usize, clip_co
     let owner = layer.id;
     row(ui, ("chain", owner), |ui| {
         let clip = clip_col.and_then(|c| layer.clips.get_mut(c)?.as_mut());
-        source_card(ui, Id::new(("source", owner)), clip, color, clock);
-        effect_cards(ui, &mut layer.effects, owner, clock);
+        source_card(ui, Id::new(("source", owner)), clip, color, lib, clock);
+        effect_cards(ui, &mut layer.effects, owner, lib, clock);
         let h = ui.available_height();
         let width = 3.0 * (KNOB_W + 2.0) + 24.0;
         card(ui, Id::new(("layer out", owner)), width, h, "Layer out", |ui| {
@@ -50,14 +52,14 @@ pub fn layer_chain(ui: &mut egui::Ui, comp: &mut Composition, li: usize, clip_co
 }
 
 /// The master chain. `output` draws the Output card's body (size, memory).
-pub fn master_chain(ui: &mut egui::Ui, comp: &mut Composition, clock: Clock, output: impl FnOnce(&mut egui::Ui)) {
+pub fn master_chain(ui: &mut egui::Ui, comp: &mut Composition, lib: &Library, clock: Clock, output: impl FnOnce(&mut egui::Ui)) {
     widgets::set_accent(ui.ctx(), theme::LIVE);
     row(ui, "master chain", |ui| {
         let h = ui.available_height();
         card(ui, Id::new("output card"), 250.0, h, "Output", |ui| {
             ui.label(RichText::new("OUTPUT").font(theme::semibold(11.0)).color(theme::LIVE));
         }, output);
-        effect_cards(ui, &mut comp.effects, 0, clock);
+        effect_cards(ui, &mut comp.effects, 0, lib, clock);
         let h = ui.available_height();
         card(ui, Id::new("master out"), 2.0 * (KNOB_W + 2.0) + 24.0, h, "Master out", |ui| {
             ui.label(RichText::new("MASTER OUT").font(theme::semibold(11.0)).color(theme::LIVE));
@@ -157,14 +159,14 @@ fn count(params: &[Param]) -> (usize, usize) {
 }
 
 /// Every effect in the chain, then the + button.
-fn effect_cards(ui: &mut egui::Ui, effects: &mut Vec<Effect>, owner: u64, clock: Clock) {
+fn effect_cards(ui: &mut egui::Ui, effects: &mut Vec<Effect>, owner: u64, lib: &Library, clock: Clock) {
     let mut remove = None;
     let mut swap = None;
     let n = effects.len();
     for (i, e) in effects.iter_mut().enumerate() {
         let h = ui.available_height();
         let (mut knobs, mut choices) = count(&e.params);
-        let mut extra = usize::from(e.kind == EffectKind::Feedback) + usize::from(e.def().history.is_some());
+        let mut extra = usize::from(e.kind == EffectKind::Feedback) + usize::from(e.def().history.is_some()) + usize::from(e.takes_model());
         if let Some(c) = e.custom.as_deref() {
             let (k, ch) = count(&c.params);
             knobs += k;
@@ -176,6 +178,19 @@ fn effect_cards(ui: &mut egui::Ui, effects: &mut Vec<Effect>, owner: u64, clock:
         let enabled = e.enabled;
         let id = Id::new(("fx", owner, e.id));
         let Some((mut head, mut inner)) = card_frame(ui, id, width, h, &title) else { continue };
+        if e.takes_model() {
+            // A model dragged from the browser onto the card becomes its object. Registered
+            // before the card's controls, so they stay on top for the pointer.
+            let r = ui.interact(head.max_rect().union(inner.max_rect()), id.with("model drop"), Sense::hover());
+            if r.dnd_hover_payload::<Drag>().is_some_and(|d| d.kind == Kind::Model) {
+                ui.painter().rect_stroke(r.rect.expand(4.0), 6.0, Stroke::new(2.0, theme::QUEUED), StrokeKind::Inside);
+            }
+            if let Some(d) = r.dnd_release_payload::<Drag>().filter(|d| d.kind == Kind::Model) {
+                if let Some(m) = loaded(ui, id, Some(lib.model(&d.key))) {
+                    e.set_model(m);
+                }
+            }
+        }
         {
             let ui = &mut head;
             // On / bypass light.
@@ -206,7 +221,7 @@ fn effect_cards(ui: &mut egui::Ui, effects: &mut Vec<Effect>, owner: u64, clock:
                 }
             });
         }
-        card_body(&mut inner, id, |ui| effect_body(ui, e, clock));
+        card_body(&mut inner, id, |ui| effect_body(ui, e, lib, clock));
     }
     if let Some(i) = remove {
         effects.remove(i);
@@ -217,7 +232,15 @@ fn effect_cards(ui: &mut egui::Ui, effects: &mut Vec<Effect>, owner: u64, clock:
     add_button(ui, effects);
 }
 
-fn effect_body(ui: &mut egui::Ui, e: &mut Effect, clock: Clock) {
+fn effect_body(ui: &mut egui::Ui, e: &mut Effect, lib: &Library, clock: Clock) {
+    if e.takes_model() {
+        let id = Id::new(("fx model", e.id));
+        let current = e.model.as_ref().map_or("Utah Teapot", |m| m.name()).to_string();
+        let picked = model_menu(ui, id, &current, lib, "Pick the object for the shape \"Model\" (or drag one from the browser onto this card)");
+        if let Some(m) = loaded(ui, id, picked) {
+            e.set_model(m);
+        }
+    }
     if e.kind == EffectKind::Feedback {
         egui::ComboBox::from_id_salt(("fb preset", e.id))
             .selected_text("Preset…")
@@ -247,6 +270,51 @@ fn effect_body(ui: &mut egui::Ui, e: &mut Effect, clock: Clock) {
             "Keep the {} frames of history at half the output size: a quarter of the memory, a little softer. Changing it restarts the history.",
             h.frames
         ));
+    }
+}
+
+/// A "Model ▾" row listing the library's models by category; returns the one picked (loaded).
+/// Shows the last load error under it.
+fn model_menu(ui: &mut egui::Ui, id: Id, current: &str, lib: &Library, hint: &str) -> Option<Result<ModelRef, String>> {
+    let mut picked = None;
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Model").color(theme::MUTED));
+        egui::ComboBox::from_id_salt(id)
+            .selected_text(current)
+            .width((ui.available_width() - 8.0).clamp(80.0, 220.0))
+            .height(420.0)
+            .show_ui(ui, |ui| {
+                let mut last = "";
+                for e in lib.entries.iter().filter(|e| e.kind == Kind::Model && e.status == Status::Ok) {
+                    if e.category != last {
+                        ui.label(theme::caption(&e.category));
+                        last = &e.category;
+                    }
+                    if ui.selectable_label(e.name == current, &e.name).on_hover_text(&e.description).clicked() {
+                        picked = Some(e.key.clone());
+                    }
+                }
+            })
+            .response
+            .on_hover_text(hint);
+    });
+    if let Some(err) = ui.data(|d| d.get_temp::<String>(id.with("error"))) {
+        ui.colored_label(theme::RECORD, err);
+    }
+    picked.map(|k| lib.model(&k))
+}
+
+/// The picked model, if it loaded; otherwise remember why not, for `model_menu` to show.
+fn loaded(ui: &egui::Ui, id: Id, picked: Option<Result<ModelRef, String>>) -> Option<ModelRef> {
+    match picked? {
+        Ok(m) => {
+            ui.data_mut(|d| d.remove::<String>(id.with("error")));
+            Some(m)
+        }
+        Err(e) => {
+            ui.data_mut(|d| d.insert_temp(id.with("error"), e));
+            None
+        }
     }
 }
 
@@ -298,7 +366,7 @@ fn add_effect_menu(ui: &mut egui::Ui, effects: &mut Vec<Effect>) {
 }
 
 /// The clip: transport, timing, generator / shader controls and fit.
-fn source_card(ui: &mut egui::Ui, id: Id, clip: Option<&mut Clip>, color: Color32, clock: Clock) {
+fn source_card(ui: &mut egui::Ui, id: Id, clip: Option<&mut Clip>, color: Color32, lib: &Library, clock: Clock) {
     let h = ui.available_height();
     let Some(clip) = clip else {
         card(ui, id, 220.0, h, "Source", |ui| {
@@ -310,6 +378,7 @@ fn source_card(ui: &mut egui::Ui, id: Id, clip: Option<&mut Clip>, color: Color3
     };
     let width = match &clip.media {
         Media::Shader(s) => knob_card_width(count(&s.params).0, count(&s.params).1 + 1, 3, h).max(280.0),
+        Media::Model(m) => knob_card_width(count(&m.params).0, count(&m.params).1 + 1, 3, h).max(300.0),
         _ => 300.0,
     };
     let mut name = std::mem::take(&mut clip.name);
@@ -317,11 +386,11 @@ fn source_card(ui: &mut egui::Ui, id: Id, clip: Option<&mut Clip>, color: Color3
         ui.label(RichText::new("SOURCE").font(theme::semibold(11.0)).color(color));
         ui.add(egui::TextEdit::singleline(&mut name).frame(egui::Frame::NONE).font(theme::semibold(13.5)).desired_width(f32::INFINITY))
             .on_hover_text("Clip name");
-    }, |ui| source_body(ui, clip, clock));
+    }, |ui| source_body(ui, clip, lib, clock));
     clip.name = name;
 }
 
-fn source_body(ui: &mut egui::Ui, clip: &mut Clip, clock: Clock) {
+fn source_body(ui: &mut egui::Ui, clip: &mut Clip, lib: &Library, clock: Clock) {
     if let Some(e) = clip.error() {
         ui.colored_label(theme::RECORD, e);
     }
@@ -383,6 +452,14 @@ fn source_body(ui: &mut egui::Ui, clip: &mut Clip, clock: Clock) {
     if let Media::Generator(g) = &mut clip.media {
         widgets::param_grid(ui, [&mut g.pattern, &mut g.freq, &mut g.speed, &mut g.hue], clock);
     }
+    if let Media::Model(m) = &mut clip.media {
+        let id = Id::new(("clip model", clip.id));
+        let picked = model_menu(ui, id, &m.model.name().to_string(), lib, "Swap the model (keeps the settings)");
+        if let Some(r) = loaded(ui, id, picked) {
+            m.model = r;
+        }
+        widgets::param_grid(ui, m.params.iter_mut(), clock);
+    }
     if let Media::Shader(s) = &mut clip.media {
         ui.horizontal(|ui| {
             if ui.button("{ } Edit code").clicked() {
@@ -413,11 +490,18 @@ fn source_body(ui: &mut egui::Ui, clip: &mut Clip, clock: Clock) {
         Media::Camera { index, .. } => Some(format!("Live capture device {index}")),
         Media::Generator(_) => Some("Generator".into()),
         Media::Shader(_) => None,
+        Media::Model(m) => Some(m.model.model.summary()),
     };
     if let Some(info) = info {
         let r = ui.label(RichText::new(info).small().color(theme::FAINT));
-        if let Media::Video(v) = &clip.media {
-            r.on_hover_text(v.path.display().to_string());
+        match &clip.media {
+            Media::Video(v) => {
+                r.on_hover_text(v.path.display().to_string());
+            }
+            Media::Model(m) => {
+                r.on_hover_text(&m.model.key);
+            }
+            _ => {}
         }
     }
 }

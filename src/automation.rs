@@ -97,6 +97,12 @@ impl App {
         }
     }
 
+    /// A library model by name (for `model` and `effect-model`).
+    fn library_model(&self, name: &str) -> Result<crate::model::ModelRef, String> {
+        let entry = self.library.find_by_name(name, true).ok_or_else(|| format!("no library model {name:?}"))?;
+        self.library.model(&entry.key)
+    }
+
     fn stamp(&self) -> String {
         format!("[f{} b{:.2}]", self.frame_count, self.beat)
     }
@@ -146,13 +152,29 @@ impl App {
                 self.comp.set_clip(*l, *c, Clip::camera(*index, MEDIA_WIDTH, MEDIA_HEIGHT)?);
             }
             Cmd::Isf(l, c, name) => {
-                let entry = self.library.find_by_name(name).ok_or_else(|| format!("no library shader {name:?}"))?;
+                let entry = self.library.find_by_name(name, false).ok_or_else(|| format!("no library shader {name:?}"))?;
                 if entry.kind != crate::isf_library::Kind::Generator {
                     return Err(format!("{} is an effect; use add-effect L isf:NAME", entry.name));
                 }
                 let clip = Clip::from_shader(entry.shader()?);
                 self.ensure_layer(*l);
                 self.comp.set_clip(*l, *c, clip);
+            }
+            Cmd::Model(l, c, name) => {
+                let model = self.library_model(name)?;
+                self.ensure_layer(*l);
+                self.comp.set_clip(*l, *c, Clip::model(model));
+            }
+            Cmd::EffectModel(path, name) => {
+                let model = self.library_model(name)?;
+                let mut ok = true;
+                self.with_effect(path, |e| match e.takes_model() {
+                    true => e.set_model(model),
+                    false => ok = false,
+                })?;
+                if !ok {
+                    return Err(format!("{path} isn't a Shape projector or Projection mapping"));
+                }
             }
             Cmd::Automate(path, None) => self.with_param(path, |p| p.modulator = None)?,
             Cmd::Automate(path, Some((shape, band, depth, beats))) => self.with_param(path, |p| {
@@ -166,10 +188,9 @@ impl App {
             Cmd::Midi(m) => self.script_midi(m)?,
             Cmd::Audio(None) => self.audio.stop(),
             Cmd::Audio(Some(path)) => self.audio.open_file(path, self.sim_time)?,
-            Cmd::Library(effects, category) => {
-                use crate::isf_library::Kind;
+            Cmd::Library(kind, category) => {
                 self.show_library = true;
-                self.library_view.kind = if *effects { Kind::Effect } else { Kind::Generator };
+                self.library_view.kind = *kind;
                 self.library_view.category = match category {
                     None => None,
                     Some(c) => Some(
@@ -185,7 +206,7 @@ impl App {
             Cmd::AddEffect(target, name) => {
                 let e = match (name.strip_prefix("shader:"), name.strip_prefix("file:")) {
                     _ if name.starts_with("isf:") => {
-                        let entry = self.library.find_by_name(&name[4..]).ok_or_else(|| format!("no library shader {:?}", &name[4..]))?;
+                        let entry = self.library.find_by_name(&name[4..], false).ok_or_else(|| format!("no library shader {:?}", &name[4..]))?;
                         if entry.kind != crate::isf_library::Kind::Effect {
                             return Err(format!("{} is a generator; use isf L C NAME", entry.name));
                         }
@@ -327,6 +348,10 @@ impl App {
                     s.errors.len() as f64
                 }
                 _ => return Err("that clip isn't a shader".into()),
+            },
+            Query::Triangles(l, c) => match &self.comp.clip_mut(*l, *c).ok_or("no clip there")?.media {
+                crate::clip::Media::Model(m) => m.model.model.triangles() as f64,
+                _ => return Err("that clip isn't a model".into()),
             },
             Query::Layers => self.comp.layers.len() as f64,
             Query::Width => self.renderer.size().0 as f64,

@@ -1,0 +1,200 @@
+{
+  "//": "The bundled 3D models: display name, category, description, credit, search tags. `file` is a path in assets/models; `shape` is a model generated in code (src/model/shapes.rs). `rotate` (degrees about x, y, z) stands a model up that comes lying down. See README.md for sources and licenses.",
+  "categories": ["Classics", "Characters", "Math", "Solids & Fractals"],
+  "models": [
+    {
+      "file": "teapot.obj",
+      "name": "Utah Teapot",
+      "category": "Classics",
+      "description": "The teapot Martin Newell measured by hand in 1975 at the University of Utah: graphics' oldest test object.",
+      "credit": "Martin Newell, University of Utah",
+      "tags": ["teapot", "newell", "utah", "classic"]
+    },
+    {
+      "file": "stanford-bunny.ply",
+      "name": "Stanford Bunny",
+      "category": "Classics",
+      "description": "A clay bunny laser-scanned at Stanford in 1993 (simplified to 20,000 triangles). The scan's open bottom is left as it was.",
+      "credit": "Stanford Computer Graphics Laboratory (Turk & Levoy)",
+      "tags": ["bunny", "rabbit", "stanford", "scan"]
+    },
+    {
+      "file": "stanford-dragon.ply",
+      "name": "Stanford Dragon",
+      "category": "Classics",
+      "description": "The XYZ RGB Asian dragon statuette, scanned for Stanford (simplified to 40,000 triangles).",
+      "credit": "Stanford Computer Graphics Laboratory / XYZ RGB Inc.",
+      "tags": ["dragon", "stanford", "scan", "statue"]
+    },
+    {
+      "file": "armadillo.ply",
+      "name": "Armadillo",
+      "category": "Classics",
+      "description": "A toy armadillo scanned at Stanford in 1996 (simplified to 30,000 triangles).",
+      "credit": "Stanford Computer Graphics Laboratory (Krishnamurthy & Levoy)",
+      "tags": ["armadillo", "stanford", "scan", "creature"]
+    },
+    {
+      "file": "happy-buddha.ply",
+      "name": "Happy Buddha",
+      "category": "Classics",
+      "description": "A laughing Buddha statuette scanned at Stanford in 1996 (simplified to 40,000 triangles).",
+      "credit": "Stanford Computer Graphics Laboratory (Curless & Levoy)",
+      "tags": ["buddha", "stanford", "scan", "statue"]
+    },
+    {
+      "file": "suzanne.obj",
+      "name": "Suzanne",
+      "category": "Classics",
+      "description": "Blender's monkey head, the low-poly test model every Blender user knows.",
+      "credit": "Blender Foundation",
+      "rotate": [0, 180, 0],
+      "tags": ["monkey", "blender", "low poly", "head"]
+    },
+    {
+      "file": "spot/spot.obj",
+      "name": "Spot",
+      "category": "Characters",
+      "description": "A spotted cow, with its texture. A smooth, perfectly clean mesh for testing.",
+      "credit": "Keenan Crane (CC0)",
+      "tags": ["cow", "textured", "keenan crane", "animal"]
+    },
+    {
+      "file": "bob/bob.obj",
+      "name": "Bob",
+      "category": "Characters",
+      "description": "A rubber duck with a hole through it, textured.",
+      "credit": "Keenan Crane (CC0)",
+      "tags": ["duck", "textured", "keenan crane", "torus"]
+    },
+    {
+      "file": "blub/blub.obj",
+      "name": "Blub",
+      "category": "Characters",
+      "description": "A cartoon fish, textured.",
+      "rotate": [0, 90, 0],
+      "credit": "Keenan Crane (CC0)",
+      "tags": ["fish", "textured", "keenan crane", "animal"]
+    },
+    {
+      "file": "fox.glb",
+      "name": "Fox",
+      "category": "Characters",
+      "description": "A low-poly fox from the glTF sample models, in its rest pose, textured.",
+      "credit": "PixelMannen (CC0); rigging tomkranis, glTF conversion @AsoboStudio and @scurest (CC BY 4.0)",
+      "tags": ["fox", "textured", "low poly", "gltf", "animal"]
+    },
+    {
+      "shape": "torus-knot",
+      "name": "Torus Knot",
+      "category": "Math",
+      "description": "A tube wound 3 times around a torus while circling it 7 times.",
+      "tags": ["knot", "tube", "torus", "parametric"]
+    },
+    {
+      "shape": "trefoil",
+      "name": "Trefoil Knot",
+      "category": "Math",
+      "description": "The simplest knot that can't be untied, as a thick tube.",
+      "tags": ["knot", "tube", "parametric"]
+    },
+    {
+      "shape": "klein-bottle",
+      "name": "Klein Bottle",
+      "category": "Math",
+      "description": "A bottle with no inside: its neck passes through its own wall and opens into the base.",
+      "tags": ["topology", "parametric", "non-orientable"]
+    },
+    {
+      "shape": "mobius-strip",
+      "name": "Möbius Strip",
+      "category": "Math",
+      "description": "A band with a half twist: one side, one edge.",
+      "tags": ["mobius", "moebius", "topology", "parametric", "band"]
+    },
+    {
+      "shape": "seashell",
+      "name": "Seashell",
+      "category": "Math",
+      "description": "A logarithmic spiral of growing circles (Paul Bourke's seashell surface).",
+      "tags": ["shell", "spiral", "parametric", "nature"]
+    },
+    {
+      "shape": "supershape",
+      "name": "Supershape",
+      "category": "Math",
+      "description": "Gielis' superformula in 3D: a seven-armed star blob.",
+      "tags": ["superformula", "gielis", "star", "parametric"]
+    },
+    {
+      "shape": "torus",
+      "name": "Torus",
+      "category": "Math",
+      "description": "A doughnut, with texture coordinates all the way round.",
+      "tags": ["donut", "doughnut", "ring", "parametric"]
+    },
+    {
+      "shape": "sphere",
+      "name": "Sphere",
+      "category": "Math",
+      "description": "A smooth sphere with longitude / latitude texture coordinates.",
+      "tags": ["ball", "globe", "parametric"]
+    },
+    {
+      "shape": "tetrahedron",
+      "name": "Tetrahedron",
+      "category": "Solids & Fractals",
+      "description": "4 triangles. The whole image on each face.",
+      "tags": ["platonic", "pyramid", "polyhedron"]
+    },
+    {
+      "shape": "cube",
+      "name": "Cube",
+      "category": "Solids & Fractals",
+      "description": "6 squares. The whole image on each face.",
+      "tags": ["platonic", "box", "polyhedron"]
+    },
+    {
+      "shape": "octahedron",
+      "name": "Octahedron",
+      "category": "Solids & Fractals",
+      "description": "8 triangles. The whole image on each face.",
+      "tags": ["platonic", "diamond", "polyhedron"]
+    },
+    {
+      "shape": "dodecahedron",
+      "name": "Dodecahedron",
+      "category": "Solids & Fractals",
+      "description": "12 pentagons. The whole image on each face.",
+      "tags": ["platonic", "polyhedron", "pentagon"]
+    },
+    {
+      "shape": "icosahedron",
+      "name": "Icosahedron",
+      "category": "Solids & Fractals",
+      "description": "20 triangles. The whole image on each face.",
+      "tags": ["platonic", "polyhedron", "d20"]
+    },
+    {
+      "shape": "geodesic-sphere",
+      "name": "Geodesic Sphere",
+      "category": "Solids & Fractals",
+      "description": "An icosahedron split three times and pushed onto a sphere: 1,280 flat facets.",
+      "tags": ["geodesic", "dome", "facets", "ball"]
+    },
+    {
+      "shape": "menger-sponge",
+      "name": "Menger Sponge",
+      "category": "Solids & Fractals",
+      "description": "A cube with its middles cut out, three levels deep.",
+      "tags": ["fractal", "cube", "sponge"]
+    },
+    {
+      "shape": "sierpinski-pyramid",
+      "name": "Sierpinski Pyramid",
+      "category": "Solids & Fractals",
+      "description": "A tetrahedron made of tetrahedra, five levels deep.",
+      "tags": ["fractal", "tetrahedron", "triangle"]
+    }
+  ]
+}

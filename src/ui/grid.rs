@@ -126,12 +126,12 @@ impl GridView {
         let summary = format!("{} fx · {:.0}%", fx, comp.master.value * 100.0);
         painter.text(rect.left_bottom() + vec2(18.0, -7.0), egui::Align2::LEFT_BOTTOM, summary, theme::mono(10.5), theme::MUTED);
         if let Some(d) = resp.dnd_hover_payload::<Drag>()
-            && d.kind != Kind::Generator
+            && !matches!(d.kind, Kind::Generator | Kind::Model)
         {
             drop_hint(ui, rect, &d, None);
         }
         if let Some(d) = resp.dnd_release_payload::<Drag>()
-            && d.kind != Kind::Generator
+            && !matches!(d.kind, Kind::Generator | Kind::Model)
         {
             actions.push(GridAction::MasterEffect((*d).clone()));
         }
@@ -258,6 +258,7 @@ impl GridView {
                 Media::Generator(_) => Some("GEN"),
                 Media::Shader(_) => Some("GLSL"),
                 Media::Camera { .. } => Some("CAM"),
+                Media::Model(_) => Some("3D"),
                 _ => None,
             };
             if let Some(tag) = tag {
@@ -390,8 +391,8 @@ fn drop_hint(ui: &egui::Ui, rect: Rect, d: &Drag, layer: Option<&str>) {
     let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("isf drop hint")));
     painter.rect_stroke(rect, 3.0, Stroke::new(2.5, AMBER), StrokeKind::Inside);
     let label = match (d.kind, layer) {
-        (Kind::Generator, Some(_)) => "load here".to_string(),
-        (Kind::Generator, None) => "load into first free cell".to_string(),
+        (Kind::Generator | Kind::Model, Some(_)) => "load here".to_string(),
+        (Kind::Generator | Kind::Model, None) => "load into first free cell".to_string(),
         (_, Some(name)) => format!("add to {name}"),
         (_, None) => "add effect to layer".to_string(),
     };
@@ -404,7 +405,7 @@ fn drop_hint(ui: &egui::Ui, rect: Rect, d: &Drag, layer: Option<&str>) {
 /// A clip's picture cropped to fill `rect`: its rendered preview (generators and shaders),
 /// its thumbnail, or a stand-in.
 pub fn clip_picture(painter: &egui::Painter, rect: Rect, clip: &crate::clip::Clip, thumbs: &HashMap<u64, egui::TextureId>, tint: Color32) {
-    let procedural = matches!(clip.media, Media::Generator(_) | Media::Shader(_));
+    let procedural = matches!(clip.media, Media::Generator(_) | Media::Shader(_) | Media::Model(_));
     if let Some(t) = thumbs.get(&clip.id).filter(|_| procedural) {
         painter.image(*t, rect, cover_uv(rect, 16.0 / 9.0), tint);
         return;

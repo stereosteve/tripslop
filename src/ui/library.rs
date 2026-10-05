@@ -1,6 +1,6 @@
-//! The shader library browser: generators and effects as picture cards, filed by category.
-//! Hover a card to see it move; drag it onto a grid cell (generators) or a layer (effects), or
-//! double-click it.
+//! The library browser: generators, effects and 3D models as picture cards, filed by
+//! category. Hover a card to see it move; drag it onto a grid cell (generators, models) or a
+//! layer (effects), or double-click it.
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -15,6 +15,8 @@ pub enum LibraryAction {
     /// layer (or the master chain on the Composition tab).
     Use(Drag),
     AddFolder,
+    /// Pick model files to list under My Models.
+    AddFiles,
     RemoveFolder(usize),
     Rescan,
 }
@@ -78,8 +80,13 @@ impl LibraryView {
                 if ui.small_button("⟳").on_hover_text("Rescan").clicked() {
                     actions.push(LibraryAction::Rescan);
                 }
-                if ui.small_button("Add folder…").on_hover_text("Also list the ISF shaders (.fs) in a folder").clicked() {
+                if ui.small_button("Add folder…").on_hover_text("Also list the ISF shaders (.fs) and 3D models in a folder").clicked() {
                     actions.push(LibraryAction::AddFolder);
+                }
+                if self.kind == Kind::Model
+                    && ui.small_button("Add models…").on_hover_text(format!("List model files ({})", crate::model::formats::EXTENSIONS.join(", "))).clicked()
+                {
+                    actions.push(LibraryAction::AddFiles);
                 }
             });
         });
@@ -95,7 +102,7 @@ impl LibraryView {
         let usable = |e: &Entry| e.status == Status::Ok;
         let listed = |e: &Entry| self.show_unsupported || !matches!(e.status, Status::Unsupported(_));
         ui.horizontal(|ui| {
-            for (k, label) in [(Kind::Generator, "Generators"), (Kind::Effect, "Effects")] {
+            for (k, label) in [(Kind::Generator, "Generators"), (Kind::Effect, "Effects"), (Kind::Model, "Models")] {
                 let n = lib.entries.iter().filter(|e| e.kind == k && usable(e)).count();
                 if ui.selectable_label(self.kind == k, format!("{label} {n}")).clicked() && self.kind != k {
                     self.kind = k;
@@ -173,6 +180,7 @@ impl LibraryView {
         ui.separator();
         let hint = match self.kind {
             Kind::Generator => "Hover to preview. Drag onto a cell, or double-click to load into the selected cell.",
+            Kind::Model => "Hover to spin. Drag onto a cell (or double-click) to play it as a clip; drag onto a Shape projector or Projection mapping card to map onto it.",
             _ => "Hover to preview. Drag onto a layer, or double-click to add to the selected layer (master on the Composition tab).",
         };
         ui.label(RichText::new(hint).small().weak());
@@ -280,7 +288,11 @@ impl LibraryView {
         let resp = resp.on_hover_ui(|ui| {
             ui.set_max_width(320.0);
             ui.label(RichText::new(&e.name).strong());
-            let what = if e.kind == Kind::Generator { "generator" } else { "effect" };
+            let what = match e.kind {
+                Kind::Generator => "generator",
+                Kind::Model => "3D model",
+                _ => "effect",
+            };
             ui.label(RichText::new(format!("{} · {what}", e.category)).small());
             if !e.description.is_empty() {
                 ui.label(&e.description);

@@ -3,6 +3,7 @@
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::model::ModelRef;
 use crate::modulation::Clock;
 use crate::param::{Param, Params, Spec};
 use crate::source::{self, Frame, Stream};
@@ -129,6 +130,42 @@ impl Generator {
     }
 }
 
+/// A 3D model clip's controls (`meshes::clip_draw` reads them by position).
+pub const MODEL_SPECS: &[Spec] = &[
+    Spec::choice("material", crate::meshes::MATERIALS, 0),
+    Spec::new("hue", 0.0, 1.0, 0.0),
+    Spec::new("size", 0.1, 3.0, 0.9),
+    Spec::new("rotate x °", -180.0, 180.0, 15.0),
+    Spec::new("rotate y °", -180.0, 180.0, 0.0),
+    Spec::new("rotate z °", -180.0, 180.0, 0.0),
+    Spec::new("spin x (turns/bar)", -2.0, 2.0, 0.0),
+    Spec::new("spin y (turns/bar)", -2.0, 2.0, 0.125),
+    Spec::new("spin z (turns/bar)", -2.0, 2.0, 0.0),
+    Spec::new("x", -1.0, 1.0, 0.0),
+    Spec::new("y", -1.0, 1.0, 0.0),
+    Spec::new("field of view °", 10.0, 120.0, 40.0),
+    Spec::new("lighting", 0.0, 1.0, 0.85),
+    Spec::new("wire", 0.0, 1.0, 0.0),
+    Spec::new("wire width (px)", 0.5, 6.0, 1.2),
+    Spec::choice("shading", &["Smooth", "Flat"], 0),
+    Spec::new("explode", 0.0, 2.0, 0.0),
+    Spec::new("twist", -2.0, 2.0, 0.0),
+    Spec::new("wobble", 0.0, 1.0, 0.0),
+    Spec::choice("background", &["Transparent", "Black"], 0),
+];
+
+/// A 3D model playing as a clip.
+pub struct ModelClip {
+    pub model: ModelRef,
+    pub params: Vec<Param>,
+}
+
+impl ModelClip {
+    pub fn new(model: ModelRef) -> Self {
+        Self { model, params: MODEL_SPECS.iter().map(|s| Param::new(*s)).collect() }
+    }
+}
+
 pub enum Media {
     Video(VideoMedia),
     Image { frame: Frame, uploaded: bool },
@@ -136,6 +173,8 @@ pub enum Media {
     Generator(Box<Generator>),
     /// User GLSL (Shadertoy style).
     Shader(Box<CustomShader>),
+    /// A 3D model, rendered with its own materials.
+    Model(Box<ModelClip>),
 }
 
 pub struct Clip {
@@ -191,6 +230,9 @@ impl Clip {
             .unwrap_or(name.clone());
         let media = if source::is_shader(path) {
             Media::Shader(Box::new(CustomShader::from_file(path, Role::Source)?))
+        } else if crate::model::formats::is_model(path) {
+            let model = std::sync::Arc::new(crate::model::formats::load(path)?);
+            Media::Model(Box::new(ModelClip::new(ModelRef { key: path.display().to_string(), model })))
         } else if source::is_video(path) {
             Media::Video(VideoMedia::import(path, width, height)?)
         } else {
@@ -213,6 +255,10 @@ impl Clip {
 
     pub fn from_shader(shader: CustomShader) -> Self {
         Self::new(shader.name.clone(), Media::Shader(Box::new(shader)))
+    }
+
+    pub fn model(model: ModelRef) -> Self {
+        Self::new(model.name().to_string(), Media::Model(Box::new(ModelClip::new(model))))
     }
 
     pub fn generator(pattern: usize) -> Self {
@@ -276,6 +322,11 @@ impl Clip {
                 }
             }
             Media::Shader(s) => s.tick(clock),
+            Media::Model(m) => {
+                for p in &mut m.params {
+                    p.tick(clock);
+                }
+            }
             _ => {}
         }
         if !self.is_timeline() || !playing || self.finished {
@@ -350,7 +401,7 @@ impl Clip {
                 })
             }
             Media::Camera { stream, .. } => stream.poll(),
-            Media::Generator(_) | Media::Shader(_) => None,
+            Media::Generator(_) | Media::Shader(_) | Media::Model(_) => None,
         }
     }
 
@@ -379,6 +430,12 @@ impl Params for Clip {
                     f(label, p);
                 }
                 f("alpha", &mut s.alpha);
+            }
+            Media::Model(m) => {
+                for p in &mut m.params {
+                    let label = p.spec.label;
+                    f(label, p);
+                }
             }
             _ => {}
         }

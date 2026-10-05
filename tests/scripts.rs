@@ -79,6 +79,12 @@ fn projection_mapping() {
 
 #[test]
 #[ignore = "opens a window; needs a GPU"]
+fn models() {
+    run("scripts/models.tripslop");
+}
+
+#[test]
+#[ignore = "opens a window; needs a GPU"]
 fn crossfade() {
     run("scripts/crossfade.tripslop");
     let px = |name: &str| -> [f32; 3] {

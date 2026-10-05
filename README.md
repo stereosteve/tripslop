@@ -116,7 +116,7 @@ has frequency, speed and hue controls.
 | --- | --- |
 | Feedback | **Feedback / Fractal**: N scaled, rotated copies of the delayed output with a keyer, hue drift and symmetry. It has presets: Tunnel, Sierpinski, Mandala, Slow trails, Spiral galaxy, Hall of mirrors, Melt |
 | Time | Echo trails, RGB time split |
-| Space | Kaleidoscope, Mirror, Transform (zoom/rotate/tile), Wave warp, **Shape projector** (the layer mapped onto a spinning 3D prism, pyramid or diamond with 3–12 sides; size, height, rotation and beat-synced spin on each axis, per-face or wrapped mapping, lighting), **Projection mapping** (a projector throws the layer at a spinning prism, pyramid, diamond or sphere seen from another angle, so the image bends across the faces; projector angle, elevation and zoom, plus an optional back wall that catches the rest of the image along with the object's shadow) |
+| Space | Kaleidoscope, Mirror, Transform (zoom/rotate/tile), Wave warp, **Shape projector** (the layer mapped onto a spinning 3D prism, pyramid or diamond with 3–12 sides, or any **3D model**; size, height, rotation and beat-synced spin on each axis, per-face or wrapped mapping, lighting), **Projection mapping** (a projector throws the layer at a spinning prism, pyramid, diamond, sphere or **3D model** seen from another angle, so the image bends across the faces; projector angle, elevation and zoom, plus an optional back wall that catches the rest of the image along with the object's shadow) |
 | Color | Color (hue/sat/contrast/brightness/gamma/invert), Luma key, Pixelate / posterize |
 | Stylize | Blur, Edges, CRT, Strobe (beat-synced) |
 
@@ -215,6 +215,36 @@ tags.
   `assets/isf/library.json`, and re-bake. `cargo test` checks that the bake is current.
 * `cargo test --release isf_report -- --ignored --nocapture` prints a compatibility report for
   the bundle (plus a folder in `TRIPSLOP_ISF`, if set).
+
+**3D models.** The library's **Models** tab has classic test models (the Utah teapot, the
+Stanford bunny, dragon, armadillo and Happy Buddha, Suzanne), textured characters (Spot the
+cow, Bob, Blub, a glTF fox), and shapes generated from maths (torus knots, a Klein bottle, a
+Möbius strip, a seashell, the Platonic solids, a Menger sponge…). Your own files load too:
+**OBJ** (with its `.mtl` colours and diffuse texture), **STL** (binary or ASCII; read as
+z-up), **PLY** (ASCII or binary, with vertex colours and texture coordinates), **glTF 2.0**
+(`.gltf` or `.glb`, with node transforms, vertex colours and the base colour texture; the rest
+pose of animated models) and **OFF**. Drop a model file on a cell, pick one with *Load file…*,
+use *Add models…* in the Models tab (they're listed under *My Models*), or *Add folder…*
+(its model files are listed too, filed by subfolder).
+* **As a clip**: drag a model onto a cell (or double-click it). Its Source card has a model
+  picker and the controls: material (*Surface*: the model's texture or colours, clay when it
+  has neither; *Normals*; *Chrome*; *Toon*; *Hologram* and *Wireframe*, which glow
+  additively), hue, size, rotation and beat-synced spin on each axis, position, field of view,
+  lighting, a wireframe overlay, flat shading, and three deformers: *explode* (triangles fly
+  apart along their normals), *twist* and *wobble*. All of them can be automated.
+* **In the Shape projector and Projection mapping**: set *shape* to *Model*, then pick the
+  model on the card (or drag one from the browser onto the card). Until you pick one it's the
+  teapot. The Shape projector's *model mapping* decides how the layer wraps onto the model:
+  *Auto* (the model's own texture coordinates when it has them, else *Box*), *Model UVs*,
+  *Cylinder*, *Sphere*, *Box* (triplanar) or *Front* (a decal through the model). Projection
+  mapping casts real shadows (a shadow map from the projector), on the model itself and on the
+  wall.
+* Models are drawn with 4× multisampling. A model is centred and scaled to fit, so size 1
+  always fills about the same space. Files over 1.5 million triangles are refused; simplify
+  them first. Large files load when you drop them, which can take a moment.
+* The bundled models and their licences are listed in
+  [`assets/models/README.md`](assets/models/README.md). The Stanford scans can be
+  redistributed freely with credit, but not used commercially without Stanford's permission.
 
 **Automation.** Right-click any knob → *Automate…* to attach a signal generator:
 * Shapes: sine, triangle, saw up/down, square, sample & hold, smooth random drift, a
@@ -369,9 +399,10 @@ Layers and columns are **1-based**, like the UI.
 | --- | --- |
 | `demo` | load the demo set |
 | `launch-scene N` · `launch L C` · `stop L` | launch a scene / a clip; stop a layer |
-| `load L C PATH` · `generator L C NAME` · `shader L C TEMPLATE` · `isf L C NAME` · `camera L C INDEX` | put media in a cell (layers are created as needed); `isf` takes a library generator's name |
+| `load L C PATH` · `generator L C NAME` · `shader L C TEMPLATE` · `isf L C NAME` · `model L C NAME` · `camera L C INDEX` | put media in a cell (layers are created as needed); `isf` takes a library generator's name, `model` a library model's (`load` also takes model files) |
+| `effect-model LAYER/EFFECT NAME` | give a Shape projector or Projection mapping a library model (and set its shape to *Model*) |
 | `add-effect L NAME` · `add-effect master NAME` | add an effect by name; `shader:TEMPLATE` adds a code effect, `isf:NAME` a library effect, `file:PATH` a shader file (e.g. an ISF `.fs`) |
-| `library generators/effects [CATEGORY]` | show the library browser on that view (for screenshots) |
+| `library generators/effects/models [CATEGORY]` | show the library browser on that view (for screenshots) |
 | `set PATH VALUE` | set a parameter (see paths below) |
 | `bpm N` · `quantize off/beat/bar` · `play` · `pause` | transport |
 | `crossfade bank/layer [linear/smooth/cut]` · `side L a/b/off` | crossfader mode and curve; a layer's side |
@@ -387,7 +418,8 @@ Layers and columns are **1-based**, like the UI.
 | `print WHAT` · `assert WHAT OP VALUE` · `quit` | checks; `OP` is one of `== != < <= > >= ~=` |
 
 **`WHAT`** is either a parameter path or one of: `playhead L`, `active L` (1-based column, 0
-for none), `pad KEY` (envelope 0..1), `errors L C` (shader compile errors), `layers`, `bpm`,
+for none), `pad KEY` (envelope 0..1), `errors L C` (shader compile errors), `triangles L C`
+(a model clip's triangle count), `layers`, `bpm`,
 `beat`, `width`, `height` or `audio BAND` (`level`, `bass`, `mid`, `high` or `kick`).
 
 **Parameter paths** have one of these forms:

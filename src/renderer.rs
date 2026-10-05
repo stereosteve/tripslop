@@ -26,6 +26,8 @@ use crate::effects::{EFFECTS, Effect, EffectKind, HistorySource};
 use crate::modulation::Clock;
 use crate::punch::Punch;
 use crate::isf_library::{Kind, Library, Status};
+use crate::meshes::{self, MeshRenderer};
+use crate::model::Model;
 use crate::shader::{CompileError, CustomShader};
 
 /// Program (output) size until something changes it.
@@ -58,16 +60,23 @@ const LIB_BUDGET: std::time::Duration = std::time::Duration::from_millis(6);
 /// What effects in the library are shown processing.
 const LIB_INPUT: &[u8] = include_bytes!("../samples/pillars-of-creation.jpg");
 
-/// A shader library card's picture (see `Renderer::library_previews`).
+/// A library card's picture (see `Renderer::library_previews`).
 struct LibThumb {
     tex: Tex,
     id: egui::TextureId,
-    shader: CustomShader,
-    /// Pipeline and whether it works in screen space, or why it can't run.
-    gpu: Result<(Pipe, bool), String>,
+    what: CardSource,
     rendered: bool,
     /// `library_previews` call that last asked for it.
     last_seen: u64,
+}
+
+enum CardSource {
+    Shader {
+        shader: CustomShader,
+        /// Pipeline and whether it works in screen space, or why it can't run.
+        gpu: Result<(Pipe, bool), String>,
+    },
+    Model(std::sync::Arc<Model>),
 }
 
 /// A small GPU texture shown in the clip grid.
@@ -167,6 +176,10 @@ pub struct Renderer {
     /// The picture effects are shown processing: screen-space and GL-oriented.
     lib_input: Option<[Tex; 2]>,
     lib_calls: u64,
+    /// 3D models: model clips, and shape / projection effects set to *Model*.
+    meshes: MeshRenderer,
+    /// Where the Shape projector draws a model before laying it over its input.
+    mesh_scratch: Option<Tex>,
 }
 
 fn shader(device: &wgpu::Device, label: &str, parts: &[&str]) -> wgpu::ShaderModule {
@@ -470,8 +483,6 @@ impl Renderer {
             .register_native_texture(&device, &output.view, wgpu::FilterMode::Linear);
 
         Self {
-            device,
-            queue,
             sampler,
             clip_pipe,
             composite_pipe,
@@ -504,6 +515,10 @@ impl Renderer {
             lib_gl,
             lib_input: None,
             lib_calls: 0,
+            meshes: MeshRenderer::new(&device, &queue),
+            mesh_scratch: None,
+            device,
+            queue,
         }
     }
 
@@ -612,6 +627,10 @@ impl Renderer {
 
     /// Run one effect from `src` into `dst`.
     fn effect(&mut self, enc: &mut wgpu::CommandEncoder, e: &Effect, src: &Tex, dst: &Tex, clock: Clock) {
+        if let Some(model) = e.drawn_model() {
+            self.mesh_effect(enc, e, &model, src, dst, clock);
+            return;
+        }
         let def = e.def();
         let mut taps = [0.0f32; 4];
         if let Some(h) = def.history {
@@ -652,6 +671,26 @@ impl Renderer {
             let ring = self.rings.get_mut(&e.id).unwrap();
             ring.head = (ring.head + 1) % ring.len;
         }
+    }
+
+    /// The Shape projector or Projection mapping with a model instead of a built-in solid.
+    fn mesh_effect(&mut self, enc: &mut wgpu::CommandEncoder, e: &Effect, model: &Model, src: &Tex, dst: &Tex, clock: Clock) {
+        let size = self.size;
+        if e.kind == EffectKind::ProjectionMapping {
+            self.meshes.draw(enc, meshes::projection_draw(model, &e.params, clock, &src.view, &dst.view, size));
+            return;
+        }
+        // Background "Input": draw the model on its own, then lay it over the input.
+        if e.params[13].index() != 1 {
+            self.meshes.draw(enc, meshes::shape_draw(model, &e.params, clock, &src.view, &dst.view, size));
+            return;
+        }
+        let scratch = self.mesh_scratch.take().unwrap_or_else(|| tex2d(&self.device, "mesh scratch", size.0, size.1, RENDER));
+        self.meshes.draw(enc, meshes::shape_draw(model, &e.params, clock, &src.view, &scratch.view, size));
+        let ub = self.uniform(&[[0.0, 1.0, 0.0, 0.0]]);
+        let bg = self.bind(&self.composite_pipe.layout, ub, &[&src.view, &scratch.view]);
+        pass(enc, &dst.view, None, &self.composite_pipe, &bg);
+        self.mesh_scratch = Some(scratch);
     }
 
     /// Store `from` in the ring's current slot: a plain copy at full size, otherwise a
@@ -833,6 +872,7 @@ impl Renderer {
 
     pub fn render(&mut self, comp: &mut Composition, punch: &mut Punch, clock: Clock) {
         self.next_uniform = 0;
+        self.meshes.begin(true);
         let mut used_sources = HashSet::new();
         let mut used_layers = HashSet::new();
         let mut used_fx = HashSet::new();
@@ -892,12 +932,19 @@ impl Renderer {
                     });
                     self.run_custom(&mut enc, s, None, &src.tex, clock);
                     self.sources.insert(clip.id, src);
+                } else if let Media::Model(m) = &clip.media {
+                    let src = self.sources.remove(&clip.id).unwrap_or_else(|| SourceTex {
+                        tex: tex2d(&self.device, "model clip", size.0, size.1, RENDER),
+                        size,
+                    });
+                    self.meshes.draw(&mut enc, meshes::clip_draw(&m.model.model, &m.params, clock, &src.tex.view, size));
+                    self.sources.insert(clip.id, src);
                 } else if !self.upload(clip) {
                     continue;
                 }
                 let (mode, tex_aspect, straight, gen_params) = match &clip.media {
                     Media::Generator(g) => (1.0, 1.0, 0.0, [g.pattern.get(), g.freq.get(), g.speed.get(), g.hue.get()]),
-                    Media::Shader(_) => (0.0, aspect, 0.0, [0.0; 4]),
+                    Media::Shader(_) | Media::Model(_) => (0.0, aspect, 0.0, [0.0; 4]),
                     _ => {
                         let s = self.sources[&clip.id].size;
                         (0.0, s.0 as f32 / s.1 as f32, 1.0, [0.0; 4])
@@ -1019,6 +1066,14 @@ impl Renderer {
                     Media::Shader(sh) if self.custom.get(&sh.id).is_some_and(|g| g.pipe.is_some()) => {
                         sh.compiled_rev.unwrap_or(0)
                     }
+                    Media::Model(m) => {
+                        let mut h = std::collections::hash_map::DefaultHasher::new();
+                        std::hash::Hash::hash(&m.model.model.id, &mut h);
+                        for p in &m.params {
+                            std::hash::Hash::hash(&p.value.to_bits(), &mut h);
+                        }
+                        std::hash::Hasher::finish(&h)
+                    }
                     _ => continue,
                 };
                 if self.thumbs.get(&clip.id).is_some_and(|t| t.signature == Some(signature)) {
@@ -1050,6 +1105,10 @@ impl Renderer {
                         let bg = self.bind(&self.flip_pipe.layout, ub, &[&self.preview_gl.view]);
                         pass(enc, &self.thumbs[&clip.id].tex.view, Some(wgpu::Color::TRANSPARENT), &self.flip_pipe, &bg);
                     }
+                    Media::Model(m) => {
+                        let target = &self.thumbs[&clip.id].tex.view;
+                        self.meshes.draw(enc, meshes::clip_draw(&m.model.model, &m.params, clock, target, (THUMB_W, THUMB_H)));
+                    }
                     _ => unreachable!(),
                 }
                 self.thumbs.get_mut(&clip.id).unwrap().signature = Some(signature);
@@ -1075,6 +1134,7 @@ impl Renderer {
         self.lib_calls += 1;
         // Uniform slots are free again: everything rendered so far has been submitted.
         self.next_uniform = 0;
+        self.meshes.begin(false);
         let start = std::time::Instant::now();
         let mut enc = self.device.create_command_encoder(&Default::default());
         let mut work = false;
@@ -1094,7 +1154,11 @@ impl Renderer {
                         continue;
                     }
                     let Some(entry) = lib.find(key).filter(|e| e.status == Status::Ok) else { continue };
-                    let Ok(card) = self.library_card(entry) else { continue };
+                    let card = match entry.kind {
+                        Kind::Model => lib.model(key).map(|m| self.card_texture(CardSource::Model(m.model))),
+                        _ => self.library_card(entry),
+                    };
+                    let Ok(card) = card else { continue };
                     self.lib_thumbs.insert(key.to_string(), card);
                 }
             }
@@ -1118,26 +1182,30 @@ impl Renderer {
         }
     }
 
-    /// GPU state for a library card; `Err` if the shader can't be read.
+    /// GPU state for a shader's library card; `Err` if the shader can't be read.
     fn library_card(&mut self, entry: &crate::isf_library::Entry) -> Result<LibThumb, String> {
         let mut shader = entry.shader()?;
         let gpu = match shader.poll_compile() {
             Some(c) => self.build_custom(&c.wgsl, &c.entry).map(|p| (p, c.screen_space)),
             None => Err(shader.errors.first().map(|e| e.message.clone()).unwrap_or_else(|| "doesn't compile".into())),
         };
-        let tex = tex2d(&self.device, "library card", LIB_W, LIB_H, RENDER);
-        let id = self.egui_renderer.write().register_native_texture(&self.device, &tex.view, wgpu::FilterMode::Linear);
         if entry.kind == Kind::Effect && self.lib_input.is_none() {
             self.lib_input = Some(self.library_input());
         }
-        Ok(LibThumb { tex, id, shader, gpu, rendered: false, last_seen: self.lib_calls })
+        Ok(self.card_texture(CardSource::Shader { shader, gpu }))
+    }
+
+    fn card_texture(&mut self, what: CardSource) -> LibThumb {
+        let tex = tex2d(&self.device, "library card", LIB_W, LIB_H, RENDER);
+        let id = self.egui_renderer.write().register_native_texture(&self.device, &tex.view, wgpu::FilterMode::Linear);
+        LibThumb { tex, id, what, rendered: false, last_seen: self.lib_calls }
     }
 
     /// Render a library shader's card picture once and read it back, for `--bake-library`.
     /// `Err` says why the shader can't run.
     pub fn bake_library_card(&mut self, entry: &crate::isf_library::Entry) -> Result<image::RgbaImage, String> {
         let card = self.library_card(entry)?;
-        if let Err(e) = &card.gpu {
+        if let CardSource::Shader { gpu: Err(e), .. } = &card.what {
             let e = e.clone();
             self.egui_renderer.write().free_texture(&card.id);
             return Err(e);
@@ -1162,15 +1230,22 @@ impl Renderer {
     fn draw_library_card(&mut self, enc: &mut wgpu::CommandEncoder, key: &str, time: f64, effect: bool) {
         let clock = Clock::new(time * 2.0, time, 120.0);
         let Some(t) = self.lib_thumbs.get(key) else { return };
-        let Ok((_, screen_space)) = &t.gpu else { return };
-        let screen_space = *screen_space;
+        let (shader, screen_space) = match &t.what {
+            CardSource::Model(m) => {
+                self.meshes.draw(enc, meshes::card_draw(m, clock, &t.tex.view, (LIB_W, LIB_H)));
+                self.lib_thumbs.get_mut(key).unwrap().rendered = true;
+                return;
+            }
+            CardSource::Shader { shader, gpu: Ok((_, screen_space)) } => (shader, *screen_space),
+            CardSource::Shader { gpu: Err(_), .. } => return,
+        };
         let frame = ((time - PREVIEW_TIME) * 60.0) as i32;
-        let data = shader_uniforms(&t.shader, (LIB_W, LIB_H), (LIB_W, LIB_H), frame, clock);
-        let alpha = t.shader.alpha.index() as f32;
+        let data = shader_uniforms(shader, (LIB_W, LIB_H), (LIB_W, LIB_H), frame, clock);
+        let alpha = shader.alpha.index() as f32;
         let ub = self.uniform(&data);
         let flip_ub = self.uniform(&[[alpha, if screen_space { 0.0 } else { 1.0 }, 0.0, 0.0]]);
         let t = &self.lib_thumbs[key];
-        let Ok((pipe, _)) = &t.gpu else { return };
+        let CardSource::Shader { gpu: Ok((pipe, _)), .. } = &t.what else { return };
         let d = &self.dummy_tex.view;
         let input = match (&self.lib_input, effect) {
             (Some(inp), true) => &inp[if screen_space { 0 } else { 1 }].view,
@@ -1262,6 +1337,7 @@ impl Renderer {
             .write()
             .update_egui_texture_from_wgpu_texture(&self.device, &self.output.view, wgpu::FilterMode::Linear, self.display_id);
         self.prev_output_gl = tex2d(&self.device, "previous output (GL)", size.0, size.1, RENDER);
+        self.mesh_scratch = None;
         self.layers.clear();
         self.rings.clear();
         // Video and image sources are re-uploaded on the next frame; shader clips re-render.
@@ -1285,7 +1361,8 @@ impl Renderer {
         for gpu in self.custom.values() {
             total += gpu.bufs.as_ref().map_or(0, |_| 2 * full) + gpu.input_gl.as_ref().map_or(0, |_| full);
         }
-        total + self.thumbs.len() as u64 * px((THUMB_W, THUMB_H))
+        total += self.mesh_scratch.as_ref().map_or(0, |_| full);
+        total + self.meshes.memory() + self.thumbs.len() as u64 * px((THUMB_W, THUMB_H))
     }
 
     /// Device, queue and the final output texture, for recording.

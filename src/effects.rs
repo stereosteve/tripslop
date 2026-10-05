@@ -2,7 +2,10 @@
 //! `shaders/fx/header.wgsl`): an input, up to 24 parameters, and optionally a ring of past
 //! frames for delays and feedback.
 
+use std::sync::Arc;
+
 use crate::clip::next_id;
+use crate::model::{Model, ModelRef};
 use crate::modulation::Shape;
 use crate::param::{Param, Params, Spec};
 use crate::shader::{CustomShader, Role};
@@ -56,6 +59,10 @@ pub struct EffectDef {
 }
 
 const ON_OFF: &[&str] = &["Off", "On"];
+
+/// How the Shape projector wraps the input onto a model (`shaders/mesh.wgsl`'s `mapped`).
+/// *Auto* uses the model's own texture coordinates when it has them, else *Box*.
+pub const MODEL_MAPPINGS: &[&str] = &["Auto", "Model UVs", "Cylinder", "Sphere", "Box", "Front"];
 
 const FEEDBACK: &[Spec] = &[
     Spec::new("feedback", 0.0, 1.2, 0.92),
@@ -178,7 +185,7 @@ pub static EFFECTS: &[EffectDef] = &[
         name: "Shape projector",
         category: "Space",
         specs: &[
-            Spec::choice("shape", &["Prism", "Pyramid", "Bipyramid (diamond)"], 0),
+            Spec::choice("shape", &["Prism", "Pyramid", "Bipyramid (diamond)", "Model"], 0),
             Spec::new("sides", 3.0, 12.0, 4.0).int(),
             Spec::new("size", 0.1, 2.0, 0.6),
             Spec::new("height", 0.1, 3.0, 1.0),
@@ -195,6 +202,7 @@ pub static EFFECTS: &[EffectDef] = &[
             Spec::new("field of view °", 10.0, 120.0, 45.0),
             Spec::new("x", -1.0, 1.0, 0.0),
             Spec::new("y", -1.0, 1.0, 0.0),
+            Spec::choice("model mapping", MODEL_MAPPINGS, 0),
         ],
         shader: concat!(include_str!("shaders/fx/solids.wgsl"), include_str!("shaders/fx/shape.wgsl")),
         history: None,
@@ -204,7 +212,7 @@ pub static EFFECTS: &[EffectDef] = &[
         name: "Projection mapping",
         category: "Space",
         specs: &[
-            Spec::choice("shape", &["Prism", "Pyramid", "Bipyramid (diamond)", "Sphere"], 0),
+            Spec::choice("shape", &["Prism", "Pyramid", "Bipyramid (diamond)", "Sphere", "Model"], 0),
             Spec::new("sides", 3.0, 12.0, 4.0).int(),
             Spec::new("size", 0.1, 2.0, 0.6),
             Spec::new("height", 0.1, 3.0, 1.0),
@@ -349,6 +357,9 @@ pub struct Effect {
     pub custom: Option<Box<CustomShader>>,
     /// Keep delay/feedback history at half the program size (a quarter of the memory).
     pub half_history: bool,
+    /// The Shape projector's / Projection mapping's object when its shape is *Model*
+    /// (`None`: the teapot).
+    pub model: Option<ModelRef>,
 }
 
 impl Effect {
@@ -360,7 +371,28 @@ impl Effect {
             params: def(kind).specs.iter().map(|s| Param::new(*s)).collect(),
             custom: None,
             half_history: false,
+            model: None,
         }
+    }
+
+    /// Whether this effect accepts a model (whatever its shape is set to).
+    pub fn takes_model(&self) -> bool {
+        matches!(self.kind, EffectKind::ShapeProjector | EffectKind::ProjectionMapping)
+    }
+
+    /// The model to draw, when the shape is set to *Model*.
+    pub fn drawn_model(&self) -> Option<Arc<Model>> {
+        let shape = self.params.first()?;
+        let wants = self.takes_model() && shape.spec.choices.get(shape.index()) == Some(&"Model");
+        wants.then(|| self.model.as_ref().map_or_else(crate::model::fallback, |m| m.model.clone()))
+    }
+
+    /// Use `model` and switch the shape to *Model*.
+    pub fn set_model(&mut self, model: ModelRef) {
+        if let Some(i) = self.params[0].spec.choices.iter().position(|c| *c == "Model") {
+            self.params[0].set(i as f32);
+        }
+        self.model = Some(model);
     }
 
     pub fn custom(name: &str, source: &str) -> Self {
@@ -526,6 +558,20 @@ mod tests {
                 assert!(taps.iter().all(|t| *t < h.frames), "{}: taps {taps:?}", d.name);
             }
         }
+    }
+
+    #[test]
+    fn model_shape_picks_the_model_or_the_teapot() {
+        let mut e = Effect::new(EffectKind::ProjectionMapping);
+        assert!(e.drawn_model().is_none());
+        e.set("shape", 4.0);
+        assert_eq!(e.drawn_model().unwrap().name, "Utah Teapot");
+        let mut s = Effect::new(EffectKind::ShapeProjector);
+        let cube = Arc::new(crate::model::shapes::build("cube", "Cube").unwrap());
+        s.set_model(ModelRef { key: "shape:cube".into(), model: cube.clone() });
+        assert_eq!(s.params[0].index(), 3);
+        assert!(Arc::ptr_eq(&s.drawn_model().unwrap(), &cube));
+        assert!(Effect::new(EffectKind::Blur).drawn_model().is_none());
     }
 
     #[test]

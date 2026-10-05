@@ -1,5 +1,10 @@
-//! The shader library: the ISF shaders bundled with tripslop, plus any folders added with
-//! `--isf DIR` or *Add folder…*.
+//! The library: the ISF shaders and 3D models bundled with tripslop, plus any folders added
+//! with `--isf DIR` or *Add folder…* (their `.fs` shaders and model files) and model files
+//! added one by one.
+//!
+//! Models are listed by `assets/models/library.json` (files in `assets/models`, and shapes
+//! generated in code). They're loaded the first time something needs them, and shared after
+//! that (`Library::model`).
 //!
 //! The bundle lives in `assets/isf` and is baked into the binary by `build.rs`, so the library
 //! works the same everywhere without touching the disk. `assets/isf/library.json` gives each
@@ -13,9 +18,12 @@
 //! can hide the ones tripslop can't run yet (multi-pass, ...).
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::{Arc, Mutex};
 
+use crate::model::{ModelRef, formats, shapes};
 use crate::shader::{self, CustomShader, Role};
 
 mod bundle {
@@ -24,6 +32,11 @@ mod bundle {
 
 /// The curated index of the bundle.
 const INDEX: &str = include_str!("../assets/isf/library.json");
+/// The index of the bundled models.
+const MODEL_INDEX: &str = include_str!("../assets/models/library.json");
+/// Category of model files from added folders (when they aren't in a subfolder) and of
+/// models added one by one.
+const MY_MODELS: &str = "My Models";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Kind {
@@ -33,6 +46,8 @@ pub enum Kind {
     Effect,
     /// `startImage` → `endImage`. Not supported yet; listed so the counts add up.
     Transition,
+    /// A 3D model: a clip, or the object of the Shape projector / Projection mapping.
+    Model,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -47,6 +62,10 @@ pub enum Source {
     /// Path inside `assets/isf`.
     Bundled(&'static str),
     File(PathBuf),
+    /// Path inside `assets/models`.
+    BundledModel(&'static str),
+    /// A model generated in code (an id in `model::shapes::IDS`).
+    Shape(&'static str),
 }
 
 #[derive(Clone, Debug)]
@@ -65,13 +84,17 @@ pub struct Entry {
     pub status: Status,
     /// Pre-rendered card picture (JPEG), for bundled shaders with a current bake.
     pub thumb: Option<&'static [u8]>,
+    /// Models: degrees about x, y, z to stand it up.
+    pub rotate: [f32; 3],
 }
 
 impl Entry {
     pub fn code(&self) -> Result<Cow<'static, str>, String> {
         match &self.source {
+            _ if self.kind == Kind::Model => Err(format!("{} is a 3D model, not a shader", self.name)),
             Source::Bundled(p) => bundled(p).map(Cow::Borrowed).ok_or_else(|| format!("{p} isn't in the bundle")),
             Source::File(p) => std::fs::read_to_string(p).map(Cow::Owned).map_err(|e| format!("{}: {e}", p.display())),
+            Source::BundledModel(_) | Source::Shape(_) => unreachable!("models are Kind::Model"),
         }
     }
 
@@ -79,7 +102,8 @@ impl Entry {
     pub fn vertex(&self) -> Option<String> {
         match &self.source {
             Source::Bundled(p) => bundled(&p.replace(".fs", ".vs")).map(str::to_string),
-            Source::File(p) => std::fs::read_to_string(p.with_extension("vs")).ok(),
+            Source::File(p) if self.kind != Kind::Model => std::fs::read_to_string(p.with_extension("vs")).ok(),
+            _ => None,
         }
     }
 
@@ -96,6 +120,8 @@ impl Entry {
         match &self.source {
             Source::Bundled(p) => format!("bundled: {p}"),
             Source::File(p) => p.display().to_string(),
+            Source::BundledModel(p) => format!("bundled: models/{p}"),
+            Source::Shape(_) => "generated".into(),
         }
     }
 }
@@ -121,6 +147,8 @@ enum Msg {
 pub struct Library {
     /// Extra folders (`--isf`, *Add folder…*).
     pub dirs: Vec<PathBuf>,
+    /// Model files added one by one (*Add models…*).
+    pub files: Vec<PathBuf>,
     /// Sorted by kind, category, then name.
     pub entries: Vec<Entry>,
     /// Category order: the bundle's, then any others alphabetically.
@@ -129,41 +157,93 @@ pub struct Library {
     index_order: Vec<String>,
     pub scanning: bool,
     rx: Option<Receiver<Msg>>,
+    /// Models loaded so far, by key.
+    models: Mutex<HashMap<String, ModelRef>>,
 }
 
 impl Library {
     pub fn new(dirs: Vec<PathBuf>) -> Self {
-        let mut lib = Self { dirs, entries: Vec::new(), categories: Vec::new(), index_order: Vec::new(), scanning: false, rx: None };
+        let mut lib = Self::empty();
+        lib.dirs = dirs;
         lib.rescan();
         lib
+    }
+
+    fn empty() -> Self {
+        Self {
+            dirs: Vec::new(),
+            files: Vec::new(),
+            entries: Vec::new(),
+            categories: Vec::new(),
+            index_order: Vec::new(),
+            scanning: false,
+            rx: None,
+            models: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// List model files (added to *My Models*).
+    pub fn add_files(&mut self, paths: impl IntoIterator<Item = PathBuf>) {
+        for p in paths {
+            if !self.files.contains(&p) {
+                self.files.push(p);
+            }
+        }
+        self.rescan();
+    }
+
+    /// A model from the library, loaded the first time it's asked for.
+    pub fn model(&self, key: &str) -> Result<ModelRef, String> {
+        if let Some(m) = self.models.lock().unwrap().get(key) {
+            return Ok(m.clone());
+        }
+        let e = self.find(key).ok_or_else(|| format!("{key} is no longer in the library"))?;
+        let mut model = match &e.source {
+            Source::BundledModel(p) => formats::load_bundled(p, &e.name)?,
+            Source::Shape(id) => shapes::build(id, &e.name)?,
+            Source::File(p) if e.kind == Kind::Model => formats::load(p)?,
+            _ => return Err(format!("{} isn't a model", e.name)),
+        };
+        if e.rotate != [0.0; 3] {
+            model.rotate(e.rotate);
+        }
+        let m = ModelRef { key: key.to_string(), model: Arc::new(model) };
+        self.models.lock().unwrap().insert(key.to_string(), m.clone());
+        Ok(m)
     }
 
     pub fn find(&self, key: &str) -> Option<&Entry> {
         self.entries.iter().find(|e| e.key == key)
     }
 
-    /// Look a shader up by name (case-insensitive; prefix and `category/name` work too), for
-    /// scripts.
-    pub fn find_by_name(&self, name: &str) -> Option<&Entry> {
+    /// Look a shader (or, with `models`, a model) up by name, for scripts: case-insensitive,
+    /// and `category/name` works too. An exact match wins, then a prefix, then a part of the
+    /// name ("teapot" finds Utah Teapot).
+    pub fn find_by_name(&self, name: &str, models: bool) -> Option<&Entry> {
         let want = name.trim().to_lowercase();
         let full = |e: &Entry| format!("{}/{}", e.category, e.name).to_lowercase();
-        self.entries
-            .iter()
+        let pool = || self.entries.iter().filter(|e| (e.kind == Kind::Model) == models);
+        pool()
             .find(|e| e.name.to_lowercase() == want || full(e) == want)
-            .or_else(|| self.entries.iter().find(|e| e.name.to_lowercase().starts_with(&want) || full(e).starts_with(&want)))
+            .or_else(|| pool().find(|e| e.name.to_lowercase().starts_with(&want) || full(e).starts_with(&want)))
+            .or_else(|| pool().find(|e| e.name.to_lowercase().contains(&want)))
     }
 
     pub fn rescan(&mut self) {
-        let (index, order) = bundle_entries();
+        let (mut index, mut order) = bundle_entries();
+        let (models, model_order) = model_entries();
+        index.extend(models);
+        order.extend(model_order);
         self.index_order = order;
         self.entries = index;
         self.sort();
         let (tx, rx) = channel();
         let dirs = self.dirs.clone();
+        let files = self.files.clone();
         // Baked entries already know their status.
         let bundled: Vec<(String, Source, Kind)> =
             self.entries.iter().filter(|e| e.status == Status::Checking).map(|e| (e.key.clone(), e.source.clone(), e.kind)).collect();
-        std::thread::spawn(move || scan_thread(dirs, bundled, tx));
+        std::thread::spawn(move || scan_thread(dirs, files, bundled, tx));
         self.rx = Some(rx);
         self.scanning = true;
     }
@@ -264,20 +344,25 @@ fn file_stem(path: &str) -> String {
     Path::new(path).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
-fn scan_thread(dirs: Vec<PathBuf>, bundled: Vec<(String, Source, Kind)>, tx: Sender<Msg>) {
+fn scan_thread(dirs: Vec<PathBuf>, models: Vec<PathBuf>, bundled: Vec<(String, Source, Kind)>, tx: Sender<Msg>) {
     let mut files = Vec::new();
     for d in &dirs {
         collect(d, d, 0, &mut files);
     }
+    files.extend(models.into_iter().map(|p| (p, None)));
     let found: Vec<Entry> = files
         .into_iter()
         .filter_map(|(path, folder)| {
+            if formats::is_model(&path) {
+                // Loaded (and checked) when first used.
+                return Some(model_file_entry(&path, folder));
+            }
             let code = std::fs::read_to_string(&path).ok()?;
             read_entry(&code, Source::File(path.clone()), path.file_stem()?.to_string_lossy().into_owned(), folder)
         })
         .collect();
     let mut checks = bundled;
-    checks.extend(found.iter().map(|e| (e.key.clone(), e.source.clone(), e.kind)));
+    checks.extend(found.iter().filter(|e| e.kind != Kind::Model).map(|e| (e.key.clone(), e.source.clone(), e.kind)));
     if tx.send(Msg::Scanned(found)).is_err() {
         return;
     }
@@ -289,7 +374,64 @@ fn scan_thread(dirs: Vec<PathBuf>, bundled: Vec<(String, Source, Kind)>, tx: Sen
     let _ = tx.send(Msg::Done);
 }
 
-/// `.fs` files under `dir`, with the subfolder they're in (relative to `root`), if any.
+/// A model file from an added folder (or added on its own).
+fn model_file_entry(path: &Path, folder: Option<String>) -> Entry {
+    let ext = path.extension().map(|e| e.to_string_lossy().to_uppercase()).unwrap_or_default();
+    Entry {
+        key: path.display().to_string(),
+        source: Source::File(path.to_path_buf()),
+        name: file_stem(&path.to_string_lossy()),
+        kind: Kind::Model,
+        category: folder.unwrap_or_else(|| MY_MODELS.into()),
+        tags: vec![ext.to_lowercase()],
+        description: format!("{ext} model file"),
+        credit: String::new(),
+        defaults: Vec::new(),
+        status: Status::Ok,
+        thumb: None,
+        rotate: [0.0; 3],
+    }
+}
+
+/// The bundled models, indexed by `assets/models/library.json`, and the index's category order.
+fn model_entries() -> (Vec<Entry>, Vec<String>) {
+    let index: serde_json::Value = serde_json::from_str(MODEL_INDEX).expect("assets/models/library.json is valid JSON");
+    let order = index["categories"].as_array().into_iter().flatten().filter_map(|c| c.as_str().map(String::from)).collect();
+    let text = |m: &serde_json::Value, k: &str| m[k].as_str().unwrap_or_default().to_string();
+    let entries = index["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|m| {
+            let (key, source) = if let Some(f) = m["file"].as_str() {
+                let path = formats::bundled_models().find(|p| *p == f)?;
+                (format!("model:{path}"), Source::BundledModel(path))
+            } else {
+                let id = shapes::IDS.iter().find(|i| m["shape"] == **i)?;
+                (format!("shape:{id}"), Source::Shape(id))
+            };
+            let rotate = m["rotate"].as_array().map(|r| std::array::from_fn(|i| r.get(i).and_then(|v| v.as_f64()).unwrap_or(0.0) as f32));
+            Some(Entry {
+                key,
+                source,
+                name: text(m, "name"),
+                kind: Kind::Model,
+                category: text(m, "category"),
+                tags: m["tags"].as_array().into_iter().flatten().filter_map(|t| t.as_str().map(String::from)).collect(),
+                description: text(m, "description"),
+                credit: text(m, "credit"),
+                defaults: Vec::new(),
+                status: Status::Ok,
+                thumb: None,
+                rotate: rotate.unwrap_or([0.0; 3]),
+            })
+        })
+        .collect();
+    (entries, order)
+}
+
+/// Shader (`.fs`) and model files under `dir`, with the subfolder they're in (relative to
+/// `root`), if any.
 fn collect(root: &Path, dir: &Path, depth: usize, out: &mut Vec<(PathBuf, Option<String>)>) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     for e in rd.flatten() {
@@ -298,7 +440,7 @@ fn collect(root: &Path, dir: &Path, depth: usize, out: &mut Vec<(PathBuf, Option
             if depth < 4 {
                 collect(root, &path, depth + 1, out);
             }
-        } else if path.extension().is_some_and(|x| x.eq_ignore_ascii_case("fs")) {
+        } else if path.extension().is_some_and(|x| x.eq_ignore_ascii_case("fs")) || formats::is_model(&path) {
             let folder = (dir != root).then(|| dir.file_name().unwrap_or_default().to_string_lossy().into_owned());
             out.push((path, folder));
         }
@@ -333,6 +475,7 @@ fn read_entry(code: &str, source: Source, name: String, folder: Option<String>) 
     let key = match &source {
         Source::Bundled(p) => format!("isf:{p}"),
         Source::File(p) => p.display().to_string(),
+        Source::BundledModel(_) | Source::Shape(_) => unreachable!("read_entry reads shaders"),
     };
     Some(Entry {
         key,
@@ -346,6 +489,7 @@ fn read_entry(code: &str, source: Source, name: String, folder: Option<String>) 
         defaults: Vec::new(),
         status: Status::Checking,
         thumb: None,
+        rotate: [0.0; 3],
     })
 }
 
@@ -424,12 +568,15 @@ fn normalize_category(c: &str) -> String {
 }
 
 fn check(source: &Source, kind: Kind) -> Status {
-    if kind == Kind::Transition {
-        return Status::Unsupported("ISF transitions aren't supported yet".into());
+    match kind {
+        Kind::Transition => return Status::Unsupported("ISF transitions aren't supported yet".into()),
+        Kind::Model => return Status::Ok,
+        _ => {}
     }
     let (code, vertex) = match source {
         Source::Bundled(p) => (bundled(p).map(str::to_string), bundled(&p.replace(".fs", ".vs")).map(str::to_string)),
         Source::File(p) => (std::fs::read_to_string(p).ok(), std::fs::read_to_string(p.with_extension("vs")).ok()),
+        Source::BundledModel(_) | Source::Shape(_) => return Status::Ok,
     };
     let Some(code) = code else {
         return Status::Unsupported("can't read file".into());
@@ -472,6 +619,7 @@ mod tests {
         collect(&dir, &dir, 0, &mut files);
         let mut entries: Vec<Entry> = files
             .into_iter()
+            .filter(|(p, _)| !formats::is_model(p))
             .filter_map(|(p, f)| read_entry(&std::fs::read_to_string(&p).unwrap(), Source::File(p.clone()), file_stem(&p.to_string_lossy()), f))
             .collect();
         entries.sort_by(|a, b| a.name.cmp(&b.name));
@@ -519,13 +667,56 @@ mod tests {
 
     #[test]
     fn finds_by_name_and_applies_defaults() {
-        let lib = Library { dirs: Vec::new(), entries: bundle_entries().0, categories: Vec::new(), index_order: Vec::new(), scanning: false, rx: None };
-        let e = lib.find_by_name("center crosshair").expect("Center Crosshair is bundled");
+        let lib = Library { entries: bundle_entries().0, ..Library::empty() };
+        let e = lib.find_by_name("center crosshair", false).expect("Center Crosshair is bundled");
         assert_eq!(e.category, "Basics");
         assert!(e.defaults.iter().any(|(k, _)| k == "lineWidth"));
-        assert_eq!(lib.find_by_name("three-body orbits/figure").map(|e| e.name.as_str()), Some("Figure Eight"));
+        assert_eq!(lib.find_by_name("three-body orbits/figure", false).map(|e| e.name.as_str()), Some("Figure Eight"));
         let s = e.shader().unwrap();
         assert_eq!(s.initial, e.defaults);
+    }
+
+    #[test]
+    fn every_listed_model_loads_once_and_is_shared() {
+        let index: serde_json::Value = serde_json::from_str(MODEL_INDEX).unwrap();
+        let listed = index["models"].as_array().unwrap().len();
+        let (entries, cats) = model_entries();
+        assert_eq!(entries.len(), listed, "library.json lists a file that isn't bundled, or a shape that doesn't exist");
+        for e in &entries {
+            assert!(cats.contains(&e.category), "{}: category {:?} isn't in the categories list", e.name, e.category);
+        }
+        // Every bundled model file is listed.
+        for path in formats::bundled_models() {
+            assert!(entries.iter().any(|e| e.source == Source::BundledModel(path)), "{path} isn't in assets/models/library.json");
+        }
+        let lib = Library { entries, ..Library::empty() };
+        for e in &lib.entries {
+            let m = lib.model(&e.key).unwrap_or_else(|err| panic!("{}: {err}", e.name));
+            assert_eq!(m.name(), e.name);
+        }
+        let teapot = lib.find_by_name("teapot", true).unwrap();
+        assert!(Arc::ptr_eq(&lib.model(&teapot.key).unwrap().model, &lib.model(&teapot.key).unwrap().model));
+        // Shaders and models with the same name stay apart.
+        assert_eq!(lib.find_by_name("torus knot", true).unwrap().kind, Kind::Model);
+    }
+
+    #[test]
+    fn folders_list_their_models() {
+        let dir = std::env::temp_dir().join(format!("tripslop-models-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("Scans")).unwrap();
+        std::fs::write(dir.join("tri.off"), "OFF\n3 1 0\n0 0 0\n1 0 0\n0 1 0\n3 0 1 2\n").unwrap();
+        std::fs::write(dir.join("Scans/tri.stl"), "solid t\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 1 0 0\nvertex 0 1 0\nendloop\nendfacet\nendsolid t\n").unwrap();
+        let mut files = Vec::new();
+        collect(&dir, &dir, 0, &mut files);
+        let mut entries: Vec<Entry> = files.iter().filter(|(p, _)| formats::is_model(p)).map(|(p, f)| model_file_entry(p, f.clone())).collect();
+        entries.sort_by(|a, b| a.category.cmp(&b.category));
+        let got: Vec<(&str, &str)> = entries.iter().map(|e| (e.name.as_str(), e.category.as_str())).collect();
+        assert_eq!(got, [("tri", MY_MODELS), ("tri", "Scans")]);
+        let lib = Library { entries, ..Library::empty() };
+        for e in &lib.entries {
+            assert_eq!(lib.model(&e.key).unwrap().model.triangles(), 1);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Compatibility report for the bundle and any `TRIPSLOP_ISF` folder:

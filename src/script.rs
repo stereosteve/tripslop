@@ -20,6 +20,7 @@
 use std::path::PathBuf;
 
 use crate::composition::{Crossfade, FadeCurve, Side};
+use crate::isf_library::Kind;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum When {
@@ -79,6 +80,8 @@ pub enum Query {
     Pad(usize),
     /// Number of compile errors of the shader clip in a cell.
     Errors(usize, usize),
+    /// Triangles in the model clip in a cell.
+    Triangles(usize, usize),
     Layers,
     Bpm,
     Beat,
@@ -101,14 +104,19 @@ pub enum Cmd {
     Camera(usize, usize, u32),
     /// A generator from the shader library, by name.
     Isf(usize, usize, String),
+    /// A 3D model from the library, by name, as a clip.
+    Model(usize, usize, String),
+    /// `LAYER/EFFECT` or `master/EFFECT` (a Shape projector or Projection mapping) uses a
+    /// library model, by name.
+    EffectModel(String, String),
     /// Attach automation to a parameter (`None`: remove it): shape, audio band (for the Audio
     /// shape), depth, cycle length in beats.
     Automate(String, Option<(crate::modulation::Shape, Option<crate::audio::Band>, f32, f32)>),
     Midi(MidiCmd),
     /// Analyse a WAV file in step with the clock (`None`: audio off).
     Audio(Option<PathBuf>),
-    /// Show the library browser on generators (false) or effects (true), optionally one category.
-    Library(bool, Option<String>),
+    /// Show the library browser on generators, effects or models, optionally one category.
+    Library(Kind, Option<String>),
     /// `None` = master.
     AddEffect(Option<usize>, String),
     Set(String, f32),
@@ -252,6 +260,7 @@ fn parse_query(w: &[String]) -> Result<Query, String> {
         "active" => Query::Active(idx(w.get(1), "layer")?),
         "pad" => Query::Pad(parse_pad(&w[1..].join(" "))?),
         "errors" => Query::Errors(idx(w.get(1), "layer")?, idx(w.get(2), "column")?),
+        "triangles" => Query::Triangles(idx(w.get(1), "layer")?, idx(w.get(2), "column")?),
         "layers" => Query::Layers,
         "bpm" => Query::Bpm,
         "beat" => Query::Beat,
@@ -282,6 +291,19 @@ fn parse_cmd(w: &[String]) -> Result<Vec<Cmd>, String> {
                 return Err("isf needs a layer, a column and a library name".into());
             }
             one(Cmd::Isf(idx(w.get(1), "layer")?, idx(w.get(2), "column")?, w[3..].join(" ")))
+        }
+        "model" => {
+            if w.len() < 4 {
+                return Err("model needs a layer, a column and a library model's name".into());
+            }
+            one(Cmd::Model(idx(w.get(1), "layer")?, idx(w.get(2), "column")?, w[3..].join(" ")))
+        }
+        // effect-model LAYER/EFFECT NAME (quote the path if it has spaces).
+        "effect-model" => {
+            if w.len() < 3 {
+                return Err("effect-model needs an effect path (e.g. 1/shape) and a library model's name".into());
+            }
+            one(Cmd::EffectModel(w[1].clone(), w[2..].join(" ")))
         }
         // automate PATH SHAPE [DEPTH] [BEATS], where PATH may contain spaces and SHAPE is e.g.
         // sine, square or audio:kick; or automate PATH off.
@@ -350,12 +372,13 @@ fn parse_cmd(w: &[String]) -> Result<Vec<Cmd>, String> {
             None => Err("audio needs a WAV file or off".into()),
         },
         "library" => {
-            let effects = match w.get(1).map(String::as_str) {
-                Some("generators") => false,
-                Some("effects") => true,
-                _ => return Err("library needs generators / effects [category]".into()),
+            let kind = match w.get(1).map(String::as_str) {
+                Some("generators") => Kind::Generator,
+                Some("effects") => Kind::Effect,
+                Some("models") => Kind::Model,
+                _ => return Err("library needs generators / effects / models [category]".into()),
             };
-            one(Cmd::Library(effects, (w.len() > 2).then(|| w[2..].join(" "))))
+            one(Cmd::Library(kind, (w.len() > 2).then(|| w[2..].join(" "))))
         }
         "camera" => one(Cmd::Camera(idx(w.get(1), "layer")?, idx(w.get(2), "column")?, num(w.get(3), "device")?)),
         "add-effect" => {
@@ -582,11 +605,22 @@ mod tests {
 
     #[test]
     fn library_commands() {
-        let ev = parse("isf 1 2 Figure Eight\nlibrary effects Depth & Relief\nlibrary generators\n").unwrap();
+        let ev = parse("isf 1 2 Figure Eight\nlibrary effects Depth & Relief\nlibrary generators\nlibrary models Math\n").unwrap();
         assert_eq!(ev[0].cmd, Cmd::Isf(0, 1, "Figure Eight".into()));
-        assert_eq!(ev[1].cmd, Cmd::Library(true, Some("Depth & Relief".into())));
-        assert_eq!(ev[2].cmd, Cmd::Library(false, None));
+        assert_eq!(ev[1].cmd, Cmd::Library(Kind::Effect, Some("Depth & Relief".into())));
+        assert_eq!(ev[2].cmd, Cmd::Library(Kind::Generator, None));
+        assert_eq!(ev[3].cmd, Cmd::Library(Kind::Model, Some("Math".into())));
         assert!(parse("isf 1 2\n").is_err());
+    }
+
+    #[test]
+    fn model_commands() {
+        let ev = parse("model 1 2 Stanford Bunny\neffect-model 2/shape Utah Teapot\nassert triangles 1 2 > 1000\n").unwrap();
+        assert_eq!(ev[0].cmd, Cmd::Model(0, 1, "Stanford Bunny".into()));
+        assert_eq!(ev[1].cmd, Cmd::EffectModel("2/shape".into(), "Utah Teapot".into()));
+        assert_eq!(ev[2].cmd, Cmd::Assert(Query::Triangles(0, 1), Op::Gt, 1000.0));
+        assert!(parse("model 1 2\n").is_err());
+        assert!(parse("effect-model 1/shape\n").is_err());
     }
 
     #[test]

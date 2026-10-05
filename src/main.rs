@@ -7,7 +7,9 @@ mod clip;
 mod composition;
 mod effects;
 mod isf_library;
+mod meshes;
 mod midi;
+mod model;
 mod modulation;
 mod param;
 mod punch;
@@ -388,11 +390,11 @@ impl App {
                     }
                 }
                 GridAction::LoadFile { layer, col } => {
+                    let mut exts = vec!["png", "jpg", "jpeg", "gif", "webp", "bmp", "mp4", "mov", "m4v", "mkv", "webm", "avi", "glsl", "frag", "fs", "isf", "wgsl"];
+                    exts.extend(model::formats::EXTENSIONS);
                     if let Some(path) = rfd::FileDialog::new()
-                        .add_filter(
-                            "media",
-                            &["png", "jpg", "jpeg", "gif", "webp", "bmp", "mp4", "mov", "m4v", "mkv", "webm", "avi", "glsl", "frag", "fs", "isf", "wgsl"],
-                        )
+                        .add_filter("media", &exts)
+                        .add_filter("3D models", model::formats::EXTENSIONS)
                         .pick_file()
                     {
                         self.load_file(layer, col, path);
@@ -435,13 +437,17 @@ impl App {
         }
     }
 
-    /// Put an ISF shader from the browser to use. Generators load into `col` (or the
+    /// Put something from the browser to use. Generators and models load into `col` (or the
     /// selected / first free cell of `layer`); effects go on `layer`, or the master chain when
     /// `layer` is `None`.
     fn use_library(&mut self, d: &isf_library::Drag, layer: Option<usize>, col: Option<usize>) {
-        let shader = self.library.find(&d.key).ok_or_else(|| format!("{} is no longer in the library", d.name)).and_then(|e| e.shader());
+        use isf_library::Kind;
         let result = match d.kind {
-            isf_library::Kind::Generator => {
+            Kind::Generator | Kind::Model => {
+                let clip = match d.kind {
+                    Kind::Model => self.library.model(&d.key).map(Clip::model),
+                    _ => self.library_shader(d).map(Clip::from_shader),
+                };
                 let layer = layer.unwrap_or(self.grid.selected_layer);
                 let free = |comp: &Composition| comp.layers[layer].clips.iter().position(|c| c.is_none());
                 let col = col
@@ -451,14 +457,13 @@ impl App {
                         self.comp.add_column();
                         self.comp.columns - 1
                     });
-                shader.map(|s| {
-                    let c = Clip::from_shader(s);
+                clip.map(|c| {
                     self.status = format!("Loaded {} into {} / column {}", c.name, self.comp.layers[layer].name, col + 1);
                     self.comp.set_clip(layer, col, c);
                     self.grid.selected_clip = Some((layer, col));
                 })
             }
-            _ => shader.map(|s| {
+            _ => self.library_shader(d).map(|s| {
                 let mut e = Effect::new(EffectKind::Shader);
                 e.custom = Some(Box::new(s));
                 let chain = match layer {
@@ -479,13 +484,26 @@ impl App {
         }
     }
 
+    fn library_shader(&self, d: &isf_library::Drag) -> Result<shader::CustomShader, String> {
+        self.library.find(&d.key).ok_or_else(|| format!("{} is no longer in the library", d.name)).and_then(|e| e.shader())
+    }
+
     fn handle_library(&mut self, actions: Vec<ui::library::LibraryAction>) {
         use ui::library::LibraryAction;
         for a in actions {
             match a {
                 LibraryAction::Use(d) => {
-                    let layer = (self.tab == Tab::Layer || d.kind == isf_library::Kind::Generator).then_some(self.grid.selected_layer);
+                    let clip = matches!(d.kind, isf_library::Kind::Generator | isf_library::Kind::Model);
+                    let layer = (self.tab == Tab::Layer || clip).then_some(self.grid.selected_layer);
                     self.use_library(&d, layer, None);
+                }
+                LibraryAction::AddFiles => {
+                    if let Some(files) = rfd::FileDialog::new().add_filter("3D models", model::formats::EXTENSIONS).pick_files() {
+                        let n = files.len();
+                        self.library.add_files(files);
+                        self.library_view.kind = isf_library::Kind::Model;
+                        self.status = format!("Added {n} model{} to the library (My Models)", if n == 1 { "" } else { "s" });
+                    }
                 }
                 LibraryAction::AddFolder => {
                     if let Some(dir) = rfd::FileDialog::new().pick_folder()
@@ -1597,12 +1615,12 @@ impl eframe::App for App {
                         let (size, gpu, clips) = (self.renderer.size(), self.renderer.gpu_memory(), self.clip_memory());
                         let mut resize = None;
                         let size_edit = &mut self.size_edit;
-                        ui::devices::master_chain(ui, &mut self.comp, clock, |ui| resize = output_card(ui, size, gpu, clips, size_edit));
+                        ui::devices::master_chain(ui, &mut self.comp, &self.library, clock, |ui| resize = output_card(ui, size, gpu, clips, size_edit));
                         if let Some(s) = resize {
                             self.resize_from_ui(s);
                         }
                     } else {
-                        ui::devices::layer_chain(ui, &mut self.comp, li, clip_col, clock);
+                        ui::devices::layer_chain(ui, &mut self.comp, &self.library, li, clip_col, clock);
                     }
                 });
 
