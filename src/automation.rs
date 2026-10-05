@@ -183,6 +183,16 @@ impl App {
                     _ => return Err(format!("quantize {q:?}: use off / beat / bar")),
                 }
             }
+            Cmd::Crossfade(mode, curve) => {
+                self.comp.crossfade = *mode;
+                if let Some(c) = curve {
+                    self.comp.fade_curve = *c;
+                }
+            }
+            Cmd::Side(l, side) => {
+                self.ensure_layer(*l);
+                self.comp.layers[*l].side = *side;
+            }
             Cmd::Play(p) => self.comp.playing = *p,
             Cmd::PadDown(i) => self.punch.pads[*i].script_held = true,
             Cmd::PadUp(i) => self.punch.pads[*i].script_held = false,

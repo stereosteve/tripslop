@@ -19,6 +19,8 @@
 
 use std::path::PathBuf;
 
+use crate::composition::{Crossfade, FadeCurve, Side};
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum When {
     Frame(u64),
@@ -97,6 +99,8 @@ pub enum Cmd {
     Set(String, f32),
     Bpm(f32),
     Quantize(String),
+    Crossfade(Crossfade, Option<FadeCurve>),
+    Side(usize, Side),
     Play(bool),
     PadDown(usize),
     PadUp(usize),
@@ -243,6 +247,30 @@ fn parse_cmd(w: &[String]) -> Result<Vec<Cmd>, String> {
         }
         "bpm" => one(Cmd::Bpm(num(w.get(1), "bpm")?)),
         "quantize" => one(Cmd::Quantize(w.get(1).ok_or("missing off/beat/bar")?.clone())),
+        "crossfade" => {
+            let mode = match w.get(1).map(String::as_str) {
+                Some("bank") => Crossfade::Bank,
+                Some("layer") => Crossfade::Layer,
+                _ => return Err("crossfade needs bank / layer".into()),
+            };
+            let curve = match w.get(2).map(String::as_str) {
+                None => None,
+                Some("linear") => Some(FadeCurve::Linear),
+                Some("smooth") => Some(FadeCurve::Smooth),
+                Some("cut") => Some(FadeCurve::Cut),
+                Some(c) => return Err(format!("crossfade curve {c:?}: use linear / smooth / cut")),
+            };
+            one(Cmd::Crossfade(mode, curve))
+        }
+        "side" => {
+            let side = match w.get(2).map(String::as_str) {
+                Some("a" | "A") => Side::A,
+                Some("b" | "B") => Side::B,
+                Some("off" | "both") => Side::Both,
+                _ => return Err("side needs a layer and a / b / off".into()),
+            };
+            one(Cmd::Side(idx(w.get(1), "layer")?, side))
+        }
         "play" => one(Cmd::Play(true)),
         "pause" => one(Cmd::Play(false)),
         "pad" => {
@@ -363,6 +391,17 @@ mod tests {
         assert!(parse("at 2b x\n").unwrap_err().starts_with("line 1: unknown command"));
         assert!(parse("at 2b demo\nat +3 demo\n").unwrap_err().contains("same unit"));
         assert!(parse("pad Z down\n").unwrap_err().contains("no pad"));
+    }
+
+    #[test]
+    fn crossfade_and_sides() {
+        let ev = parse("crossfade bank smooth\ncrossfade layer\nside 2 b\nside 1 off\n").unwrap();
+        assert_eq!(ev[0].cmd, Cmd::Crossfade(Crossfade::Bank, Some(FadeCurve::Smooth)));
+        assert_eq!(ev[1].cmd, Cmd::Crossfade(Crossfade::Layer, None));
+        assert_eq!(ev[2].cmd, Cmd::Side(1, Side::B));
+        assert_eq!(ev[3].cmd, Cmd::Side(0, Side::Both));
+        assert!(parse("crossfade bank wobbly\n").unwrap_err().contains("curve"));
+        assert!(parse("side 1 c\n").is_err());
     }
 
     #[test]

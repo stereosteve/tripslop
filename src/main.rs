@@ -791,7 +791,7 @@ impl App {
             ui.spacing_mut().slider_width = w;
             ui.add_sized([22.0, 18.0], egui::Label::new(RichText::new("A").strong()));
             ui.add(egui::Slider::new(&mut self.comp.crossfader.value, 0.0..=1.0).show_value(false))
-                .on_hover_text("Crossfader: layers assigned to A / B fade (←/→)");
+                .on_hover_text("Crossfader between the A and B layers (←/→); the mode is on the Composition tab");
             ui.label(RichText::new("B").strong());
         });
         ui.horizontal(|ui| {

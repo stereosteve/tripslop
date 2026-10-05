@@ -1,7 +1,7 @@
 // Composites one layer (premultiplied) onto the composition so far.
 
 struct CompU {
-    a: vec4<f32>, // blend mode, opacity, unused, unused
+    a: vec4<f32>, // blend mode (9 = crossfade), opacity (or crossfade amount), unused, unused
 };
 
 @group(0) @binding(0) var<uniform> u: CompU;
@@ -18,6 +18,10 @@ fn overlay(b: vec3<f32>, s: vec3<f32>) -> vec3<f32> {
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let d = textureSampleLevel(base_tex, samp, in.uv, 0.0);
+    if i32(u.a.x) == 9 {
+        // Crossfade: dissolve from the base (bank A) to the layer (bank B) by the amount.
+        return mix(d, textureSampleLevel(layer_tex, samp, in.uv, 0.0), u.a.y);
+    }
     let s = textureSampleLevel(layer_tex, samp, in.uv, 0.0) * u.a.y;
     let a = s.a;
     let sc = select(vec3<f32>(0.0), s.rgb / max(a, 0.0001), a > 0.0001); // straight colour

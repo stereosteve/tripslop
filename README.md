@@ -48,6 +48,17 @@ Lighten, Darken, Overlay, Subtract), an A/B crossfader assignment, bypass/solo, 
 It also has its own effect chain. Drag or scroll on the output monitor to move or scale the
 selected layer.
 
+**Crossfader.** Assign layers to side A or B (or leave them unassigned). The Composition tab
+picks how the fader mixes:
+* **Banks** (the default): A layers and B layers are composited into two separate pictures,
+  and the fader dissolves between them. Unassigned layers are part of both pictures, in their
+  usual place in the stack. The curve is *Linear*, *Smooth* (eases in and out of the ends)
+  or *Cut* (switches at the middle). A layer on the side that's faded out keeps running, so
+  its feedback is still there when you fade back.
+* **Layer opacity**: the fader scales the opacity of A and B layers in place. Both sides are at
+  full opacity in the middle, so an opaque layer on top hides the other side until the fader
+  passes the middle.
+
 **Clips.**
 * Loop modes: **Loop**, **Bounce**, **Random** (jumps somewhere new every beat), **Play
   once** (then the layer goes empty) and **Play once & hold**.
@@ -253,6 +264,7 @@ Layers and columns are **1-based**, like the UI.
 | `add-effect L NAME` · `add-effect master NAME` | add an effect by name; `shader:TEMPLATE` adds a code effect, `file:PATH` a shader file (e.g. an ISF `.fs`) |
 | `set PATH VALUE` | set a parameter (see paths below) |
 | `bpm N` · `quantize off/beat/bar` · `play` · `pause` | transport |
+| `crossfade bank/layer [linear/smooth/cut]` · `side L a/b/off` | crossfader mode and curve; a layer's side |
 | `pad KEY down/up/latch/unlatch` · `hold KEY DURATION` | punch-in pads, by key, name or number |
 | `select L C` · `tab layer/composition` · `open-editor L C` | UI state, for screenshots |
 | `snapshot PATH` · `screenshot PATH` · `record start/stop` | output frame, full window, video |
@@ -273,7 +285,7 @@ case-insensitively by prefix, so `2/feedback/rot` works. Paths can contain space
 **Tests:**
 * `cargo test` runs the unit tests (no window).
 * `cargo test --release -- --ignored` also runs the scripts in `scripts/` (smoke, shaders,
-  punch tour) as end-to-end tests. These need a GPU and a window session. Captures go to
+  punch tour, shape, projection, crossfade) as end-to-end tests. These need a GPU and a window session. Captures go to
   `target/script-out/`.
 
 For a quick single still, use `TRIPSLOP_SNAPSHOT=<frames>:<out.png>`. It saves the output after
@@ -285,8 +297,8 @@ that many frames and quits.
 for each layer (bottom → top):
     clip(s) ── clip pass: transform, fit, transition ──► layer texture
     layer   ── effect → effect → … (each with an optional history ring) ──►
-    comp    ── composite: blend mode × opacity × crossfader ──► comp
-comp ── master effects ──► final (master fader) ──► screen / output window / recorder
+    layer   ── composite: blend mode × opacity ──► bank A and/or bank B
+crossfade(bank A, bank B) ── master effects ──► final (master fader) ──► screen / output window / recorder
 ```
 
 Everything runs on a fixed 60 Hz clock, so effects, delays and BPM sync behave the same on

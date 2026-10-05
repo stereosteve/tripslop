@@ -1,0 +1,33 @@
+# Bank crossfader: A and B are composited separately, then dissolved.
+# Run from the repo root:  cargo run --release -- --script scripts/crossfade.tripslop
+# tests/scripts.rs compares the snapshots' pixels.
+
+generator 1 1 solid
+generator 2 1 solid
+generator 3 1 solid
+set 1/clip1/hue 0.6
+set 2/clip1/hue 0.0
+set 3/clip1/hue 0.3
+set 3/opacity 0.5         # unassigned, half see-through: should sit over both banks
+side 1 b                  # bottom
+side 2 a                  # top and opaque: in layer mode it hides B until past the middle
+launch-scene 1
+
+crossfade bank linear
+set master/crossfader 0
+at 5  snapshot target/script-out/crossfade/a.png
+at 6  set master/crossfader 1
+at 10 snapshot target/script-out/crossfade/b.png
+at 11 set master/crossfader 0.5
+at 15 snapshot target/script-out/crossfade/mid.png
+at 16 crossfade bank smooth
+at 16 set master/crossfader 0.25
+at 20 snapshot target/script-out/crossfade/smooth-quarter.png
+at 21 crossfade layer
+at 21 set master/crossfader 0.5
+at 25 snapshot target/script-out/crossfade/layer-mid.png
+at 26 crossfade bank linear
+at 26 set master/crossfader 0
+at 26 set 3/opacity 0
+at 30 snapshot target/script-out/crossfade/a-alone.png
+at 31 quit

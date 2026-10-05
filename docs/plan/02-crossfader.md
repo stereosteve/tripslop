@@ -1,5 +1,15 @@
 # 2. Bank crossfader
 
+**Status: done**, with one change from the plan below. Unassigned (`Both`) layers keep their
+place in the stack and go into *both* banks, instead of being composited on top of the mix.
+That way a background layer left unassigned stays underneath, and the result is still
+exact: `mix(A + L, B + L) = L + mix(A, B)`. Each layer still renders its clips and effects
+once; only the cheap composite pass runs twice. Curves are Linear / Smooth / Cut (an
+equal-power curve brightens a video dissolve, so it was left out). There are no saved sets
+yet, so bank mode is simply the default, with *Layer opacity* as the alternative.
+`scripts/crossfade.tripslop` and the `crossfade` test in `tests/scripts.rs` check the actual
+pixels.
+
 ## Problem
 
 The A/B crossfader currently scales each layer's opacity (`Composition::side_gain`):

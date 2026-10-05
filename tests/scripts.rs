@@ -66,3 +66,32 @@ fn shape_projector() {
 fn projection_mapping() {
     run("scripts/projection.tripslop");
 }
+
+#[test]
+#[ignore = "opens a window; needs a GPU"]
+fn crossfade() {
+    run("scripts/crossfade.tripslop");
+    let px = |name: &str| -> [f32; 3] {
+        let path = format!("{}/target/script-out/crossfade/{name}.png", env!("CARGO_MANIFEST_DIR"));
+        let img = image::open(&path).unwrap_or_else(|e| panic!("{path}: {e}")).to_rgb8();
+        let p = img.get_pixel(img.width() / 2, img.height() / 2).0;
+        println!("{name}: {p:?}");
+        p.map(|c| c as f32)
+    };
+    let close = |what: &str, got: [f32; 3], want: [f32; 3]| {
+        assert!(got.iter().zip(want).all(|(g, w)| (g - w).abs() <= 2.0), "{what}: got {got:?}, want {want:?}");
+    };
+    let lerp = |a: [f32; 3], b: [f32; 3], t: f32| [0, 1, 2].map(|i| a[i] + (b[i] - a[i]) * t);
+    let (a, b) = (px("a"), px("b"));
+    assert!(a.iter().zip(b).any(|(x, y)| (x - y).abs() > 40.0), "the banks should look different: {a:?} vs {b:?}");
+    // The middle is a true 50/50 dissolve, with the unassigned layer still on top.
+    close("mid", px("mid"), lerp(a, b, 0.5));
+    // Smooth curve at 0.25: 0.25² · (3 − 2 · 0.25) = 0.15625 of B.
+    close("smooth quarter", px("smooth-quarter"), lerp(a, b, 0.15625));
+    // Layer-opacity mode: both sides are at full opacity in the middle, so the opaque A layer
+    // on top hides B completely.
+    close("layer mid", px("layer-mid"), a);
+    // The unassigned layer is part of the banks (here: hidden again, bank A changes).
+    let alone = px("a-alone");
+    assert!(alone.iter().zip(a).any(|(x, y)| (x - y).abs() > 10.0), "unassigned layer missing from bank A");
+}

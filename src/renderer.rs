@@ -4,9 +4,13 @@
 //! for each layer (bottom → top):
 //!     clip(s) ──clip pass (transform, fit, transition)──► layer tex
 //!     layer tex ──effect → effect → …──► (ping-pong)          (delay rings per effect)
-//!     comp ──composite (blend mode, opacity × crossfader)──► comp
-//! comp ──master effects──► comp ──final (master fader)──► output ─► screen / recorder
+//!     layer tex ──composite (blend mode, opacity)──► bank A and/or bank B
+//! mix(bank A, bank B, crossfader) ──master effects──► final (master fader) ──► output
 //! ```
+//!
+//! Banks only exist in bank crossfade mode when some layer is assigned to A or B: A layers
+//! go into bank A, B layers into bank B and unassigned ones into both. Otherwise there's a
+//! single composition. The output goes to the screen, output window and recorder.
 //!
 //! GPU resources are keyed by the model's ids (clip, layer, effect) and created on demand;
 //! anything not used in a frame is freed.
@@ -17,7 +21,7 @@ use eframe::egui;
 use eframe::egui_wgpu::{self, wgpu};
 
 use crate::clip::{Clip, Media};
-use crate::composition::Composition;
+use crate::composition::{Composition, Side};
 use crate::effects::{EFFECTS, Effect, EffectKind, HistorySource};
 use crate::modulation::Clock;
 use crate::punch::Punch;
@@ -31,6 +35,8 @@ const RENDER: wgpu::TextureUsages = wgpu::TextureUsages::RENDER_ATTACHMENT
     .union(wgpu::TextureUsages::COPY_SRC)
     .union(wgpu::TextureUsages::COPY_DST);
 const NOISE_SIZE: u32 = 256;
+/// composite.wgsl mode that dissolves to the second texture instead of blending it on top.
+const XFADE: f32 = 9.0;
 pub const THUMB_W: u32 = 192;
 pub const THUMB_H: u32 = 108;
 /// Moment at which generator / shader previews are rendered (seconds, beats).
@@ -100,8 +106,11 @@ pub struct Renderer {
     sources: HashMap<u64, SourceTex>,
     layers: HashMap<u64, [Tex; 2]>,
     rings: HashMap<u64, Ring>,
-    /// Composition ping-pong buffers (taken out of `self` while rendering).
+    /// Composition ping-pong buffers (taken out of `self` while rendering). In bank
+    /// crossfade mode these hold bank A.
     comp: Option<[Tex; 2]>,
+    /// Bank B's ping-pong buffers; allocated the first time anything is assigned to B.
+    bank_b: Option<[Tex; 2]>,
     output: Tex,
     pub display_id: egui::TextureId,
     // User shaders.
@@ -404,6 +413,7 @@ impl Renderer {
             layers: HashMap::new(),
             rings: HashMap::new(),
             comp,
+            bank_b: None,
             output,
             display_id,
             vs_module,
@@ -417,6 +427,14 @@ impl Renderer {
             preview_gl,
             tick: 0,
         }
+    }
+
+    /// Composite `src` onto `bufs[cur]` (composite.wgsl mode `blend`); returns the new index.
+    fn composite(&mut self, enc: &mut wgpu::CommandEncoder, bufs: &[Tex; 2], cur: usize, src: &wgpu::TextureView, blend: f32, amount: f32) -> usize {
+        let ub = self.uniform(&[[blend, amount, 0.0, 0.0]]);
+        let bg = self.bind(&self.composite_pipe.layout, ub, &[&bufs[cur].view, src]);
+        pass(enc, &bufs[1 - cur].view, None, &self.composite_pipe, &bg);
+        1 - cur
     }
 
     /// A fresh uniform buffer for this pass (each pass in a frame needs its own data).
@@ -719,6 +737,22 @@ impl Renderer {
         let comp_bufs = self.comp.take().expect("composition buffers");
         clear_pass(&mut enc, &comp_bufs[0].view, wgpu::Color::BLACK);
         let mut cur = 0;
+        // Bank crossfade: B layers go into `bank_b`, A layers into `comp_bufs`, unassigned
+        // layers into both. A bank that's faded out entirely isn't composited at all.
+        let mix = comp.bank_mix();
+        let bank_b = mix.map(|_| {
+            self.bank_b
+                .take()
+                .unwrap_or_else(|| [tex2d(&self.device, "bank b", WIDTH, HEIGHT, RENDER), tex2d(&self.device, "bank b'", WIDTH, HEIGHT, RENDER)])
+        });
+        if let Some(b) = &bank_b {
+            clear_pass(&mut enc, &b[0].view, wgpu::Color::BLACK);
+        }
+        let mut cur_b = 0;
+        let (into_a, into_b) = match mix {
+            Some(t) => (t < 1.0, t > 0.0),
+            None => (true, false),
+        };
 
         for li in 0..comp.layers.len() {
             if !comp.layer_audible(li) {
@@ -786,25 +820,43 @@ impl Renderer {
             fx.extend(punch.layer_effects(layer.id));
             let lc = self.chain(&mut enc, fx, &bufs, 0, clock, &mut used_fx);
 
-            // Composite onto the composition.
+            // Composite onto the composition (or the layer's bank).
             if opacity > 0.0 {
-                let ub = self.uniform(&[[layer.blend as u32 as f32, opacity, 0.0, 0.0]]);
-                let bg = self.bind(&self.composite_pipe.layout, ub, &[&comp_bufs[cur].view, &bufs[lc].view]);
-                pass(&mut enc, &comp_bufs[1 - cur].view, None, &self.composite_pipe, &bg);
-                cur = 1 - cur;
+                let blend = layer.blend as u32 as f32;
+                let side = layer.side;
+                if into_a && side != Side::B {
+                    cur = self.composite(&mut enc, &comp_bufs, cur, &bufs[lc].view, blend, opacity);
+                }
+                if let Some(b) = bank_b.as_ref().filter(|_| into_b && side != Side::A) {
+                    cur_b = self.composite(&mut enc, b, cur_b, &bufs[lc].view, blend, opacity);
+                }
             }
             self.layers.insert(layer.id, bufs);
+        }
+
+        // Dissolve the banks. At either end the other bank was never drawn: use this one as is.
+        let mut main = &comp_bufs;
+        if let (Some(t), Some(b)) = (mix, &bank_b) {
+            if t >= 1.0 {
+                main = b;
+                cur = cur_b;
+            } else if t > 0.0 {
+                cur = self.composite(&mut enc, &comp_bufs, cur, &b[cur_b].view, XFADE, t);
+            }
         }
 
         // Master effects.
         let mut fx: Vec<&mut Effect> = comp.effects.iter_mut().collect();
         fx.extend(punch.master_effects());
-        cur = self.chain(&mut enc, fx, &comp_bufs, cur, clock, &mut used_fx);
+        cur = self.chain(&mut enc, fx, main, cur, clock, &mut used_fx);
 
         let ub = self.uniform(&[[comp.master.get() * comp.master_perf, 0.0, 0.0, 0.0]]);
-        let bg = self.bind(&self.final_pipe.layout, ub, &[&comp_bufs[cur].view]);
+        let bg = self.bind(&self.final_pipe.layout, ub, &[&main[cur].view]);
         pass(&mut enc, &self.output.view, None, &self.final_pipe, &bg);
         self.comp = Some(comp_bufs);
+        if bank_b.is_some() {
+            self.bank_b = bank_b;
+        }
         // Keep a GL-oriented copy for user shaders' iChannel3.
         let ub = self.uniform(&[[3.0, 1.0, 0.0, 0.0]]);
         let bg = self.bind(&self.flip_pipe.layout, ub, &[&self.output.view]);

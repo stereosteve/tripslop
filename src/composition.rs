@@ -54,6 +54,63 @@ pub enum Side {
     B,
 }
 
+/// How the A/B crossfader mixes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Crossfade {
+    /// Each side is composited into its own bank (with the unassigned layers in their usual
+    /// places), and the fader dissolves between the two finished images.
+    Bank,
+    /// The fader scales the opacity of A / B layers, which stay in layer order: both are at
+    /// full opacity in the middle.
+    Layer,
+}
+
+impl Crossfade {
+    pub const ALL: [Crossfade; 2] = [Crossfade::Bank, Crossfade::Layer];
+    pub fn name(self) -> &'static str {
+        match self {
+            Crossfade::Bank => "Crossfade: banks",
+            Crossfade::Layer => "Crossfade: layer opacity",
+        }
+    }
+}
+
+/// Crossfader response in bank mode.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FadeCurve {
+    Linear,
+    /// Eases in and out of the ends.
+    Smooth,
+    /// Hard switch at the middle.
+    Cut,
+}
+
+impl FadeCurve {
+    pub const ALL: [FadeCurve; 3] = [FadeCurve::Linear, FadeCurve::Smooth, FadeCurve::Cut];
+    pub fn name(self) -> &'static str {
+        match self {
+            FadeCurve::Linear => "Linear",
+            FadeCurve::Smooth => "Smooth",
+            FadeCurve::Cut => "Cut",
+        }
+    }
+    /// Amount of B for a fader position `x` (0 = A, 1 = B).
+    pub fn apply(self, x: f32) -> f32 {
+        let x = x.clamp(0.0, 1.0);
+        match self {
+            FadeCurve::Linear => x,
+            FadeCurve::Smooth => x * x * (3.0 - 2.0 * x),
+            FadeCurve::Cut => {
+                if x < 0.5 {
+                    0.0
+                } else {
+                    1.0
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Quantize {
     Off,
@@ -263,6 +320,8 @@ pub struct Composition {
     pub columns: usize,
     pub master: Param,
     pub crossfader: Param,
+    pub crossfade: Crossfade,
+    pub fade_curve: FadeCurve,
     pub effects: Vec<Effect>,
     pub bpm: f32,
     pub quantize: Quantize,
@@ -281,6 +340,8 @@ impl Composition {
             columns,
             master: Param::new(Spec::new("master", 0.0, 1.0, 1.0)),
             crossfader: Param::new(Spec::new("crossfader", 0.0, 1.0, 0.5)),
+            crossfade: Crossfade::Bank,
+            fade_curve: FadeCurve::Linear,
             effects: Vec::new(),
             bpm: 120.0,
             quantize: Quantize::Off,
@@ -354,14 +415,26 @@ impl Composition {
         self.pending.contains(&what)
     }
 
-    /// Crossfader gain for a layer.
+    /// Crossfader gain for a layer's opacity. Always 1 in bank mode, where the fader mixes
+    /// the finished banks instead (see [`Composition::bank_mix`]).
     pub fn side_gain(&self, side: Side) -> f32 {
         let x = self.crossfader.get();
+        if self.crossfade == Crossfade::Bank {
+            return 1.0;
+        }
         match side {
             Side::Both => 1.0,
             Side::A => (2.0 * (1.0 - x)).min(1.0),
             Side::B => (2.0 * x).min(1.0),
         }
+    }
+
+    /// In bank mode with any audible layer on A or B: how much of bank B is in the mix (0 = all
+    /// A, 1 = all B). `None` means there's just one composition to draw.
+    pub fn bank_mix(&self) -> Option<f32> {
+        let banked = self.crossfade == Crossfade::Bank
+            && (0..self.layers.len()).any(|i| self.layers[i].side != Side::Both && self.layer_audible(i));
+        banked.then(|| self.fade_curve.apply(self.crossfader.get()))
     }
 
     /// Is the layer drawn at all (bypass / solo)?
@@ -527,11 +600,46 @@ mod tests {
     #[test]
     fn crossfader_and_solo() {
         let mut c = comp();
+        c.crossfade = Crossfade::Layer;
         c.crossfader.set(0.0);
         assert_eq!(c.side_gain(Side::A), 1.0);
         assert_eq!(c.side_gain(Side::B), 0.0);
         c.layers[1].solo = true;
         assert!(!c.layer_audible(0));
         assert!(c.layer_audible(1));
+    }
+
+    #[test]
+    fn bank_mix_follows_the_fader_and_curve() {
+        let mut c = comp();
+        c.crossfader.set(0.25);
+        // Nothing assigned to a side: one composition, no bank mix.
+        assert_eq!(c.bank_mix(), None);
+        c.layers[0].side = Side::A;
+        assert_eq!(c.bank_mix(), Some(0.25));
+        // Layer opacity isn't touched in bank mode.
+        assert_eq!(c.side_gain(Side::A), 1.0);
+        assert_eq!(c.side_gain(Side::B), 1.0);
+        c.fade_curve = FadeCurve::Cut;
+        assert_eq!(c.bank_mix(), Some(0.0));
+        c.crossfader.set(0.5);
+        assert_eq!(c.bank_mix(), Some(1.0));
+        // Bypassed layers don't count as assigned.
+        c.layers[0].bypass = true;
+        assert_eq!(c.bank_mix(), None);
+        c.crossfade = Crossfade::Layer;
+        c.layers[0].bypass = false;
+        assert_eq!(c.bank_mix(), None);
+    }
+
+    #[test]
+    fn fade_curves_hit_the_ends() {
+        for curve in FadeCurve::ALL {
+            assert_eq!(curve.apply(0.0), 0.0, "{curve:?}");
+            assert_eq!(curve.apply(1.0), 1.0, "{curve:?}");
+        }
+        assert_eq!(FadeCurve::Linear.apply(0.5), 0.5);
+        assert_eq!(FadeCurve::Smooth.apply(0.5), 0.5);
+        assert!(FadeCurve::Smooth.apply(0.1) < 0.1);
     }
 }

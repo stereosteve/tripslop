@@ -3,7 +3,7 @@
 use eframe::egui::{self, RichText};
 
 use crate::clip::{Clip, Direction, Fit, LoopMode, Media, Sync};
-use crate::composition::{Blend, Composition, Quantize, Side};
+use crate::composition::{Blend, Composition, Crossfade, FadeCurve, Quantize, Side};
 use crate::effects::{EFFECTS, Effect, EffectKind, FEEDBACK_PRESETS, apply_feedback_preset};
 use crate::modulation::Clock;
 use crate::shader::{Role, TEMPLATES};
@@ -283,6 +283,30 @@ pub fn composition_panel(ui: &mut egui::Ui, comp: &mut Composition, clock: Clock
     section(ui, "Composition", true, |ui| {
         widgets::param(ui, &mut comp.master, clock);
         widgets::param(ui, &mut comp.crossfader, clock);
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt("crossfade mode")
+                .selected_text(comp.crossfade.name())
+                .show_ui(ui, |ui| {
+                    for m in Crossfade::ALL {
+                        ui.selectable_value(&mut comp.crossfade, m, m.name());
+                    }
+                })
+                .response
+                .on_hover_text(
+                    "Banks: A and B layers are composited separately (unassigned layers go in both) and the \
+                     fader dissolves between the two pictures.\nLayer opacity: the fader fades the opacity of \
+                     A / B layers in place.",
+                );
+            if comp.crossfade == Crossfade::Bank {
+                egui::ComboBox::from_id_salt("fade curve")
+                    .selected_text(comp.fade_curve.name())
+                    .show_ui(ui, |ui| {
+                        for c in FadeCurve::ALL {
+                            ui.selectable_value(&mut comp.fade_curve, c, c.name());
+                        }
+                    });
+            }
+        });
         ui.horizontal(|ui| {
             egui::ComboBox::from_id_salt("quantize")
                 .selected_text(comp.quantize.name())
