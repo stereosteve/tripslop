@@ -182,6 +182,13 @@ fn exit_with(msg: &str, code: i32) -> ! {
     std::process::exit(code)
 }
 
+/// Session (edit everything) or Perform (just what you play).
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum View {
+    Session,
+    Perform,
+}
+
 /// What the device panel shows.
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum DeviceTab {
@@ -203,6 +210,7 @@ struct App {
     grid: GridView,
     tab: Tab,
     device_tab: DeviceTab,
+    view: View,
     sim_time: f64,
     beat: f64,
     last_frame: Instant,
@@ -258,6 +266,7 @@ impl App {
             },
             tab: Tab::Layer,
             device_tab: DeviceTab::Devices,
+            view: View::Session,
             shown_editing: None,
             sim_time: 0.0,
             beat: 0.0,
@@ -576,6 +585,9 @@ impl App {
         }
         if pressed(Key::B) && !command {
             self.show_library = !self.show_library;
+        }
+        if pressed(Key::Tab) && !command {
+            self.view = if self.view == View::Session { View::Perform } else { View::Session };
         }
         if cmd(Key::K) {
             self.renderer.clear_history();
@@ -1070,7 +1082,16 @@ impl App {
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
-                if ui.button("⛶ Perform").on_hover_text("Fullscreen output (Cmd/Ctrl+F, Esc to leave)").clicked() {
+                // Session | Perform (laid out right to left).
+                for (v, label) in [(View::Perform, "Perform"), (View::Session, "Session")] {
+                    let on = self.view == v;
+                    let b = egui::Button::new(RichText::new(label).font(theme::semibold(13.0)).color(if on { theme::ON_LIT } else { theme::MUTED }))
+                        .fill(if on { theme::LIVE } else { theme::GROUND });
+                    if ui.add(b).on_hover_text("Session / Perform view (Tab)").clicked() {
+                        self.view = v;
+                    }
+                }
+                if ui.button("⛶").on_hover_text("Fullscreen output (Cmd/Ctrl+F, Esc to leave)").clicked() {
                     self.perform = true;
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
                 }
@@ -1165,6 +1186,76 @@ impl App {
         }
         if self.recorder.is_some() {
             ui.painter().circle_filled(rect.right_top() + egui::vec2(-14.0, 14.0), 6.0, ui::theme::RECORD);
+        }
+    }
+
+    /// The Perform view: big output and channel strips, scene buttons along the bottom, pads
+    /// and the crossfader on the right.
+    fn perform_layout(&mut self, ui: &mut egui::Ui, blink: bool) {
+        use ui::theme;
+        egui::Panel::right("perform rail")
+            .exact_size(452.0)
+            .frame(egui::Frame::new().fill(theme::SUNKEN).inner_margin(16))
+            .show(ui, |ui| {
+                let beat = self.beat;
+                let pads_h = (ui.available_height() - 170.0).min(4.0 * 92.0 + 3.0 * 6.0);
+                ui::punch::pads(ui, &mut self.punch, beat, pads_h);
+                ui.add_space((ui.available_height() - 110.0).max(8.0));
+                self.crossfader(ui);
+            });
+        let thumbs = self.renderer.thumbnails();
+        egui::Panel::bottom("perform scenes")
+            .exact_size(150.0)
+            .frame(egui::Frame::new().fill(theme::GROUND).inner_margin(egui::Margin { left: 16, right: 16, top: 0, bottom: 16 }))
+            .show(ui, |ui| {
+                if let Some(col) = ui::perform::scenes(ui, &self.comp, blink, &thumbs) {
+                    self.comp.launch(Launch::Column(col));
+                }
+            });
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::GROUND).inner_margin(16)).show(ui, |ui| {
+            let (ow, oh) = self.renderer.size();
+            let w = ui.available_width();
+            let h = (w * oh as f32 / ow as f32).min(ui.available_height() - 90.0).max(120.0);
+            ui.allocate_ui(egui::vec2(w, h), |ui| self.monitor(ui));
+            ui.add_space(10.0);
+            ui::perform::channels(ui, &mut self.comp, &thumbs);
+        });
+    }
+
+    /// End of every frame: script screenshots, quitting, and scheduling the next repaint.
+    fn after_ui(&mut self, ctx: &egui::Context) {
+        // Script screenshots: ask egui for the window image, save it when it arrives.
+        if self.pending_screenshot.is_some() && !self.screenshot_requested {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
+            self.screenshot_requested = true;
+        }
+        let shot = ctx.input(|i| {
+            i.raw.events.iter().find_map(|e| match e {
+                egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                _ => None,
+            })
+        });
+        if let Some(img) = shot
+            && let Some(path) = self.pending_screenshot.take()
+        {
+            self.screenshot_requested = false;
+            let [w, h] = img.size;
+            let rgba: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
+            match image::RgbaImage::from_raw(w as u32, h as u32, rgba).map(|i| i.save(&path)) {
+                Some(Ok(())) => println!("{} saved screenshot {}", automation_stamp(self.frame_count, self.beat), path.display()),
+                _ => {
+                    eprintln!("could not save screenshot {}", path.display());
+                    automation::FAILED.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        }
+        if self.quit_requested && self.pending_screenshot.is_none() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        if self.fixed_step {
+            ctx.request_repaint();
+        } else {
+            ctx.request_repaint_after(Duration::from_secs_f64(1.0 / 120.0));
         }
     }
 
@@ -1394,6 +1485,10 @@ impl eframe::App for App {
             let bar = |fill| egui::Frame::new().fill(fill).inner_margin(egui::Margin::symmetric(12, 0));
             egui::Panel::top("transport").exact_size(46.0).frame(bar(theme::PANEL)).show(ui, |ui| self.transport_bar(ui));
             egui::Panel::bottom("status").exact_size(24.0).frame(bar(theme::PANEL)).show(ui, |ui| self.status_bar(ui));
+            if self.view == View::Perform {
+                self.perform_layout(ui, blink);
+                return self.after_ui(&ctx);
+            }
 
             // Right rail: everything you touch while playing.
             egui::Panel::right("rail")
@@ -1419,7 +1514,7 @@ impl eframe::App for App {
                     self.audio_panel(ui);
                     ui.add_space(4.0);
                     let beat = self.beat;
-                    let rest = ui.available_height() - 30.0;
+                    let rest = (ui.available_height() - 30.0).min(4.0 * 72.0 + 3.0 * 6.0);
                     ui::punch::pads(ui, &mut self.punch, beat, rest);
                 });
 
@@ -1538,38 +1633,6 @@ impl eframe::App for App {
                 });
         }
 
-        // Script screenshots: ask egui for the window image, save it when it arrives.
-        if self.pending_screenshot.is_some() && !self.screenshot_requested {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
-            self.screenshot_requested = true;
-        }
-        let shot = ctx.input(|i| {
-            i.raw.events.iter().find_map(|e| match e {
-                egui::Event::Screenshot { image, .. } => Some(image.clone()),
-                _ => None,
-            })
-        });
-        if let Some(img) = shot
-            && let Some(path) = self.pending_screenshot.take()
-        {
-            self.screenshot_requested = false;
-            let [w, h] = img.size;
-            let rgba: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
-            match image::RgbaImage::from_raw(w as u32, h as u32, rgba).map(|i| i.save(&path)) {
-                Some(Ok(())) => println!("{} saved screenshot {}", automation_stamp(self.frame_count, self.beat), path.display()),
-                _ => {
-                    eprintln!("could not save screenshot {}", path.display());
-                    automation::FAILED.store(true, std::sync::atomic::Ordering::Relaxed);
-                }
-            }
-        }
-        if self.quit_requested && self.pending_screenshot.is_none() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-        }
-        if self.fixed_step {
-            ctx.request_repaint();
-        } else {
-            ctx.request_repaint_after(Duration::from_secs_f64(1.0 / 120.0));
-        }
+        self.after_ui(&ctx);
     }
 }

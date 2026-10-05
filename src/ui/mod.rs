@@ -4,5 +4,6 @@ pub mod library;
 pub mod midi;
 pub mod widgets;
 pub mod shader_editor;
+pub mod perform;
 pub mod punch;
 pub mod theme;

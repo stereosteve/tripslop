@@ -30,7 +30,12 @@ fn run_with_env(script: &str, env: &[(&str, &str)]) {
         }
         if start.elapsed() > TIMEOUT {
             let _ = child.kill();
-            panic!("{script} timed out after {TIMEOUT:?} (missing `quit`?)");
+            let out = child.wait_with_output().expect("no output");
+            panic!(
+                "{script} timed out after {TIMEOUT:?} (missing `quit`?)\n--- stdout\n{}\n--- stderr\n{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
         }
         std::thread::sleep(Duration::from_millis(100));
     };

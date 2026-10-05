@@ -23,7 +23,7 @@ pub fn pads(ui: &mut egui::Ui, punch: &mut Punch, beat: f64, height: f32) {
     });
     let gap = 6.0;
     let w = ((ui.available_width() - gap * 3.0) / 4.0).max(30.0);
-    let h = ((height - gap * 3.0) / 4.0).clamp(40.0, 72.0);
+    let h = ((height - gap * 3.0) / 4.0).clamp(40.0, 96.0);
     for row in 0..4 {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = gap;

@@ -252,35 +252,14 @@ impl GridView {
 
         if let Some(clip) = layer.clips[col].as_ref() {
             painter.rect_filled(rect, 4.0, egui::Color32::BLACK);
-            let procedural = matches!(clip.media, Media::Generator(_) | Media::Shader(_));
-            let gpu_thumb = thumbs.get(&clip.id).filter(|_| procedural);
             let dim = if playing || pending { egui::Color32::WHITE } else { egui::Color32::from_gray(205) };
+            clip_picture(&painter, rect, clip, thumbs, dim);
             let tag = match &clip.media {
                 Media::Generator(_) => Some("GEN"),
                 Media::Shader(_) => Some("GLSL"),
                 Media::Camera { .. } => Some("CAM"),
                 _ => None,
             };
-            if let Some(t) = gpu_thumb {
-                painter.image(*t, rect, cover_uv(rect, 16.0 / 9.0), dim);
-            } else {
-                match (&clip.thumbnail, &clip.media) {
-                    (Some(t), _) => {
-                        let [w, h] = t.size();
-                        painter.image(t.id(), rect, cover_uv(rect, w as f32 / h.max(1) as f32), dim);
-                    }
-                    (None, Media::Generator(g)) => {
-                        let hue = (g.pattern.value * 0.14 + g.hue.value).fract();
-                        painter.rect_filled(rect, 4.0, egui::Color32::from(egui::ecolor::Hsva::new((hue + 0.33) % 1.0, 0.7, 0.3, 1.0)));
-                        painter.circle_filled(rect.center() - vec2(0.0, 8.0), 14.0, egui::Color32::from(egui::ecolor::Hsva::new(hue, 0.7, 0.6, 1.0)));
-                    }
-                    (None, Media::Shader(_)) => {
-                        painter.rect_filled(rect, 4.0, theme::RAISED_HI);
-                        painter.text(rect.center() - vec2(0.0, 8.0), egui::Align2::CENTER_CENTER, "{ }", theme::mono(18.0), theme::TEXT);
-                    }
-                    _ => {}
-                }
-            }
             if let Some(tag) = tag {
                 let galley = painter.layout_no_wrap(tag.into(), theme::mono(9.0), theme::TEXT);
                 let tr = Rect::from_min_size(rect.left_top() + vec2(4.0, 4.0), galley.size() + vec2(6.0, 2.0));
@@ -422,8 +401,38 @@ fn drop_hint(ui: &egui::Ui, rect: Rect, d: &Drag, layer: Option<&str>) {
     painter.galley(r.min + vec2(4.0, 2.0), text, Color32::BLACK);
 }
 
+/// A clip's picture cropped to fill `rect`: its rendered preview (generators and shaders),
+/// its thumbnail, or a stand-in.
+pub fn clip_picture(painter: &egui::Painter, rect: Rect, clip: &crate::clip::Clip, thumbs: &HashMap<u64, egui::TextureId>, tint: Color32) {
+    let procedural = matches!(clip.media, Media::Generator(_) | Media::Shader(_));
+    if let Some(t) = thumbs.get(&clip.id).filter(|_| procedural) {
+        painter.image(*t, rect, cover_uv(rect, 16.0 / 9.0), tint);
+        return;
+    }
+    match (&clip.thumbnail, &clip.media) {
+        (Some(t), _) => {
+            let [w, h] = t.size();
+            painter.image(t.id(), rect, cover_uv(rect, w as f32 / h.max(1) as f32), tint);
+        }
+        (None, Media::Generator(g)) => {
+            let hue = (g.pattern.value * 0.14 + g.hue.value).fract();
+            painter.rect_filled(rect, 4.0, Color32::from(egui::ecolor::Hsva::new((hue + 0.33) % 1.0, 0.7, 0.3, 1.0)));
+            painter.circle_filled(rect.center(), (rect.height() * 0.2).min(14.0), Color32::from(egui::ecolor::Hsva::new(hue, 0.7, 0.6, 1.0)));
+        }
+        (None, Media::Shader(_)) => {
+            painter.rect_filled(rect, 4.0, theme::RAISED_HI);
+            painter.text(rect.center(), egui::Align2::CENTER_CENTER, "{ }", theme::mono(16.0), theme::TEXT);
+        }
+        (None, Media::Camera { index, .. }) => {
+            painter.rect_filled(rect, 4.0, theme::RAISED_HI);
+            painter.text(rect.center(), egui::Align2::CENTER_CENTER, format!("CAM {index}"), theme::mono(12.0), theme::TEXT);
+        }
+        _ => {}
+    }
+}
+
 /// A small toggle that lights up in `on_color` (M / S on the layer header).
-fn toggle(ui: &mut egui::Ui, value: &mut bool, label: &str, on_color: Color32, hint: &str) {
+pub fn toggle(ui: &mut egui::Ui, value: &mut bool, label: &str, on_color: Color32, hint: &str) {
     let on = *value;
     let b = egui::Button::new(RichText::new(label).font(theme::bold(11.0)).color(if on { theme::ON_LIT } else { theme::MUTED }))
         .min_size(vec2(20.0, 18.0))

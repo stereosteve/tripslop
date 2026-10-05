@@ -13,7 +13,7 @@ blocking.
 | 5 | ✅ [MIDI](05-midi.md) | small–medium | Play the punch pads on hardware |
 | 6 | [Offline export](06-export.md) | small–medium | Frame-perfect renders from a script |
 | 7 | [Frame-time overlay](07-perf-overlay.md) | small | Know when you're dropping frames |
-| 8 | [UI redesign](08-ui-redesign.md) | large | It looks like a debug panel; hard to see what's live |
+| 8 | ✅ [UI redesign](08-ui-redesign.md) | large | It looks like a debug panel; hard to see what's live |
 
 The order is a suggestion. 4 and 5 are the fun ones, and nothing stops you doing them first.
 
