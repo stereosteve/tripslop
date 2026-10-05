@@ -179,7 +179,10 @@ struct App {
     perform: bool,
     show_output: bool,
     status: String,
+    /// Ticks (output frames) per second, measured by `update_fps`.
     fps: f32,
+    /// Start of the current fps measurement and the tick count then.
+    fps_window: (Instant, u64),
     frame_count: u64,
     recorder: Option<Recorder>,
     finishing: Vec<Finishing>,
@@ -224,6 +227,7 @@ impl App {
             show_output: false,
             status: "Drop media onto the grid, or right-click a cell. Number keys launch scenes.".into(),
             fps: 60.0,
+            fps_window: (Instant::now(), 0),
             frame_count: 0,
             recorder: None,
             finishing: Vec::new(),
@@ -670,9 +674,6 @@ impl App {
                 self.tick_once();
                 n += 1;
             }
-            if dt > 0.0 {
-                self.fps = self.fps * 0.95 + (1.0 / dt as f32) * 0.05;
-            }
             return;
         } else {
             if dt < TICK {
@@ -682,11 +683,18 @@ impl App {
             self.last_frame = if dt > TICK * 4.0 { now } else { self.last_frame + Duration::from_secs_f64(TICK * t as f64) };
             t
         };
-        if dt > 0.0 {
-            self.fps = self.fps * 0.95 + (1.0 / dt as f32) * 0.05;
-        }
         for _ in 0..ticks {
             self.tick_once();
+        }
+    }
+
+    /// Output frames rendered per second of wall-clock time, over half-second windows.
+    fn update_fps(&mut self) {
+        let (start, ticks) = self.fps_window;
+        let elapsed = start.elapsed().as_secs_f64();
+        if elapsed >= 0.5 {
+            self.fps = ((self.frame_count - ticks) as f64 / elapsed) as f32;
+            self.fps_window = (Instant::now(), self.frame_count);
         }
     }
 
@@ -927,6 +935,7 @@ impl eframe::App for App {
         self.poll_finished_recordings();
         self.handle_input(&ctx);
         self.render_frame();
+        self.update_fps();
         self.make_thumbnails(&ctx);
         self.library.poll();
         if let Some(id) = ui::shader_editor::take_request(&ctx) {
