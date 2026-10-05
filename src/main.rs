@@ -556,6 +556,9 @@ impl App {
         if pressed(Key::Enter) {
             self.tap();
         }
+        if pressed(Key::B) && !command {
+            self.show_library = !self.show_library;
+        }
         if cmd(Key::K) {
             self.renderer.clear_history();
         }
@@ -785,6 +788,21 @@ impl App {
 
     /// Audio input picker and level meter, in the top bar.
     fn audio_controls(&mut self, ui: &mut egui::Ui) {
+        // Drawn first: the top bar lays this out right to left, so the meter ends up after the menu.
+        // Level, bass, mid, high bars and a kick light.
+        let l = self.audio.levels;
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(52.0, 20.0), egui::Sense::hover());
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 2.0, ui::theme::GROUND);
+        for (i, v) in [l.level, l.bass, l.mid, l.high].into_iter().enumerate() {
+            let x = rect.left() + 2.0 + i as f32 * 10.0;
+            let h = (rect.height() - 4.0) * v.clamp(0.0, 1.0);
+            painter.rect_filled(Rect::from_min_max(pos2(x, rect.bottom() - 2.0 - h), pos2(x + 8.0, rect.bottom() - 2.0)), 1.0, ui::theme::AUDIO);
+        }
+        painter.circle_filled(pos2(rect.right() - 6.0, rect.center().y), 4.0, ui::theme::QUEUED.gamma_multiply(l.kick.max(0.08)));
+        if self.audio.source_name().is_some() {
+            ui.ctx().request_repaint();
+        }
         let current = self.audio.source_name().map(str::to_string);
         let label = match &current {
             Some(n) => format!("🔊 {n}"),
@@ -832,20 +850,6 @@ impl App {
                 Ok(()) => format!("Analysing {}", path.display()),
                 Err(e) => format!("Can't read audio: {e}"),
             };
-        }
-        // Level, bass, mid, high bars and a kick light.
-        let l = self.audio.levels;
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(52.0, 18.0), egui::Sense::hover());
-        let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 2.0, ui::theme::GROUND);
-        for (i, v) in [l.level, l.bass, l.mid, l.high].into_iter().enumerate() {
-            let x = rect.left() + 2.0 + i as f32 * 10.0;
-            let h = (rect.height() - 4.0) * v.clamp(0.0, 1.0);
-            painter.rect_filled(Rect::from_min_max(pos2(x, rect.bottom() - 2.0 - h), pos2(x + 8.0, rect.bottom() - 2.0)), 1.0, ui::theme::AUDIO);
-        }
-        painter.circle_filled(pos2(rect.right() - 6.0, rect.center().y), 4.0, ui::theme::QUEUED.gamma_multiply(l.kick.max(0.08)));
-        if self.audio.source_name().is_some() {
-            ui.ctx().request_repaint();
         }
     }
 
@@ -1009,87 +1013,115 @@ impl App {
     // ------------------------------------------------------------------ UI
 
     fn transport_bar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal_wrapped(|ui| {
-            ui.add(egui::Image::new(egui::include_image!("../logos/tripslop-wordmark-color.svg")).fit_to_exact_size(egui::vec2(72.0, 26.0)))
+        use ui::theme;
+        ui.horizontal_centered(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.add(egui::Image::new(egui::include_image!("../logos/tripslop-wordmark-color.svg")).fit_to_exact_size(egui::vec2(76.0, 27.0)))
                 .on_hover_text("tripslop");
-            ui.separator();
-            let play = if self.comp.playing { "⏸" } else { "▶" };
-            if ui.button(play).on_hover_text("Play / pause all clips (Space)").clicked() {
-                self.comp.playing = !self.comp.playing;
+            divider(ui);
+
+            let playing = self.comp.playing;
+            let play = egui::Button::new(RichText::new(if playing { "⏸" } else { "▶" }).color(if playing { theme::ON_LIT } else { theme::TEXT }))
+                .min_size(egui::vec2(30.0, 26.0))
+                .fill(if playing { theme::LIVE } else { theme::CONTROL });
+            if ui.add(play).on_hover_text("Play / pause all clips (Space)").clicked() {
+                self.comp.playing = !playing;
             }
-            ui.label("BPM");
-            ui.add(egui::DragValue::new(&mut self.comp.bpm).range(30.0..=300.0).speed(0.5).max_decimals(1));
+            egui::Frame::new()
+                .fill(theme::GROUND)
+                .stroke(egui::Stroke::new(1.0, theme::LINE))
+                .corner_radius(4)
+                .inner_margin(egui::Margin::symmetric(8, 1))
+                .show(ui, |ui| {
+                    ui.label(RichText::new("BPM").font(theme::semibold(10.5)).color(theme::FAINT));
+                    ui.style_mut().drag_value_text_style = egui::TextStyle::Name("bpm".into());
+                    ui.style_mut().text_styles.insert(egui::TextStyle::Name("bpm".into()), theme::mono(17.0));
+                    ui.visuals_mut().widgets.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
+                    ui.visuals_mut().widgets.inactive.bg_stroke = egui::Stroke::NONE;
+                    ui.add(egui::DragValue::new(&mut self.comp.bpm).range(30.0..=300.0).speed(0.5).fixed_decimals(2))
+                        .on_hover_text("Drag or type. MIDI clock can drive it (MIDI menu).");
+                });
             if ui.small_button("÷2").clicked() {
                 self.comp.bpm = (self.comp.bpm / 2.0).max(30.0);
             }
             if ui.small_button("×2").clicked() {
                 self.comp.bpm = (self.comp.bpm * 2.0).min(300.0);
             }
-            if ui.button("Tap (Enter)").clicked() {
+            if ui.button(RichText::new("TAP").font(theme::semibold(13.0))).on_hover_text("Tap tempo (Enter)").clicked() {
                 self.tap();
             }
-            if ui.button("Resync").on_hover_text("Make now beat 1").clicked() {
+            if ui.small_button("⟲").on_hover_text("Resync: make now beat 1").clicked() {
                 self.beat = 0.0;
             }
-            // Beat lights: 4 per bar.
-            let (r, _) = ui.allocate_exact_size(egui::vec2(52.0, 12.0), egui::Sense::hover());
-            let beat_in_bar = (self.beat.floor() as i64).rem_euclid(4) as usize;
+            // Beat lights: 4 per bar, then bar.beat.
+            let (r, _) = ui.allocate_exact_size(egui::vec2(4.0 * 14.0, 12.0), egui::Sense::hover());
+            let beat = self.beat.max(0.0);
+            let beat_in_bar = (beat.floor() as i64).rem_euclid(4) as usize;
             for i in 0..4 {
-                let c = r.left_center() + egui::vec2(6.0 + i as f32 * 13.0, 0.0);
-                let amber = ui::theme::LIVE;
-                if i == beat_in_bar {
-                    ui.painter().circle_filled(c, 5.0, amber);
-                } else {
-                    ui.painter().circle_stroke(c, 5.0, egui::Stroke::new(1.0, amber.gamma_multiply(0.6)));
-                }
+                let c = Rect::from_center_size(r.left_center() + egui::vec2(5.0 + i as f32 * 14.0, 0.0), egui::vec2(10.0, 10.0));
+                ui.painter().rect_filled(c, 2.0, if i == beat_in_bar { theme::LIVE } else { theme::CONTROL_HI });
             }
+            ui.label(RichText::new(format!("{}.{}", (beat / 4.0).floor() as i64 + 1, beat_in_bar + 1)).font(theme::mono(12.0)).color(theme::MUTED));
             egui::ComboBox::from_id_salt("quantize bar")
                 .selected_text(self.comp.quantize.name())
+                .width(130.0)
                 .show_ui(ui, |ui| {
                     for q in Quantize::ALL {
                         ui.selectable_value(&mut self.comp.quantize, q, q.name());
                     }
-                });
-            ui.separator();
-            let rec_label = match &self.recorder {
-                Some(r) => {
-                    let secs = r.frames() / recorder::FPS as u64;
-                    let dropped = match r.dropped() {
-                        0 => String::new(),
-                        n => format!("  dropped {n}"),
-                    };
-                    RichText::new(format!("⏺ {}:{:02}{dropped}  Stop (Cmd R)", secs / 60, secs % 60)).color(Color32::WHITE)
-                }
-                None => RichText::new("⏺ Record (Cmd R)"),
-            };
-            let mut rec_btn = egui::Button::new(rec_label);
-            if self.recorder.is_some() {
-                rec_btn = rec_btn.fill(ui::theme::RECORD);
-            }
-            if ui.add(rec_btn).clicked() {
-                self.toggle_recording();
-            }
-            if ui.button("Snapshot (Cmd S)").clicked() {
-                self.save_snapshot(None);
-            }
-            ui.toggle_value(&mut self.show_output, "🖵 Output window");
-            ui.toggle_value(&mut self.show_library, "Library");
-            ui.separator();
-            self.audio_controls(ui);
-            self.midi_controls(ui);
-            ui.separator();
-            if ui.button("Perform (Cmd F)").clicked() {
-                self.perform = true;
-                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
-            }
-            if ui.button("Clear feedback (Cmd K)").clicked() {
-                self.renderer.clear_history();
-            }
-        });
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(&self.status).weak());
+                })
+                .response
+                .on_hover_text("When clip and scene launches happen");
+
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(RichText::new(format!("{:.0} fps", self.fps)).weak());
+                ui.spacing_mut().item_spacing.x = 6.0;
+                if ui.button("⛶ Perform").on_hover_text("Fullscreen output (Cmd/Ctrl+F, Esc to leave)").clicked() {
+                    self.perform = true;
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
+                }
+                divider(ui);
+                ui.toggle_value(&mut self.show_library, "Browser").on_hover_text("Show the shader browser (B)");
+                ui.toggle_value(&mut self.show_output, "🖵").on_hover_text("Output window: drag it to a projector, double-click for fullscreen");
+                if ui.button("📷").on_hover_text("Save a PNG snapshot (Cmd/Ctrl+S)").clicked() {
+                    self.save_snapshot(None);
+                }
+                if ui.button("✱").on_hover_text("Clear all feedback / delay memory (Cmd/Ctrl+K)").clicked() {
+                    self.renderer.clear_history();
+                }
+                let rec = match &self.recorder {
+                    Some(r) => {
+                        let secs = r.frames() / recorder::FPS as u64;
+                        let dropped = match r.dropped() {
+                            0 => String::new(),
+                            n => format!(" · {n} dropped"),
+                        };
+                        egui::Button::new(RichText::new(format!("⏺ {}:{:02}{dropped}", secs / 60, secs % 60)).color(theme::TEXT_STRONG))
+                            .fill(egui::Color32::from_rgb(0x5A, 0x1A, 0x22))
+                            .stroke(egui::Stroke::new(1.0, theme::RECORD))
+                    }
+                    None => egui::Button::new(RichText::new("⏺ REC").color(theme::RECORD)),
+                };
+                if ui.add(rec).on_hover_text("Record the output to MP4 (Cmd/Ctrl+R)").clicked() {
+                    self.toggle_recording();
+                }
+                divider(ui);
+                // Right-to-left: these appear as audio, then MIDI.
+                self.midi_controls(ui);
+                self.audio_controls(ui);
+            });
+        });
+    }
+
+    /// Bottom line: the latest message, and output size / memory / fps.
+    fn status_bar(&mut self, ui: &mut egui::Ui) {
+        use ui::theme;
+        ui.horizontal_centered(|ui| {
+            ui.label(RichText::new(&self.status).small().color(theme::MUTED));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let mono = |s: String| RichText::new(s).font(theme::mono(11.0)).color(theme::MUTED);
+                ui.label(mono(format!("{:.0} fps", self.fps)));
+                let (w, h) = self.renderer.size();
+                ui.label(mono(format!("{w}×{h} · GPU {:.0} MB", self.renderer.gpu_memory() as f64 / (1024.0 * 1024.0))));
             });
         });
     }
@@ -1142,22 +1174,100 @@ impl App {
     }
 
     fn crossfader(&mut self, ui: &mut egui::Ui) {
-        let w = (ui.available_width() - 90.0).max(80.0);
-        ui.horizontal(|ui| {
-            ui.spacing_mut().slider_width = w;
-            ui.add_sized([22.0, 18.0], egui::Label::new(RichText::new("A").strong()));
-            ui.add(egui::Slider::new(&mut self.comp.crossfader.value, 0.0..=1.0).show_value(false))
-                .on_hover_text("Crossfader between the A and B layers (←/→); the mode is on the Composition tab");
-            ui.label(RichText::new("B").strong());
-        });
-        ui.horizontal(|ui| {
-            ui.spacing_mut().slider_width = w;
-            ui.add_sized([22.0, 18.0], egui::Label::new(RichText::new("M").strong()));
-            ui.add(egui::Slider::new(&mut self.comp.master.value, 0.0..=1.0).show_value(false))
-                .on_hover_text("Master");
-            ui.label(format!("{:.0}%", self.comp.master.value * 100.0));
-        });
+        use ui::theme;
+        egui::Frame::new()
+            .fill(theme::RAISED)
+            .stroke(egui::Stroke::new(1.0, theme::LINE_SOFT))
+            .corner_radius(6)
+            .inner_margin(10)
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                let side_color = |side| {
+                    self.comp.layers.iter().position(|l| l.side == side).map(|_| theme::TEXT_STRONG).unwrap_or(theme::FAINT)
+                };
+                let (a, b) = (side_color(composition::Side::A), side_color(composition::Side::B));
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("A").font(theme::bold(14.0)).color(a));
+                    ui.spacing_mut().slider_width = ui.available_width() - 22.0;
+                    ui.add(egui::Slider::new(&mut self.comp.crossfader.value, 0.0..=1.0).show_value(false).trailing_fill(false))
+                        .on_hover_text("Crossfader between the A and B layers (←/→)");
+                    ui.label(RichText::new("B").font(theme::bold(14.0)).color(b));
+                });
+                ui.horizontal(|ui| {
+                    egui::ComboBox::from_id_salt("crossfade mode")
+                        .selected_text(self.comp.crossfade.name())
+                        .width(100.0)
+                        .show_ui(ui, |ui| {
+                            for m in composition::Crossfade::ALL {
+                                ui.selectable_value(&mut self.comp.crossfade, m, m.name());
+                            }
+                        })
+                        .response
+                        .on_hover_text(
+                            "Banks: A and B layers are composited separately (unassigned layers go in both) and the \
+                             fader dissolves between the two pictures.\nLayer opacity: the fader fades the opacity of \
+                             A / B layers in place.",
+                        );
+                    if self.comp.crossfade == composition::Crossfade::Bank {
+                        egui::ComboBox::from_id_salt("fade curve")
+                            .selected_text(self.comp.fade_curve.name())
+                            .width(70.0)
+                            .show_ui(ui, |ui| {
+                                for c in composition::FadeCurve::ALL {
+                                    ui.selectable_value(&mut self.comp.fade_curve, c, c.name());
+                                }
+                            });
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(RichText::new(format!("{:>3.0}%", self.comp.master.value * 100.0)).font(theme::mono(11.0)));
+                        ui.spacing_mut().slider_width = (ui.available_width() - 60.0).clamp(40.0, 140.0);
+                        ui.add(egui::Slider::new(&mut self.comp.master.value, 0.0..=1.0).show_value(false)).on_hover_text("Master");
+                        ui.label(theme::caption("Master"));
+                    });
+                });
+            });
     }
+
+    /// Audio input bands, kick and spectrum.
+    fn audio_panel(&mut self, ui: &mut egui::Ui) {
+        use ui::theme;
+        let l = self.audio.levels;
+        ui.horizontal(|ui| {
+            ui.label(theme::caption("Audio in"));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let kick = theme::QUEUED.gamma_multiply(l.kick.max(0.15));
+                ui.label(RichText::new("● KICK").font(theme::mono(10.5)).color(kick));
+                for (name, v) in [("HIGH", l.high), ("MID", l.mid), ("BASS", l.bass)] {
+                    ui.label(RichText::new(format!("{name} {v:.2}")).font(theme::mono(10.5)).color(if l.active { theme::AUDIO } else { theme::FAINT }));
+                }
+            });
+        });
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 40.0), egui::Sense::hover());
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 4.0, theme::GROUND);
+        let spec = &self.audio.spectrum;
+        if !l.active || spec.is_empty() {
+            painter.text(rect.center(), egui::Align2::CENTER_CENTER, "no input · pick one in the top bar", theme::body(12.0), theme::FAINT);
+            return;
+        }
+        let bars = 48;
+        let inner = rect.shrink(4.0);
+        let w = inner.width() / bars as f32;
+        for i in 0..bars {
+            let a = i * spec.len() / bars;
+            let b = ((i + 1) * spec.len() / bars).max(a + 1);
+            let v = spec[a..b].iter().cloned().fold(0.0, f32::max).clamp(0.0, 1.0);
+            let x = inner.left() + i as f32 * w;
+            let r = Rect::from_min_max(pos2(x, inner.bottom() - v * inner.height()), pos2(x + w - 1.5, inner.bottom()));
+            painter.rect_filled(r, 1.0, theme::AUDIO.gamma_multiply(1.0 - 0.5 * i as f32 / bars as f32));
+        }
+    }
+}
+
+/// A thin vertical line between groups in a toolbar.
+fn divider(ui: &mut egui::Ui) {
+    let (r, _) = ui.allocate_exact_size(egui::vec2(9.0, 22.0), egui::Sense::hover());
+    ui.painter().vline(r.center().x, r.y_range(), egui::Stroke::new(1.0, ui::theme::LINE));
 }
 
 fn automation_stamp(frame: u64, beat: f64) -> String {
@@ -1250,55 +1360,97 @@ impl eframe::App for App {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
             }
         } else {
-            egui::Panel::top("transport").show(ui, |ui| self.transport_bar(ui));
-            egui::Panel::top("grid").resizable(true).default_size(330.0).show(ui, |ui| {
-                egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
-                    let thumbs = self.renderer.thumbnails();
-                    let actions = self.grid.show(ui, &mut self.comp, blink, &thumbs);
-                    self.handle_grid(actions);
+            use ui::theme;
+            let bar = |fill| egui::Frame::new().fill(fill).inner_margin(egui::Margin::symmetric(12, 0));
+            egui::Panel::top("transport").exact_size(46.0).frame(bar(theme::PANEL)).show(ui, |ui| self.transport_bar(ui));
+            egui::Panel::bottom("status").exact_size(24.0).frame(bar(theme::PANEL)).show(ui, |ui| self.status_bar(ui));
+
+            // Right rail: everything you touch while playing.
+            egui::Panel::right("rail")
+                .resizable(true)
+                .default_size(440.0)
+                .size_range(300.0..=760.0)
+                .frame(egui::Frame::new().fill(theme::SUNKEN).inner_margin(12))
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 8.0;
+                    ui.horizontal(|ui| {
+                        ui.label(theme::caption("Output"));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let (w, h) = self.renderer.size();
+                            ui.label(RichText::new(format!("{w}×{h}")).font(theme::mono(10.5)).color(theme::FAINT));
+                        });
+                    });
+                    let (ow, oh) = self.renderer.size();
+                    let h = ui.available_width() * oh as f32 / ow as f32;
+                    ui.allocate_ui(egui::vec2(ui.available_width(), h), |ui| self.monitor(ui));
+                    ui.add_space(4.0);
+                    self.crossfader(ui);
+                    ui.add_space(4.0);
+                    self.audio_panel(ui);
+                    ui.add_space(4.0);
+                    let beat = self.beat;
+                    let rest = ui.available_height() - 30.0;
+                    ui::punch::pads(ui, &mut self.punch, beat, rest);
                 });
-            });
-            egui::Panel::left("monitor").resizable(true).default_size(560.0).show(ui, |ui| {
-                ui.label(ui::theme::caption("Output"));
-                let (ow, oh) = self.renderer.size();
-                let h = ui.available_width() * oh as f32 / ow as f32;
-                ui.allocate_ui(egui::vec2(ui.available_width(), h), |ui| self.monitor(ui));
-                self.crossfader(ui);
-                ui.add_space(8.0);
-                ui::punch::pads(ui, &mut self.punch);
-            });
+
+            // Inspector (becomes the device panel).
+            egui::Panel::bottom("inspector")
+                .resizable(true)
+                .default_size(330.0)
+                .size_range(160.0..=700.0)
+                .frame(egui::Frame::new().fill(theme::PANEL).inner_margin(egui::Margin::symmetric(12, 8)))
+                .show(ui, |ui| {
+                    egui::Panel::right("clip")
+                        .resizable(true)
+                        .default_size(380.0)
+                        .frame(egui::Frame::new().inner_margin(egui::Margin { left: 12, ..Default::default() }))
+                        .show(ui, |ui| {
+                            ui.label(theme::caption("Clip"));
+                            egui::ScrollArea::vertical().id_salt("clip scroll").show(ui, |ui| {
+                                let sel = self.grid.selected_clip;
+                                let clip = sel.and_then(|(l, c)| self.comp.clip_mut(l, c));
+                                ui::panels::clip_panel(ui, clip, clock);
+                            });
+                        });
+                    egui::CentralPanel::default().frame(egui::Frame::new()).show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.selectable_value(&mut self.tab, Tab::Layer, RichText::new("Layer").font(theme::semibold(14.0)));
+                            ui.selectable_value(&mut self.tab, Tab::Composition, RichText::new("Master").font(theme::semibold(14.0)));
+                        });
+                        egui::ScrollArea::vertical().id_salt("inspector").show(ui, |ui| match self.tab {
+                            Tab::Layer => ui::panels::layer_panel(ui, &mut self.comp, self.grid.selected_layer, clock),
+                            Tab::Composition => {
+                                ui::panels::section(ui, "Output", true, |ui| self.output_settings(ui));
+                                ui::panels::composition_panel(ui, &mut self.comp, clock);
+                            }
+                        });
+                    });
+                });
+
             if self.show_library {
-                egui::Panel::right("library").resizable(true).default_size(300.0).show(ui, |ui| {
-                    let renderer = &self.renderer;
-                    let actions = self.library_view.show(ui, &self.library, &|k| renderer.library_thumb(k));
-                    self.handle_library(actions);
-                });
+                egui::Panel::left("library")
+                    .resizable(true)
+                    .default_size(260.0)
+                    .size_range(200.0..=520.0)
+                    .frame(egui::Frame::new().fill(theme::SUNKEN).inner_margin(10))
+                    .show(ui, |ui| {
+                        let renderer = &self.renderer;
+                        let actions = self.library_view.show(ui, &self.library, &|k| renderer.library_thumb(k));
+                        self.handle_library(actions);
+                    });
                 // Draw the pictures for the cards that were on screen (and animate the hovered one).
                 self.renderer.library_previews(&self.library, &self.library_view.visible, self.library_view.hover());
             }
-            egui::Panel::right("clip").resizable(true).default_size(380.0).show(ui, |ui| {
-                ui.label(ui::theme::caption("Clip"));
-                ui.separator();
-                egui::ScrollArea::vertical().id_salt("clip scroll").show(ui, |ui| {
-                    let sel = self.grid.selected_clip;
-                    let clip = sel.and_then(|(l, c)| self.comp.clip_mut(l, c));
-                    ui::panels::clip_panel(ui, clip, clock);
+
+            egui::CentralPanel::default()
+                .frame(egui::Frame::new().fill(theme::GROUND).inner_margin(egui::Margin { left: 12, right: 12, top: 10, bottom: 0 }))
+                .show(ui, |ui| {
+                    egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
+                        let thumbs = self.renderer.thumbnails();
+                        let actions = self.grid.show(ui, &mut self.comp, blink, &thumbs);
+                        self.handle_grid(actions);
+                    });
                 });
-            });
-            egui::CentralPanel::default().show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.tab, Tab::Layer, RichText::new("Layer").strong());
-                    ui.selectable_value(&mut self.tab, Tab::Composition, RichText::new("Composition").strong());
-                });
-                ui.separator();
-                egui::ScrollArea::vertical().id_salt("inspector").show(ui, |ui| match self.tab {
-                    Tab::Layer => ui::panels::layer_panel(ui, &mut self.comp, self.grid.selected_layer, clock),
-                    Tab::Composition => {
-                        ui::panels::section(ui, "Output", true, |ui| self.output_settings(ui));
-                        ui::panels::composition_panel(ui, &mut self.comp, clock);
-                    }
-                });
-            });
         }
 
         if !self.perform {
