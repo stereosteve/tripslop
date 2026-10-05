@@ -87,13 +87,3 @@ pub fn menu(ui: &mut egui::Ui, key: LearnKey) {
         }
     }
 }
-
-/// A small "M" next to a mapped control (pink while learning).
-pub fn badge(ui: &mut egui::Ui, key: LearnKey) {
-    let v = view(ui);
-    if v.learning == Some(key) {
-        ui.label(RichText::new("MIDI?").small().color(ACCENT)).on_hover_text("Move a knob or hit a pad to map it");
-    } else if let Some(control) = v.mapped.get(&key) {
-        ui.label(RichText::new("M").small().weak()).on_hover_text(format!("MIDI: {control}"));
-    }
-}

@@ -249,6 +249,7 @@ impl App {
             Cmd::Select(l, c) => {
                 self.grid.selected_layer = *l;
                 self.grid.selected_clip = Some((*l, *c));
+                self.tab = Tab::Layer;
             }
             Cmd::OpenEditor(l, c) => {
                 let clip = self.comp.clip_mut(*l, *c).ok_or("no clip there")?;

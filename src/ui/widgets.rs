@@ -1,8 +1,8 @@
-//! Sliders with a pop-out automation editor.
+//! Parameter controls: knobs (and dropdown cells for choices) with a pop-out automation editor.
 //!
-//! Every slider gets a small `~` button. Clicking it attaches a modulator (if there isn't one
-//! yet) and opens an editor with shape, rate, depth, polarity and phase, plus a live plot of
-//! the signal. In Envelope mode you can draw the curve in the plot.
+//! Right-click a control and pick *Automate…* to attach a modulator (if there isn't one yet)
+//! and open an editor with shape, rate, depth, polarity and phase, plus a live plot of the
+//! signal. In Envelope mode you can draw the curve in the plot.
 
 use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Stroke, pos2, vec2};
 
@@ -12,73 +12,6 @@ use crate::param::Param;
 
 /// Automation pink (see `theme`).
 pub const ACCENT: Color32 = crate::ui::theme::MOD;
-
-/// A parameter slider (or dropdown, for choices) with an automation button.
-pub fn param(ui: &mut egui::Ui, p: &mut Param, clock: Clock) -> egui::Response {
-    param_labeled(ui, p, p.spec.label, clock)
-}
-
-pub fn param_labeled(ui: &mut egui::Ui, p: &mut Param, label: &str, clock: Clock) -> egui::Response {
-    ui.horizontal(|ui| {
-        let active = p.is_automated();
-        let text = RichText::new("~").monospace().color(if active { Color32::BLACK } else { ui.visuals().weak_text_color() });
-        let mut button = egui::Button::new(text).small().selected(active);
-        if active {
-            button = button.fill(ACCENT);
-        }
-        let btn = ui.add(button).on_hover_text(if p.modulator.is_some() {
-            "Edit automation"
-        } else {
-            "Automate this parameter"
-        });
-
-        let spec = p.spec;
-        let resp = if !spec.choices.is_empty() {
-            let mut idx = p.value.round() as usize;
-            let shown = if active { p.index() } else { idx };
-            let r = egui::ComboBox::from_id_salt(ui.next_auto_id())
-                .selected_text(spec.choices[shown.min(spec.choices.len() - 1)])
-                .show_ui(ui, |ui| {
-                    for (i, c) in spec.choices.iter().enumerate() {
-                        ui.selectable_value(&mut idx, i, *c);
-                    }
-                })
-                .response;
-            if idx as f32 != p.value.round() {
-                p.set(idx as f32);
-            }
-            ui.label(label);
-            r
-        } else {
-            let mut slider = egui::Slider::new(&mut p.value, spec.min..=spec.max).logarithmic(spec.log).text(label);
-            if spec.int {
-                slider = slider.integer();
-            }
-            let r = ui.add(slider);
-            if active && let Some(m) = &p.modulator {
-                paint_live_marker(ui, &r, p, m);
-            }
-            r
-        };
-        let key = crate::ui::midi::LearnKey::Param(p.seed);
-        resp.context_menu(|ui| crate::ui::midi::menu(ui, key));
-        crate::ui::midi::badge(ui, key);
-
-        egui::Popup::from_toggle_button_response(&btn)
-            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-            .show(|ui| {
-                let base = p.value;
-                let seed = p.seed;
-                let m = p.modulator.get_or_insert_with(|| Modulator::new(seed));
-                if editor(ui, &spec, label, m, base, clock) {
-                    p.modulator = None;
-                    ui.close();
-                }
-            });
-        resp
-    })
-    .inner
-}
 
 /// Width of one knob cell (knob, value and label).
 pub const KNOB_W: f32 = 58.0;
@@ -129,15 +62,22 @@ fn format_value(spec: &crate::param::Spec, v: f32) -> String {
     }
 }
 
-/// Choice params as a dropdown row, the rest as a wrapping grid of knobs.
+/// Width of a [`choice`] cell.
+pub const CHOICE_W: f32 = 120.0;
+
+/// Choice params as small dropdown cells, then the rest as a wrapping grid of knobs.
 pub fn param_grid<'a>(ui: &mut egui::Ui, params: impl IntoIterator<Item = &'a mut Param>, clock: Clock) {
-    let mut knobs = Vec::new();
+    let (mut knobs, mut choices) = (Vec::new(), Vec::new());
     for p in params {
-        if p.spec.choices.is_empty() {
-            knobs.push(p);
-        } else {
-            param(ui, p, clock);
-        }
+        if p.spec.choices.is_empty() { knobs.push(p) } else { choices.push(p) }
+    }
+    if !choices.is_empty() {
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(6.0, 4.0);
+            for p in choices {
+                choice(ui, p, clock);
+            }
+        });
     }
     if knobs.is_empty() {
         return;
@@ -251,6 +191,14 @@ pub fn knob_labeled(ui: &mut egui::Ui, p: &mut Param, label: &str, clock: Clock)
         ui.label(RichText::new("drag · Shift fine · double-click reset · right-click: automate, MIDI").small().weak());
     });
 
+    automation_menu(&resp, p, label, clock);
+    resp
+}
+
+/// Right-click menu (automate, MIDI learn, reset) and the automation editor popup for `resp`.
+fn automation_menu(resp: &egui::Response, p: &mut Param, label: &str, clock: Clock) {
+    let spec = p.spec;
+    let key = crate::ui::midi::LearnKey::Param(p.seed);
     let popup_id = resp.id.with("automation");
     resp.context_menu(|ui| {
         let label_text = if p.modulator.is_some() { "Edit automation…" } else { "Automate…" };
@@ -269,7 +217,7 @@ pub fn knob_labeled(ui: &mut egui::Ui, p: &mut Param, label: &str, clock: Clock)
             ui.close();
         }
     });
-    egui::Popup::from_response(&resp)
+    egui::Popup::from_response(resp)
         .id(popup_id)
         .open_memory(None)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
@@ -282,22 +230,41 @@ pub fn knob_labeled(ui: &mut egui::Ui, p: &mut Param, label: &str, clock: Clock)
                 egui::Popup::close_id(ui.ctx(), popup_id);
             }
         });
-    resp
 }
 
-/// Dot at the automated value plus a band showing the sweep range, drawn over the rail.
-fn paint_live_marker(ui: &egui::Ui, resp: &egui::Response, p: &Param, m: &Modulator) {
-    let rail_h = ui.spacing().interact_size.y;
-    let r = rail_h / 2.5;
-    let left = resp.rect.left() + r;
-    let width = ui.spacing().slider_width - 2.0 * r;
-    let y = resp.rect.center().y + rail_h * 0.5 - 1.0;
-    let x_of = |v: f32| left + p.normalized(v) * width;
-    let a = m.apply(p.value, p.spec.min, p.spec.max, 0.0);
-    let b = m.apply(p.value, p.spec.min, p.spec.max, 1.0);
-    let painter = ui.painter();
-    painter.line_segment([pos2(x_of(a), y), pos2(x_of(b), y)], Stroke::new(2.0, ACCENT.gamma_multiply(0.5)));
-    painter.circle_filled(pos2(x_of(p.live), y), 3.0, ACCENT);
+/// A choice param as a small labelled dropdown cell (for device cards). Right-click to
+/// automate or learn MIDI; it turns pink while automated.
+pub fn choice(ui: &mut egui::Ui, p: &mut Param, clock: Clock) -> egui::Response {
+    use crate::ui::theme;
+    let spec = p.spec;
+    let active = p.is_automated();
+    let inner = ui.allocate_ui_with_layout(vec2(CHOICE_W, 40.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+        ui.spacing_mut().item_spacing.y = 1.0;
+        let label = RichText::new(spec.label).size(11.5).color(if active { ACCENT } else { theme::MUTED });
+        ui.add(egui::Label::new(label).truncate().selectable(false));
+        let mut idx = p.value.round() as usize;
+        let shown = if active { p.index() } else { idx };
+        let r = egui::ComboBox::from_id_salt(("choice", p.seed))
+            .selected_text(RichText::new(spec.choices[shown.min(spec.choices.len() - 1)]).size(12.5))
+            .width(CHOICE_W - 4.0)
+            .show_ui(ui, |ui| {
+                for (i, c) in spec.choices.iter().enumerate() {
+                    ui.selectable_value(&mut idx, i, *c);
+                }
+            })
+            .response;
+        if idx as f32 != p.value.round() {
+            p.set(idx as f32);
+        }
+        r
+    });
+    let resp = inner.inner;
+    let key = crate::ui::midi::LearnKey::Param(p.seed);
+    if crate::ui::midi::mapping(ui, key).is_some() {
+        ui.painter().text(resp.rect.right_top() + vec2(-2.0, -12.0), egui::Align2::RIGHT_TOP, "M", theme::bold(9.5), theme::LIVE);
+    }
+    automation_menu(&resp, p, spec.label, clock);
+    resp
 }
 
 fn beats_label(b: f32) -> String {

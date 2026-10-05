@@ -21,6 +21,8 @@ const AMBER: Color32 = theme::QUEUED;
 pub enum GridAction {
     Launch(Launch),
     Select { layer: usize, col: Option<usize> },
+    /// Show the master chain in the device panel.
+    SelectMaster,
     LoadFile { layer: usize, col: usize },
     Camera { layer: usize, col: usize, index: u32 },
     Generator { layer: usize, col: usize, pattern: usize },
@@ -29,6 +31,8 @@ pub enum GridAction {
     /// Something dropped from the ISF browser: a generator onto a cell (`col: None` = the
     /// layer's first free cell), or an effect onto a layer.
     Library { layer: usize, col: Option<usize>, drag: Drag },
+    /// An effect dropped from the browser onto the master row.
+    MasterEffect(Drag),
     Remove { layer: usize, col: usize },
     Clear(usize),
     AddLayer,
@@ -39,6 +43,8 @@ pub enum GridAction {
 pub struct GridView {
     pub selected_layer: usize,
     pub selected_clip: Option<(usize, usize)>,
+    /// The master row is selected (the device panel shows the master chain).
+    pub master_selected: bool,
     /// Cell rects from this frame, for drag-and-drop targeting.
     pub cells: Vec<((usize, usize), Rect)>,
 }
@@ -93,6 +99,7 @@ impl GridView {
                 }
             });
         }
+        self.master_header(ui, comp, &mut actions);
         let add = egui::Button::new(RichText::new("+ Add layer").color(theme::MUTED)).min_size(vec2(HEADER_W, 28.0)).fill(egui::Color32::TRANSPARENT);
         if ui.add(add).clicked() {
             actions.push(GridAction::AddLayer);
@@ -100,8 +107,38 @@ impl GridView {
         actions
     }
 
+    /// The master row under the layers: click it to edit the master chain.
+    fn master_header(&mut self, ui: &mut egui::Ui, comp: &mut Composition, actions: &mut Vec<GridAction>) {
+        let selected = self.master_selected;
+        let (rect, resp) = ui.allocate_exact_size(vec2(HEADER_W, 44.0), Sense::click());
+        let resp = resp.on_hover_text("Master: click to edit the master effects and output");
+        if resp.clicked() {
+            actions.push(GridAction::SelectMaster);
+        }
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 5.0, if selected { theme::SELECTED } else { theme::PANEL });
+        if selected {
+            painter.rect_stroke(rect, 5.0, Stroke::new(1.0, theme::LINE_HI), StrokeKind::Inside);
+        }
+        painter.rect_filled(Rect::from_min_size(rect.min + vec2(6.0, 7.0), vec2(4.0, rect.height() - 14.0)), 2.0, theme::LIVE);
+        painter.text(rect.left_top() + vec2(18.0, 7.0), egui::Align2::LEFT_TOP, "Master", theme::semibold(14.5), theme::TEXT_STRONG);
+        let fx = comp.effects.len();
+        let summary = format!("{} fx · {:.0}%", fx, comp.master.value * 100.0);
+        painter.text(rect.left_bottom() + vec2(18.0, -7.0), egui::Align2::LEFT_BOTTOM, summary, theme::mono(10.5), theme::MUTED);
+        if let Some(d) = resp.dnd_hover_payload::<Drag>()
+            && d.kind != Kind::Generator
+        {
+            drop_hint(ui, rect, &d, None);
+        }
+        if let Some(d) = resp.dnd_release_payload::<Drag>()
+            && d.kind != Kind::Generator
+        {
+            actions.push(GridAction::MasterEffect((*d).clone()));
+        }
+    }
+
     fn layer_header(&mut self, ui: &mut egui::Ui, comp: &mut Composition, li: usize, actions: &mut Vec<GridAction>) {
-        let selected = self.selected_layer == li;
+        let selected = self.selected_layer == li && !self.master_selected;
         let audible = comp.layer_audible(li);
         let (rect, resp) = ui.allocate_exact_size(vec2(HEADER_W, CELL.y), Sense::click());
         let l = &mut comp.layers[li];

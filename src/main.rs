@@ -242,6 +242,7 @@ impl App {
             grid: GridView {
                 selected_layer: 0,
                 selected_clip: None,
+                master_selected: false,
                 cells: Vec::new(),
             },
             tab: Tab::Layer,
@@ -353,6 +354,10 @@ impl App {
         for a in actions {
             match a {
                 GridAction::Launch(l) => self.comp.launch(l),
+                GridAction::SelectMaster => self.tab = Tab::Composition,
+                GridAction::MasterEffect(drag) => {
+                    self.use_library(&drag, None, None);
+                }
                 GridAction::Select { layer, col } => {
                     self.grid.selected_layer = layer;
                     self.tab = Tab::Layer;
@@ -854,39 +859,17 @@ impl App {
     }
 
     /// Program size and memory, on the Composition tab.
-    fn output_settings(&mut self, ui: &mut egui::Ui) {
-        let (w, h) = self.renderer.size();
-        let mut request = None;
-        ui.horizontal(|ui| {
-            ui.label("Size");
-            egui::ComboBox::from_id_salt("output size")
-                .selected_text(format!("{w}×{h}"))
-                .show_ui(ui, |ui| {
-                    for (name, s) in [("720p", (1280, 720)), ("1080p", (1920, 1080)), ("1440p", (2560, 1440))] {
-                        if ui.selectable_label((w, h) == s, format!("{name}  {}×{}", s.0, s.1)).clicked() {
-                            request = Some(s);
-                        }
-                    }
-                });
-            ui.add(egui::DragValue::new(&mut self.size_edit.0).range(64..=8192).suffix(" w"));
-            ui.add(egui::DragValue::new(&mut self.size_edit.1).range(64..=8192).suffix(" h"));
-            let custom = (self.size_edit.0 & !1, self.size_edit.1 & !1);
-            if ui
-                .add_enabled(custom != (w, h), egui::Button::new("Apply"))
-                .on_hover_text("Rebuilds every render target: clears feedback history and stops a recording")
-                .clicked()
-            {
-                request = Some(custom);
-            }
-        });
-        if let Some(s) = request {
-            self.status = match self.set_size(s) {
-                Ok(()) => format!("Output size {}×{}", s.0, s.1),
-                Err(e) => format!("Can't resize: {e}"),
-            };
-        }
-        let mb = |b: u64| b as f64 / (1024.0 * 1024.0);
-        let clips: usize = self
+    /// Apply a size picked on the Output card.
+    fn resize_from_ui(&mut self, s: (u32, u32)) {
+        self.status = match self.set_size(s) {
+            Ok(()) => format!("Output size {}×{}", s.0, s.1),
+            Err(e) => format!("Can't resize: {e}"),
+        };
+    }
+
+    /// Video clips' frames in RAM, in bytes.
+    fn clip_memory(&self) -> u64 {
+        let bytes: usize = self
             .comp
             .layers
             .iter()
@@ -896,8 +879,7 @@ impl App {
                 _ => 0,
             })
             .sum();
-        ui.label(format!("GPU memory ≈ {:.0} MB · video clips {:.0} MB", mb(self.renderer.gpu_memory()), mb(clips as u64)))
-            .on_hover_text("Render targets, effect history and textures (estimate). Effects with history can keep it at half size to save memory.");
+        bytes as u64
     }
 
     fn capture_frame(&mut self) {
@@ -1262,6 +1244,38 @@ impl App {
     }
 }
 
+/// The Output card on the master chain: program size and memory. Returns a size to switch to.
+fn output_card(ui: &mut egui::Ui, (w, h): (u32, u32), gpu: u64, clips: u64, size_edit: &mut (u32, u32)) -> Option<(u32, u32)> {
+    let mut request = None;
+    ui.label(ui::theme::caption("Size"));
+    egui::ComboBox::from_id_salt("output size")
+        .selected_text(format!("{w}×{h}"))
+        .width(ui.available_width())
+        .show_ui(ui, |ui| {
+            for (name, s) in [("720p", (1280, 720)), ("1080p", (1920, 1080)), ("1440p", (2560, 1440))] {
+                if ui.selectable_label((w, h) == s, format!("{name}  {}×{}", s.0, s.1)).clicked() {
+                    request = Some(s);
+                }
+            }
+        });
+    ui.horizontal(|ui| {
+        ui.add(egui::DragValue::new(&mut size_edit.0).range(64..=8192).suffix(" w"));
+        ui.add(egui::DragValue::new(&mut size_edit.1).range(64..=8192).suffix(" h"));
+        let custom = (size_edit.0 & !1, size_edit.1 & !1);
+        if ui
+            .add_enabled(custom != (w, h), egui::Button::new("Apply"))
+            .on_hover_text("Rebuilds every render target: clears feedback history and stops a recording")
+            .clicked()
+        {
+            request = Some(custom);
+        }
+    });
+    let mb = |b: u64| b as f64 / (1024.0 * 1024.0);
+    ui.label(RichText::new(format!("GPU ≈ {:.0} MB\nvideo clips {:.0} MB", mb(gpu), mb(clips))).font(ui::theme::mono(11.0)).color(ui::theme::MUTED))
+        .on_hover_text("Render targets, effect history and textures (estimate). Effects with history can keep it at half size to save memory.");
+    request
+}
+
 /// A thin vertical line between groups in a toolbar.
 fn divider(ui: &mut egui::Ui) {
     let (r, _) = ui.allocate_exact_size(egui::vec2(9.0, 22.0), egui::Sense::hover());
@@ -1391,47 +1405,52 @@ impl eframe::App for App {
                     ui::punch::pads(ui, &mut self.punch, beat, rest);
                 });
 
-            // Inspector (becomes the device panel).
-            egui::Panel::bottom("inspector")
+            // Device panel: the selected layer's chain (or the master's), left to right.
+            egui::Panel::bottom("devices")
                 .resizable(true)
-                .default_size(330.0)
-                .size_range(160.0..=700.0)
-                .frame(egui::Frame::new().fill(theme::PANEL).inner_margin(egui::Margin::symmetric(12, 8)))
+                .default_size(320.0)
+                .size_range(180.0..=640.0)
+                .frame(egui::Frame::new().fill(theme::PANEL).inner_margin(egui::Margin { left: 12, right: 12, top: 0, bottom: 10 }))
                 .show(ui, |ui| {
-                    egui::Panel::right("clip")
-                        .resizable(true)
-                        .default_size(380.0)
-                        .frame(egui::Frame::new().inner_margin(egui::Margin { left: 12, ..Default::default() }))
-                        .show(ui, |ui| {
-                            ui.label(theme::caption("Clip"));
-                            egui::ScrollArea::vertical().id_salt("clip scroll").show(ui, |ui| {
-                                let sel = self.grid.selected_clip;
-                                if let Some(l) = sel.and_then(|(l, _)| self.comp.layers.get(l)) {
-                                    ui::widgets::set_accent(ui.ctx(), theme::layer_color(l.color));
-                                }
-                                let clip = sel.and_then(|(l, c)| self.comp.clip_mut(l, c));
-                                ui::panels::clip_panel(ui, clip, clock);
-                            });
-                        });
-                    egui::CentralPanel::default().frame(egui::Frame::new()).show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.selectable_value(&mut self.tab, Tab::Layer, RichText::new("Layer").font(theme::semibold(14.0)));
-                            ui.selectable_value(&mut self.tab, Tab::Composition, RichText::new("Master").font(theme::semibold(14.0)));
-                        });
-                        egui::ScrollArea::vertical().id_salt("inspector").show(ui, |ui| match self.tab {
-                            Tab::Layer => {
-                                if let Some(l) = self.comp.layers.get(self.grid.selected_layer) {
-                                    ui::widgets::set_accent(ui.ctx(), theme::layer_color(l.color));
-                                }
-                                ui::panels::layer_panel(ui, &mut self.comp, self.grid.selected_layer, clock)
+                    let master = self.tab == Tab::Composition;
+                    let li = self.grid.selected_layer;
+                    // The Source card shows the selected clip when it's on this layer, else what's playing.
+                    let clip_col = self
+                        .grid
+                        .selected_clip
+                        .filter(|(l, c)| *l == li && self.comp.layers.get(*l).is_some_and(|l| l.clips[*c].is_some()))
+                        .map(|(_, c)| c)
+                        .or_else(|| self.comp.layers.get(li).and_then(|l| l.active));
+                    ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 36.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        if master {
+                            let (r, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                            ui.painter().rect_filled(r, 2.0, theme::LIVE);
+                            ui.label(RichText::new("Master").font(theme::semibold(14.5)).color(theme::TEXT_STRONG));
+                        } else if let Some(layer) = self.comp.layers.get_mut(li) {
+                            let (r, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                            ui.painter().rect_filled(r, 2.0, theme::layer_color(layer.color));
+                            ui.add(egui::TextEdit::singleline(&mut layer.name).frame(egui::Frame::NONE).font(theme::semibold(14.5)).desired_width(140.0))
+                                .on_hover_text("Layer name");
+                            if let Some(clip) = clip_col.and_then(|c| layer.clips[c].as_ref()) {
+                                ui.label(RichText::new(format!("›  {}", clip.name)).color(theme::MUTED));
                             }
-                            Tab::Composition => {
-                                ui::widgets::set_accent(ui.ctx(), theme::LIVE);
-                                ui::panels::section(ui, "Output", true, |ui| self.output_settings(ui));
-                                ui::panels::composition_panel(ui, &mut self.comp, clock);
-                            }
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let hint = if master { "Click a layer header to edit its chain" } else { "Click Master (under the layers) for the master chain" };
+                            ui.label(RichText::new(hint).small().color(theme::FAINT));
                         });
                     });
+                    if master {
+                        let (size, gpu, clips) = (self.renderer.size(), self.renderer.gpu_memory(), self.clip_memory());
+                        let mut resize = None;
+                        let size_edit = &mut self.size_edit;
+                        ui::devices::master_chain(ui, &mut self.comp, clock, |ui| resize = output_card(ui, size, gpu, clips, size_edit));
+                        if let Some(s) = resize {
+                            self.resize_from_ui(s);
+                        }
+                    } else {
+                        ui::devices::layer_chain(ui, &mut self.comp, li, clip_col, clock);
+                    }
                 });
 
             if self.show_library {
@@ -1454,6 +1473,7 @@ impl eframe::App for App {
                 .show(ui, |ui| {
                     egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
                         let thumbs = self.renderer.thumbnails();
+                        self.grid.master_selected = self.tab == Tab::Composition;
                         let actions = self.grid.show(ui, &mut self.comp, blink, &thumbs);
                         self.handle_grid(actions);
                     });
