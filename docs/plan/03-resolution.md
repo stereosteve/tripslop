@@ -1,5 +1,16 @@
 # 3. Output resolution
 
+**Status: done.** `Renderer::resize` rebuilds every target. The size comes from
+`--size`, the `size` script command, or the *Output* section on the Composition tab (720p,
+1080p and 1440p presets or a custom W×H, rounded down to even numbers for H.264). Readback
+for snapshots and recording pads rows to 256 bytes and strips the padding afterwards, so odd
+widths work. Each effect with history has a *Half-size history* checkbox (`history
+LAYER/EFFECT half` in scripts). A changed size or setting rebuilds that ring, and
+half-size rings are drawn into with a scaled pass instead of copied. History is sampled by
+UV, so it needed no texel-size changes. The memory readout covers render targets, rings,
+sources and thumbnails, plus video RAM. `scripts/resolution.tripslop` and the `resolution`
+test cover 1080p → 1366×768 → 720p. A 1366×768 realtime recording was checked by hand.
+
 ## Problem
 
 `renderer::WIDTH`/`HEIGHT` are 1280×720 constants, used for every render target, shader

@@ -8,7 +8,8 @@ use crate::composition::{Launch, Quantize};
 use crate::effects::{EFFECTS, Effect, EffectKind, apply_feedback_preset};
 use crate::param::{Param, Params};
 use crate::script::{Cmd, Event, Query, When};
-use crate::{App, HEIGHT, Tab, WIDTH};
+use crate::renderer::{MEDIA_HEIGHT, MEDIA_WIDTH};
+use crate::{App, Tab};
 
 /// Set when a script command fails or an assert doesn't hold; `main` exits with status 1.
 pub static FAILED: AtomicBool = AtomicBool::new(false);
@@ -142,7 +143,7 @@ impl App {
             }
             Cmd::Camera(l, c, index) => {
                 self.ensure_layer(*l);
-                self.comp.set_clip(*l, *c, Clip::camera(*index, WIDTH, HEIGHT)?);
+                self.comp.set_clip(*l, *c, Clip::camera(*index, MEDIA_WIDTH, MEDIA_HEIGHT)?);
             }
             Cmd::AddEffect(target, name) => {
                 let e = match (name.strip_prefix("shader:"), name.strip_prefix("file:")) {
@@ -189,6 +190,8 @@ impl App {
                     self.comp.fade_curve = *c;
                 }
             }
+            Cmd::Size(w, h) => self.set_size((*w, *h))?,
+            Cmd::History(path, half) => self.with_effect(path, |e| e.half_history = *half)?,
             Cmd::Side(l, side) => {
                 self.ensure_layer(*l);
                 self.comp.layers[*l].side = *side;
@@ -274,6 +277,8 @@ impl App {
                 _ => return Err("that clip isn't a shader".into()),
             },
             Query::Layers => self.comp.layers.len() as f64,
+            Query::Width => self.renderer.size().0 as f64,
+            Query::Height => self.renderer.size().1 as f64,
             Query::Bpm => self.comp.bpm as f64,
             Query::Beat => self.beat,
         })
@@ -293,15 +298,7 @@ impl App {
             ["master", "crossfader"] => f(&mut comp.crossfader),
             ["master", fx, param] => on_param(find_effect(&mut comp.effects, fx)?, param, f)?,
             [layer, rest @ ..] => {
-                let li = match layer.parse::<usize>() {
-                    Ok(n) if n >= 1 && n <= comp.layers.len() => n - 1,
-                    Ok(n) => return Err(format!("no layer {n}")),
-                    Err(_) => comp
-                        .layers
-                        .iter()
-                        .position(|l| l.name.eq_ignore_ascii_case(layer))
-                        .ok_or_else(|| format!("no layer named {layer:?}"))?,
-                };
+                let li = layer_index(comp, layer)?;
                 let l = &mut comp.layers[li];
                 match rest {
                     [param] => on_param(l, param, f)?,
@@ -320,6 +317,37 @@ impl App {
             _ => return Err(format!("bad parameter path {path:?}")),
         }
         Ok(())
+    }
+}
+
+impl App {
+    /// Run `f` on the effect at `LAYER/EFFECT` or `master/EFFECT`.
+    pub(crate) fn with_effect(&mut self, path: &str, f: impl FnOnce(&mut Effect)) -> Result<(), String> {
+        let segs: Vec<&str> = path.split('/').map(str::trim).collect();
+        let comp = &mut self.comp;
+        let e = match segs.as_slice() {
+            ["master", fx] => find_effect(&mut comp.effects, fx)?,
+            [layer, fx] => {
+                let li = layer_index(comp, layer)?;
+                find_effect(&mut comp.layers[li].effects, fx)?
+            }
+            _ => return Err(format!("bad effect path {path:?} (use LAYER/EFFECT or master/EFFECT)")),
+        };
+        f(e);
+        Ok(())
+    }
+}
+
+/// A layer by 1-based number or name.
+fn layer_index(comp: &crate::composition::Composition, seg: &str) -> Result<usize, String> {
+    match seg.parse::<usize>() {
+        Ok(n) if n >= 1 && n <= comp.layers.len() => Ok(n - 1),
+        Ok(n) => Err(format!("no layer {n}")),
+        Err(_) => comp
+            .layers
+            .iter()
+            .position(|l| l.name.eq_ignore_ascii_case(seg))
+            .ok_or_else(|| format!("no layer named {seg:?}")),
     }
 }
 

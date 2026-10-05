@@ -21,11 +21,11 @@ use std::thread::JoinHandle;
 
 use eframe::egui_wgpu::wgpu;
 
-use crate::renderer::{HEIGHT, WIDTH};
+use crate::renderer::{padded_row, unpad_rows};
 
 pub const FPS: u32 = 60;
 const STAGING_BUFFERS: usize = 4;
-/// Frames buffered between the render loop and ffmpeg (~3.7MB each).
+/// Frames buffered between the render loop and ffmpeg (~3.7MB each at 720p).
 const WRITE_QUEUE: usize = 16;
 
 const PENDING: u8 = 0;
@@ -155,6 +155,8 @@ pub struct Recorder {
     pub path: PathBuf,
     pub encoder: &'static str,
     pub mode: Mode,
+    /// Frame size; the output texture must stay this size while recording.
+    pub size: (u32, u32),
     free: Vec<wgpu::Buffer>,
     in_flight: VecDeque<InFlight>,
     sink: Option<FrameSink>,
@@ -201,13 +203,14 @@ fn encoder_args() -> (&'static str, &'static [&'static str]) {
 }
 
 impl Recorder {
-    pub fn start(device: &wgpu::Device, path: PathBuf, mode: Mode) -> Result<Self, String> {
+    pub fn start(device: &wgpu::Device, path: PathBuf, mode: Mode, size: (u32, u32)) -> Result<Self, String> {
         let (encoder, codec) = encoder_args();
-        let size = format!("{WIDTH}x{HEIGHT}");
+        let (width, height) = size;
+        let size_arg = format!("{width}x{height}");
         let fps = FPS.to_string();
         let mut child = Command::new("ffmpeg")
             .args(["-hide_banner", "-loglevel", "error", "-y"])
-            .args(["-f", "rawvideo", "-pix_fmt", "rgba", "-s", &size, "-framerate", &fps, "-i", "pipe:0"])
+            .args(["-f", "rawvideo", "-pix_fmt", "rgba", "-s", &size_arg, "-framerate", &fps, "-i", "pipe:0"])
             .args(codec)
             .args(["-pix_fmt", "yuv420p", "-movflags", "+faststart"])
             .arg(&path)
@@ -230,7 +233,7 @@ impl Recorder {
             .map(|_| {
                 device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("record staging"),
-                    size: (4 * WIDTH * HEIGHT) as u64,
+                    size: (padded_row(width) * height) as u64,
                     usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
                     mapped_at_creation: false,
                 })
@@ -241,6 +244,7 @@ impl Recorder {
             path,
             encoder,
             mode,
+            size,
             free,
             in_flight: VecDeque::new(),
             sink: Some(FrameSink::new(tx, mode)),
@@ -282,14 +286,13 @@ impl Recorder {
                 buffer: &buffer,
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    // 5120 bytes: already a multiple of COPY_BYTES_PER_ROW_ALIGNMENT.
-                    bytes_per_row: Some(4 * WIDTH),
-                    rows_per_image: Some(HEIGHT),
+                    bytes_per_row: Some(padded_row(self.size.0)),
+                    rows_per_image: Some(self.size.1),
                 },
             },
             wgpu::Extent3d {
-                width: WIDTH,
-                height: HEIGHT,
+                width: self.size.0,
+                height: self.size.1,
                 depth_or_array_layers: 1,
             },
         );
@@ -322,12 +325,9 @@ impl Recorder {
                 PENDING => break,
                 MAPPED => {
                     let f = self.in_flight.pop_front().unwrap();
-                    let data = f
-                        .buffer
-                        .slice(..)
-                        .get_mapped_range()
-                        .map_err(|e| format!("{e:?}"))?
-                        .to_vec();
+                    let mapped = f.buffer.slice(..).get_mapped_range().map_err(|e| format!("{e:?}"))?;
+                    let data = unpad_rows(&mapped, self.size.0, self.size.1);
+                    drop(mapped);
                     f.buffer.unmap();
                     self.free.push(f.buffer);
                     let sink = self.sink.as_mut().ok_or("recorder already stopped")?;

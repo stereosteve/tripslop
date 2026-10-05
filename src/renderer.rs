@@ -27,8 +27,13 @@ use crate::modulation::Clock;
 use crate::punch::Punch;
 use crate::shader::{CompileError, CustomShader};
 
-pub const WIDTH: u32 = 1280;
-pub const HEIGHT: u32 = 720;
+/// Program (output) size until something changes it.
+pub const DEFAULT_SIZE: (u32, u32) = (1280, 720);
+/// Size that video files and cameras are imported at, whatever the program size.
+pub const MEDIA_WIDTH: u32 = 1280;
+pub const MEDIA_HEIGHT: u32 = 720;
+/// Smallest program size accepted.
+const MIN_SIDE: u32 = 64;
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const RENDER: wgpu::TextureUsages = wgpu::TextureUsages::RENDER_ATTACHMENT
     .union(wgpu::TextureUsages::TEXTURE_BINDING)
@@ -65,6 +70,7 @@ struct Ring {
     view: wgpu::TextureView,
     len: u32,
     head: u32,
+    size: (u32, u32),
 }
 
 impl Ring {
@@ -113,6 +119,8 @@ pub struct Renderer {
     bank_b: Option<[Tex; 2]>,
     output: Tex,
     pub display_id: egui::TextureId,
+    /// Program size: every render target, the output and recordings.
+    size: (u32, u32),
     // User shaders.
     vs_module: wgpu::ShaderModule,
     flip_pipe: Pipe,
@@ -236,37 +244,66 @@ fn tex2d(device: &wgpu::Device, label: &str, w: u32, h: u32, usage: wgpu::Textur
     Tex { tex, view }
 }
 
-fn ring(device: &wgpu::Device, len: u32) -> Ring {
+/// A ping-pong pair of render targets.
+fn pair(device: &wgpu::Device, label: &str, size: (u32, u32)) -> [Tex; 2] {
+    [tex2d(device, label, size.0, size.1, RENDER), tex2d(device, label, size.0, size.1, RENDER)]
+}
+
+fn ring(device: &wgpu::Device, len: u32, size: (u32, u32)) -> Ring {
     let tex = texture(
         device,
         "history ring",
-        WIDTH,
-        HEIGHT,
+        size.0,
+        size.1,
         len,
-        wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        // Render attachment for reduced-size history, which is drawn (scaled) rather than copied.
+        wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::RENDER_ATTACHMENT,
     );
     let view = tex.create_view(&wgpu::TextureViewDescriptor {
         dimension: Some(wgpu::TextureViewDimension::D2Array),
         ..Default::default()
     });
-    Ring { tex, view, len, head: 0 }
+    Ring { tex, view, len, head: 0, size }
 }
 
-fn copy_to_ring(enc: &mut wgpu::CommandEncoder, from: &wgpu::Texture, ring: &Ring) {
-    enc.copy_texture_to_texture(
-        from.as_image_copy(),
-        wgpu::TexelCopyTextureInfo {
-            texture: &ring.tex,
-            mip_level: 0,
-            origin: wgpu::Origin3d { x: 0, y: 0, z: ring.head },
-            aspect: wgpu::TextureAspect::All,
-        },
-        wgpu::Extent3d {
-            width: WIDTH,
-            height: HEIGHT,
-            depth_or_array_layers: 1,
-        },
-    );
+/// Size of an effect's history: the program size, or half of it.
+fn history_size(size: (u32, u32), half: bool) -> (u32, u32) {
+    if half { ((size.0 / 2).max(1), (size.1 / 2).max(1)) } else { size }
+}
+
+/// Bytes per row of a texture-to-buffer copy: wgpu wants a multiple of 256.
+pub fn padded_row(width: u32) -> u32 {
+    let a = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    (4 * width).div_ceil(a) * a
+}
+
+/// Tightly packed RGBA from rows of `padded_row(width)` bytes.
+pub fn unpad_rows(data: &[u8], width: u32, height: u32) -> Vec<u8> {
+    let (row, padded) = (4 * width as usize, padded_row(width) as usize);
+    if row == padded {
+        return data[..row * height as usize].to_vec();
+    }
+    data.chunks(padded).take(height as usize).flat_map(|r| &r[..row]).copied().collect()
+}
+
+/// Parse a program size: `1280x720`, `720p` or `1080p`. Sizes are rounded down to even numbers
+/// (H.264 needs them).
+pub fn parse_size(s: &str) -> Result<(u32, u32), String> {
+    let (w, h) = match s.trim().to_ascii_lowercase().as_str() {
+        "720p" => (1280, 720),
+        "1080p" => (1920, 1080),
+        "1440p" => (2560, 1440),
+        "4k" | "2160p" => (3840, 2160),
+        other => {
+            let (w, h) = other.split_once('x').ok_or_else(|| format!("size {s:?}: use WxH, 720p or 1080p"))?;
+            let n = |v: &str| v.trim().parse::<u32>().map_err(|_| format!("size {s:?}: {v:?} isn't a number"));
+            (n(w)?, n(h)?)
+        }
+    };
+    if w < MIN_SIDE || h < MIN_SIDE {
+        return Err(format!("size {w}x{h} is too small (at least {MIN_SIDE}x{MIN_SIDE})"));
+    }
+    Ok((w & !1, h & !1))
 }
 
 fn pass(enc: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, clear: Option<wgpu::Color>, pipe: &Pipe, bg: &wgpu::BindGroup) {
@@ -312,6 +349,7 @@ fn clear_pass(enc: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, color:
 
 impl Renderer {
     pub fn new(rs: &egui_wgpu::RenderState) -> Self {
+        let (width, height) = DEFAULT_SIZE;
         let device = rs.device.clone();
         let queue = rs.queue.clone();
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -384,14 +422,11 @@ impl Renderer {
                 depth_or_array_layers: 1,
             },
         );
-        let prev_output_gl = tex2d(&device, "previous output (GL)", WIDTH, HEIGHT, RENDER);
+        let prev_output_gl = tex2d(&device, "previous output (GL)", width, height, RENDER);
         let preview_gl = tex2d(&device, "shader preview", THUMB_W, THUMB_H, RENDER);
-        let dummy_ring = ring(&device, 1).view;
-        let comp = Some([
-            tex2d(&device, "comp a", WIDTH, HEIGHT, RENDER),
-            tex2d(&device, "comp b", WIDTH, HEIGHT, RENDER),
-        ]);
-        let output = tex2d(&device, "output", WIDTH, HEIGHT, RENDER);
+        let dummy_ring = ring(&device, 1, (1, 1)).view;
+        let comp = Some(pair(&device, "comp", (width, height)));
+        let output = tex2d(&device, "output", width, height, RENDER);
         let display_id = rs
             .renderer
             .write()
@@ -416,6 +451,7 @@ impl Renderer {
             bank_b: None,
             output,
             display_id,
+            size: (width, height),
             vs_module,
             flip_pipe,
             repeat_sampler,
@@ -537,11 +573,15 @@ impl Renderer {
         let def = e.def();
         let mut taps = [0.0f32; 4];
         if let Some(h) = def.history {
-            let ring = self.rings.entry(e.id).or_insert_with(|| ring(&self.device, h.frames));
+            let want = history_size(self.size, e.half_history);
+            if self.rings.get(&e.id).is_none_or(|r| r.size != want) {
+                self.rings.insert(e.id, ring(&self.device, h.frames, want));
+            }
             if h.source == HistorySource::Input {
                 // The current input becomes tap "0 frames ago".
-                copy_to_ring(enc, &src.tex, ring);
+                self.write_ring(enc, src, e.id);
             }
+            let ring = &self.rings[&e.id];
             let t = (h.taps)(&e.params);
             for (i, ago) in t.iter().enumerate() {
                 // Output history: the newest stored frame is 1 frame ago.
@@ -550,7 +590,8 @@ impl Renderer {
             }
         }
         let mut data = [[0.0f32; 4]; 9];
-        data[0] = [clock.time as f32, WIDTH as f32 / HEIGHT as f32, 1.0 / WIDTH as f32, 1.0 / HEIGHT as f32];
+        let (w, h) = (self.size.0 as f32, self.size.1 as f32);
+        data[0] = [clock.time as f32, w / h, 1.0 / w, 1.0 / h];
         data[1] = [clock.beat as f32, clock.bpm, 0.0, 0.0];
         data[2] = taps;
         for (i, p) in e.params.iter().enumerate() {
@@ -563,12 +604,45 @@ impl Renderer {
         pass(enc, &dst.view, Some(wgpu::Color::TRANSPARENT), pipe, &bg);
 
         if let Some(h) = def.history {
-            let ring = self.rings.get_mut(&e.id).unwrap();
             if h.source == HistorySource::Output {
-                copy_to_ring(enc, &dst.tex, ring);
+                self.write_ring(enc, dst, e.id);
             }
+            let ring = self.rings.get_mut(&e.id).unwrap();
             ring.head = (ring.head + 1) % ring.len;
         }
+    }
+
+    /// Store `from` in the ring's current slot: a plain copy at full size, otherwise a
+    /// scaled draw (the linear sampler averages 2×2 pixels at half size).
+    fn write_ring(&mut self, enc: &mut wgpu::CommandEncoder, from: &Tex, id: u64) {
+        let ring = &self.rings[&id];
+        if ring.size == self.size {
+            enc.copy_texture_to_texture(
+                from.tex.as_image_copy(),
+                wgpu::TexelCopyTextureInfo {
+                    texture: &ring.tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d { x: 0, y: 0, z: ring.head },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width: self.size.0,
+                    height: self.size.1,
+                    depth_or_array_layers: 1,
+                },
+            );
+            return;
+        }
+        let ub = self.uniform(&[[3.0, 0.0, 0.0, 0.0]]);
+        let bg = self.bind(&self.flip_pipe.layout, ub, &[&from.view]);
+        let ring = &self.rings[&id];
+        let slot = ring.tex.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2),
+            base_array_layer: ring.head,
+            array_layer_count: Some(1),
+            ..Default::default()
+        });
+        pass(enc, &slot, None, &self.flip_pipe, &bg);
     }
 
     /// Run an effect chain, ping-ponging between `bufs`. Returns the index holding the result.
@@ -685,12 +759,12 @@ impl Renderer {
         if let Some(inp) = input
             && !gpu.screen_space
         {
-            let gl = gpu.input_gl.take().unwrap_or_else(|| tex2d(&self.device, "user shader input", WIDTH, HEIGHT, RENDER));
+            let gl = gpu.input_gl.take().unwrap_or_else(|| tex2d(&self.device, "user shader input", self.size.0, self.size.1, RENDER));
             self.flip(enc, inp, &gl, 3.0);
             gpu.input_gl = Some(gl);
         }
 
-        let data = shader_uniforms(shader, WIDTH, HEIGHT, gpu.frame, clock);
+        let data = shader_uniforms(shader, self.size, self.size, gpu.frame, clock);
         let ub = self.uniform(&data);
         let pipe = gpu.pipe.as_ref().unwrap();
         // GLSL sees GL-oriented copies; WGSL sees tripslop's own (screen-space) textures.
@@ -699,12 +773,7 @@ impl Renderer {
         } else {
             (gpu.input_gl.as_ref().map(|t| &t.view).unwrap_or(&self.dummy_tex.view), &self.prev_output_gl.view)
         };
-        let bufs = gpu.bufs.get_or_insert_with(|| {
-            [
-                tex2d(&self.device, "user shader a", WIDTH, HEIGHT, RENDER),
-                tex2d(&self.device, "user shader b", WIDTH, HEIGHT, RENDER),
-            ]
-        });
+        let bufs = gpu.bufs.get_or_insert_with(|| pair(&self.device, "user shader", self.size));
         let prev = &bufs[1 - gpu.cur].view;
         let bg = self.bind_with(&self.repeat_sampler, &pipe.layout, ub, &[ch0, prev, &self.noise.view, ch3]);
         pass(enc, &bufs[gpu.cur].view, Some(wgpu::Color::TRANSPARENT), pipe, &bg);
@@ -725,7 +794,8 @@ impl Renderer {
         let mut used_layers = HashSet::new();
         let mut used_fx = HashSet::new();
         let mut used_custom = HashSet::new();
-        let aspect = WIDTH as f32 / HEIGHT as f32;
+        let size = self.size;
+        let aspect = size.0 as f32 / size.1 as f32;
         // Compile every user shader, drawn or not; keep GPU state for all that exist.
         let mut existing_shaders = HashSet::new();
         comp.for_each_shader(&mut |s| {
@@ -740,11 +810,7 @@ impl Renderer {
         // Bank crossfade: B layers go into `bank_b`, A layers into `comp_bufs`, unassigned
         // layers into both. A bank that's faded out entirely isn't composited at all.
         let mix = comp.bank_mix();
-        let bank_b = mix.map(|_| {
-            self.bank_b
-                .take()
-                .unwrap_or_else(|| [tex2d(&self.device, "bank b", WIDTH, HEIGHT, RENDER), tex2d(&self.device, "bank b'", WIDTH, HEIGHT, RENDER)])
-        });
+        let bank_b = mix.map(|_| self.bank_b.take().unwrap_or_else(|| pair(&self.device, "bank b", size)));
         if let Some(b) = &bank_b {
             clear_pass(&mut enc, &b[0].view, wgpu::Color::BLACK);
         }
@@ -768,10 +834,7 @@ impl Renderer {
                 continue;
             }
             used_layers.insert(layer.id);
-            let bufs = self
-                .layers
-                .remove(&layer.id)
-                .unwrap_or_else(|| [tex2d(&self.device, "layer a", WIDTH, HEIGHT, RENDER), tex2d(&self.device, "layer b", WIDTH, HEIGHT, RENDER)]);
+            let bufs = self.layers.remove(&layer.id).unwrap_or_else(|| pair(&self.device, "layer", size));
 
             // Clips -> layer texture.
             clear_pass(&mut enc, &bufs[0].view, wgpu::Color::TRANSPARENT);
@@ -781,8 +844,8 @@ impl Renderer {
                 if let Media::Shader(s) = &mut clip.media {
                     used_custom.insert(s.id);
                     let src = self.sources.remove(&clip.id).unwrap_or_else(|| SourceTex {
-                        tex: tex2d(&self.device, "shader clip", WIDTH, HEIGHT, RENDER),
-                        size: (WIDTH, HEIGHT),
+                        tex: tex2d(&self.device, "shader clip", size.0, size.1, RENDER),
+                        size,
                     });
                     self.run_custom(&mut enc, s, None, &src.tex, clock);
                     self.sources.insert(clip.id, src);
@@ -806,7 +869,7 @@ impl Renderer {
                         (layer.rotation.get() + layer.perf.rotate).to_radians(),
                     ],
                     [clip.fit as u32 as f32, tex_aspect, gen_params[0], gen_params[1]],
-                    [gen_params[2], gen_params[3], straight, 0.0],
+                    [gen_params[2], gen_params[3], straight, 1.0 / size.1 as f32],
                 ];
                 let ub = self.uniform(&data);
                 let view = self.sources.get(&clip.id).map(|s| &s.tex.view).unwrap_or(&self.dummy_tex.view);
@@ -926,10 +989,10 @@ impl Renderer {
                 match &clip.media {
                     Media::Generator(g) => {
                         let data = [
-                            [clock.time as f32, WIDTH as f32 / HEIGHT as f32, 1.0, 1.0],
+                            [clock.time as f32, THUMB_W as f32 / THUMB_H as f32, 1.0, 1.0],
                             [0.0, 0.0, 1.0, 0.0],
                             [0.0, 1.0, g.pattern.value, g.freq.value],
-                            [g.speed.value, g.hue.value, 0.0, 0.0],
+                            [g.speed.value, g.hue.value, 0.0, 1.0 / THUMB_H as f32],
                         ];
                         let ub = self.uniform(&data);
                         let bg = self.bind(&self.clip_pipe.layout, ub, &[&self.dummy_tex.view]);
@@ -937,7 +1000,7 @@ impl Renderer {
                     }
                     Media::Shader(sh) => {
                         let screen_space = self.custom[&sh.id].screen_space;
-                        let data = shader_uniforms(sh, THUMB_W, THUMB_H, 0, clock);
+                        let data = shader_uniforms(sh, (THUMB_W, THUMB_H), self.size, 0, clock);
                         let ub = self.uniform(&data);
                         let pipe = self.custom[&sh.id].pipe.as_ref().unwrap();
                         let d = &self.dummy_tex.view;
@@ -966,6 +1029,55 @@ impl Renderer {
         self.rings.clear();
     }
 
+    /// Program size in pixels.
+    pub fn size(&self) -> (u32, u32) {
+        self.size
+    }
+
+    /// Change the program size. Every render target is rebuilt, which also clears feedback
+    /// and delay history and user shaders' previous frames.
+    pub fn resize(&mut self, size: (u32, u32)) -> Result<(), String> {
+        let max = self.device.limits().max_texture_dimension_2d;
+        if size.0 > max || size.1 > max {
+            return Err(format!("{}x{} is bigger than this GPU allows ({max})", size.0, size.1));
+        }
+        if size == self.size {
+            return Ok(());
+        }
+        self.size = size;
+        self.comp = Some(pair(&self.device, "comp", size));
+        self.bank_b = None;
+        self.output = tex2d(&self.device, "output", size.0, size.1, RENDER);
+        self.egui_renderer
+            .write()
+            .update_egui_texture_from_wgpu_texture(&self.device, &self.output.view, wgpu::FilterMode::Linear, self.display_id);
+        self.prev_output_gl = tex2d(&self.device, "previous output (GL)", size.0, size.1, RENDER);
+        self.layers.clear();
+        self.rings.clear();
+        // Video and image sources are re-uploaded on the next frame; shader clips re-render.
+        self.sources.clear();
+        for gpu in self.custom.values_mut() {
+            gpu.bufs = None;
+            gpu.input_gl = None;
+        }
+        Ok(())
+    }
+
+    /// Rough GPU memory in use for render targets, history and sources, in bytes.
+    pub fn gpu_memory(&self) -> u64 {
+        let px = |(w, h): (u32, u32)| 4 * w as u64 * h as u64;
+        let full = px(self.size);
+        let mut total = full * 4; // comp pair, output, previous output
+        total += self.bank_b.as_ref().map_or(0, |_| 2 * full);
+        total += self.layers.len() as u64 * 2 * full;
+        total += self.rings.values().map(|r| px(r.size) * r.len as u64).sum::<u64>();
+        total += self.sources.values().map(|s| px(s.size)).sum::<u64>();
+        for gpu in self.custom.values() {
+            total += gpu.bufs.as_ref().map_or(0, |_| 2 * full) + gpu.input_gl.as_ref().map_or(0, |_| full);
+        }
+        total + self.thumbs.len() as u64 * px((THUMB_W, THUMB_H))
+    }
+
     /// Device, queue and the final output texture, for recording.
     pub fn output(&self) -> (&wgpu::Device, &wgpu::Queue, &wgpu::Texture) {
         (&self.device, &self.queue, &self.output.tex)
@@ -973,10 +1085,11 @@ impl Renderer {
 
     /// Read back the current output frame (blocking).
     pub fn snapshot(&self) -> Result<image::RgbaImage, String> {
-        let row = 4 * WIDTH;
+        let (w, h) = self.size;
+        let row = padded_row(w);
         let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("snapshot"),
-            size: (row * HEIGHT) as u64,
+            size: (row * h) as u64,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
@@ -988,12 +1101,12 @@ impl Renderer {
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(row),
-                    rows_per_image: Some(HEIGHT),
+                    rows_per_image: Some(h),
                 },
             },
             wgpu::Extent3d {
-                width: WIDTH,
-                height: HEIGHT,
+                width: w,
+                height: h,
                 depth_or_array_layers: 1,
             },
         );
@@ -1003,8 +1116,8 @@ impl Renderer {
             submission_index: None,
             timeout: None,
         });
-        let data = buf.slice(..).get_mapped_range().map_err(|e| format!("{e:?}"))?.to_vec();
-        image::RgbaImage::from_raw(WIDTH, HEIGHT, data).ok_or_else(|| "snapshot size mismatch".into())
+        let data = unpad_rows(&buf.slice(..).get_mapped_range().map_err(|e| format!("{e:?}"))?, w, h);
+        image::RgbaImage::from_raw(w, h, data).ok_or_else(|| "snapshot size mismatch".into())
     }
 }
 
@@ -1029,11 +1142,11 @@ fn date_now() -> [f32; 4] {
 }
 
 /// Uniform block for user shaders (layout matches `shader.rs`'s GLSL and WGSL preludes).
-fn shader_uniforms(shader: &CustomShader, width: u32, height: u32, frame: i32, clock: Clock) -> [[f32; 4]; 8 + crate::shader::MAX_PARAMS / 4] {
+fn shader_uniforms(shader: &CustomShader, (width, height): (u32, u32), output: (u32, u32), frame: i32, clock: Clock) -> [[f32; 4]; 8 + crate::shader::MAX_PARAMS / 4] {
     let (w, h) = (width as f32, height as f32);
     // iMouse is in output pixels; scale it to the render size.
-    let sx = w / WIDTH as f32;
-    let sy = h / HEIGHT as f32;
+    let sx = w / output.0 as f32;
+    let sy = h / output.1 as f32;
     let m = shader.mouse;
     let mut data = [[0.0f32; 4]; 8 + crate::shader::MAX_PARAMS / 4];
     data[0] = [w, h, 1.0, clock.time as f32];
@@ -1048,4 +1161,39 @@ fn shader_uniforms(shader: &CustomShader, width: u32, height: u32, frame: i32, c
         data[8 + i / 4][i % 4] = p.get();
     }
     data
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sizes_parse_and_round_to_even() {
+        assert_eq!(parse_size("720p"), Ok((1280, 720)));
+        assert_eq!(parse_size("1080P"), Ok((1920, 1080)));
+        assert_eq!(parse_size("1366x768"), Ok((1366, 768)));
+        assert_eq!(parse_size("1001x601"), Ok((1000, 600)));
+        assert!(parse_size("32x32").is_err());
+        assert!(parse_size("wide").is_err());
+    }
+
+    #[test]
+    fn readback_rows_are_aligned_and_unpadded() {
+        assert_eq!(padded_row(1280), 5120);
+        assert_eq!(padded_row(1920), 7680);
+        assert_eq!(padded_row(1366), 5632); // 5464 rounded up to a multiple of 256
+        // Two rows of 3 pixels, each padded to 256 bytes.
+        let mut data = vec![0u8; 512];
+        data[..12].copy_from_slice(&[1; 12]);
+        data[256..268].copy_from_slice(&[2; 12]);
+        let out = unpad_rows(&data, 3, 2);
+        assert_eq!(out.len(), 24);
+        assert!(out[..12].iter().all(|b| *b == 1) && out[12..].iter().all(|b| *b == 2));
+    }
+
+    #[test]
+    fn half_history_is_a_quarter_of_the_pixels() {
+        assert_eq!(history_size((1920, 1080), false), (1920, 1080));
+        assert_eq!(history_size((1920, 1080), true), (960, 540));
+    }
 }

@@ -1,0 +1,23 @@
+# Program size: start at 1080p, resize mid-run (including an odd width), half-size history.
+# Run from the repo root:  cargo run --release -- --script scripts/resolution.tripslop
+# tests/scripts.rs checks the snapshots' sizes.
+
+size 1080p
+demo
+assert width == 1920
+assert height == 1080
+history Fractal/feedback half        # the Sierpinski rig, at a quarter of the memory
+add-effect 1 echo
+add-effect 3 "shader:Feedback ripples"
+at 60  snapshot target/script-out/resolution/1080p.png
+
+at 61  size 1366x768                  # 4 × 1366 bytes per row isn't 256-aligned
+at 61  assert width == 1366
+at 120 snapshot target/script-out/resolution/1366x768.png
+
+at 121 size 720p
+at 121 history Fractal/feedback full
+at 180 snapshot target/script-out/resolution/720p.png
+at 180 tab composition
+at 180 screenshot target/script-out/resolution/ui.png
+at 180 quit

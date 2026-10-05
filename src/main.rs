@@ -27,12 +27,13 @@ use composition::{Blend, Composition, Launch, Quantize};
 use effects::{Effect, EffectKind, apply_feedback_preset};
 use modulation::{Clock, Shape};
 use recorder::{Finishing, Recorder};
-use renderer::{HEIGHT, Renderer, WIDTH};
+use renderer::{MEDIA_HEIGHT, MEDIA_WIDTH, Renderer};
 use ui::grid::{GridAction, GridView};
 
 const TICK: f64 = 1.0 / 60.0;
 
-const USAGE: &str = "usage: tripslop [--demo] [--record] [--script FILE] [--isf DIR]... [--fixed-step | --realtime] [MEDIA...]";
+const USAGE: &str =
+    "usage: tripslop [--demo] [--record] [--script FILE] [--isf DIR]... [--size WxH|720p|1080p] [--fixed-step | --realtime] [MEDIA...]";
 
 /// Window / dock icon: the color flower, rasterized centered on a square transparent canvas.
 fn app_icon() -> egui::IconData {
@@ -60,6 +61,7 @@ fn main() -> eframe::Result {
     let mut script_path: Option<PathBuf> = None;
     let mut fixed_step: Option<bool> = None;
     let mut isf_dirs: Vec<PathBuf> = Vec::new();
+    let mut size = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -71,6 +73,11 @@ fn main() -> eframe::Result {
             },
             "--isf" => match args.next() {
                 Some(p) => isf_dirs.push(PathBuf::from(p)),
+                None => exit_with(USAGE, 2),
+            },
+            "--size" => match args.next().map(|s| renderer::parse_size(&s)) {
+                Some(Ok(s)) => size = Some(s),
+                Some(Err(e)) => exit_with(&e, 2),
                 None => exit_with(USAGE, 2),
             },
             "--fixed-step" => fixed_step = Some(true),
@@ -115,6 +122,9 @@ fn main() -> eframe::Result {
             let isf_dirs = if isf_dirs.is_empty() { isf_library::default_dirs() } else { isf_dirs };
             let mut app = App::new(Renderer::new(rs), isf_dirs);
             app.fixed_step = fixed_step;
+            if let Some(s) = size {
+                app.set_size(s)?;
+            }
             app.script = events.into_iter().map(|event| automation::Pending { event, done: false }).collect();
             if demo {
                 app.load_demo();
@@ -190,6 +200,8 @@ struct App {
     pending_screenshot: Option<PathBuf>,
     screenshot_requested: bool,
     quit_requested: bool,
+    /// Custom size typed into the Output settings, applied with its button.
+    size_edit: (u32, u32),
 }
 
 impl App {
@@ -226,6 +238,7 @@ impl App {
             pending_screenshot: None,
             screenshot_requested: false,
             quit_requested: false,
+            size_edit: renderer::DEFAULT_SIZE,
         }
     }
 
@@ -244,7 +257,7 @@ impl App {
     }
 
     fn try_load(&mut self, layer: usize, col: usize, path: &std::path::Path) -> Result<(), String> {
-        let c = Clip::open(path, WIDTH, HEIGHT)?;
+        let c = Clip::open(path, MEDIA_WIDTH, MEDIA_HEIGHT)?;
         self.status = format!("Loaded {} into {} / column {}", c.name, self.comp.layers[layer].name, col + 1);
         self.comp.set_clip(layer, col, c);
         self.grid.selected_clip = Some((layer, col));
@@ -324,7 +337,7 @@ impl App {
                         self.load_file(layer, col, path);
                     }
                 }
-                GridAction::Camera { layer, col, index } => match Clip::camera(index, WIDTH, HEIGHT) {
+                GridAction::Camera { layer, col, index } => match Clip::camera(index, MEDIA_WIDTH, MEDIA_HEIGHT) {
                     Ok(c) => {
                         self.comp.set_clip(layer, col, c);
                         self.grid.selected_clip = Some((layer, col));
@@ -544,13 +557,74 @@ impl App {
         let (device, _, _) = self.renderer.output();
         // Fixed-step runs (scripts) want every tick in the file; live sets must never stall.
         let mode = if self.fixed_step { recorder::Mode::Exact } else { recorder::Mode::Live };
-        match Recorder::start(device, path, mode) {
+        match Recorder::start(device, path, mode, self.renderer.size()) {
             Ok(rec) => {
                 self.status = format!("Recording to {} ({})", rec.path.display(), rec.encoder);
                 self.recorder = Some(rec);
             }
             Err(e) => self.status = format!("Recording failed: {e}"),
         }
+    }
+
+    /// Change the program size. A running recording is stopped first (its frames have the old
+    /// size).
+    fn set_size(&mut self, size: (u32, u32)) -> Result<(), String> {
+        if size == self.renderer.size() {
+            return Ok(());
+        }
+        if self.recorder.is_some() {
+            self.toggle_recording();
+        }
+        self.renderer.resize(size)?;
+        self.size_edit = size;
+        Ok(())
+    }
+
+    /// Program size and memory, on the Composition tab.
+    fn output_settings(&mut self, ui: &mut egui::Ui) {
+        let (w, h) = self.renderer.size();
+        let mut request = None;
+        ui.horizontal(|ui| {
+            ui.label("Size");
+            egui::ComboBox::from_id_salt("output size")
+                .selected_text(format!("{w}×{h}"))
+                .show_ui(ui, |ui| {
+                    for (name, s) in [("720p", (1280, 720)), ("1080p", (1920, 1080)), ("1440p", (2560, 1440))] {
+                        if ui.selectable_label((w, h) == s, format!("{name}  {}×{}", s.0, s.1)).clicked() {
+                            request = Some(s);
+                        }
+                    }
+                });
+            ui.add(egui::DragValue::new(&mut self.size_edit.0).range(64..=8192).suffix(" w"));
+            ui.add(egui::DragValue::new(&mut self.size_edit.1).range(64..=8192).suffix(" h"));
+            let custom = (self.size_edit.0 & !1, self.size_edit.1 & !1);
+            if ui
+                .add_enabled(custom != (w, h), egui::Button::new("Apply"))
+                .on_hover_text("Rebuilds every render target: clears feedback history and stops a recording")
+                .clicked()
+            {
+                request = Some(custom);
+            }
+        });
+        if let Some(s) = request {
+            self.status = match self.set_size(s) {
+                Ok(()) => format!("Output size {}×{}", s.0, s.1),
+                Err(e) => format!("Can't resize: {e}"),
+            };
+        }
+        let mb = |b: u64| b as f64 / (1024.0 * 1024.0);
+        let clips: usize = self
+            .comp
+            .layers
+            .iter()
+            .flat_map(|l| l.clips.iter().flatten())
+            .map(|c| match &c.media {
+                clip::Media::Video(v) => v.memory_bytes(),
+                _ => 0,
+            })
+            .sum();
+        ui.label(format!("GPU memory ≈ {:.0} MB · video clips {:.0} MB", mb(self.renderer.gpu_memory()), mb(clips as u64)))
+            .on_hover_text("Render targets, effect history and textures (estimate). Effects with history can keep it at half size to save memory.");
     }
 
     fn capture_frame(&mut self) {
@@ -741,13 +815,14 @@ impl App {
 
     /// Output monitor; drag / scroll moves and scales the selected layer.
     fn monitor(&mut self, ui: &mut egui::Ui) {
-        let (resp, rect) = paint_output(ui, self.renderer.display_id);
+        let (resp, rect) = paint_output(ui, self.renderer.display_id, self.renderer.size());
         // Alt-drag drives iMouse of the shader being edited.
         let alt = ui.input(|i| i.modifiers.alt);
         if alt && let Some(id) = self.editing && let Some(s) = self.comp.find_shader_mut(id) {
             if let Some(p) = resp.interact_pointer_pos().filter(|_| resp.is_pointer_button_down_on()) {
-                let x = ((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0) * WIDTH as f32;
-                let y = (1.0 - (p.y - rect.top()) / rect.height()).clamp(0.0, 1.0) * HEIGHT as f32;
+                let (w, h) = self.renderer.size();
+                let x = ((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0) * w as f32;
+                let y = (1.0 - (p.y - rect.top()) / rect.height()).clamp(0.0, 1.0) * h as f32;
                 let click = *self.mouse_click.get_or_insert([x, y]);
                 s.mouse = [x, y, click[0], click[1]];
             } else if self.mouse_click.take().is_some() {
@@ -815,11 +890,11 @@ fn unix_time() -> u64 {
         .unwrap_or(0)
 }
 
-/// Paint the output letterboxed to 16:9; returns the response and the picture rect.
-fn paint_output(ui: &mut egui::Ui, tex: egui::TextureId) -> (egui::Response, Rect) {
+/// Paint the output letterboxed to its aspect ratio; returns the response and the picture rect.
+fn paint_output(ui: &mut egui::Ui, tex: egui::TextureId, (w, h): (u32, u32)) -> (egui::Response, Rect) {
     let avail = ui.available_rect_before_wrap();
     let resp = ui.allocate_rect(avail, egui::Sense::click_and_drag());
-    let aspect = WIDTH as f32 / HEIGHT as f32;
+    let aspect = w as f32 / h as f32;
     let mut size = avail.size();
     if size.x / size.y > aspect {
         size.x = size.y * aspect;
@@ -858,6 +933,7 @@ impl eframe::App for App {
             self.editing = Some(id);
         }
         let tex = self.renderer.display_id;
+        let out_size = self.renderer.size();
         let clock = self.clock();
         let blink = (self.beat * 4.0).fract() < 0.5;
 
@@ -869,7 +945,7 @@ impl eframe::App for App {
                     .with_title("tripslop output (double-click = fullscreen)")
                     .with_inner_size([960.0, 540.0]),
                 |ui, _class| {
-                    let (resp, _) = paint_output(ui, tex);
+                    let (resp, _) = paint_output(ui, tex, out_size);
                     if resp.double_clicked() {
                         let fs = ui.input(|i| i.viewport().fullscreen.unwrap_or(false));
                         ui.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fs));
@@ -883,7 +959,7 @@ impl eframe::App for App {
         }
 
         if self.perform {
-            let (resp, _) = paint_output(ui, tex);
+            let (resp, _) = paint_output(ui, tex, out_size);
             if resp.double_clicked() {
                 self.perform = false;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
@@ -899,7 +975,8 @@ impl eframe::App for App {
             });
             egui::Panel::left("monitor").resizable(true).default_size(560.0).show(ui, |ui| {
                 ui.label(RichText::new("Output").strong());
-                let h = ui.available_width() * HEIGHT as f32 / WIDTH as f32;
+                let (ow, oh) = self.renderer.size();
+                let h = ui.available_width() * oh as f32 / ow as f32;
                 ui.allocate_ui(egui::vec2(ui.available_width(), h), |ui| self.monitor(ui));
                 self.crossfader(ui);
                 ui.add_space(8.0);
@@ -928,7 +1005,10 @@ impl eframe::App for App {
                 ui.separator();
                 egui::ScrollArea::vertical().id_salt("inspector").show(ui, |ui| match self.tab {
                     Tab::Layer => ui::panels::layer_panel(ui, &mut self.comp, self.grid.selected_layer, clock),
-                    Tab::Composition => ui::panels::composition_panel(ui, &mut self.comp, clock),
+                    Tab::Composition => {
+                        ui::panels::section(ui, "Output", true, |ui| self.output_settings(ui));
+                        ui::panels::composition_panel(ui, &mut self.comp, clock);
+                    }
                 });
             });
         }

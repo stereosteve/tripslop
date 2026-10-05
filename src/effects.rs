@@ -347,6 +347,8 @@ pub struct Effect {
     pub params: Vec<Param>,
     /// Code and state for `EffectKind::Shader`.
     pub custom: Option<Box<CustomShader>>,
+    /// Keep delay/feedback history at half the program size (a quarter of the memory).
+    pub half_history: bool,
 }
 
 impl Effect {
@@ -357,6 +359,7 @@ impl Effect {
             enabled: true,
             params: def(kind).specs.iter().map(|s| Param::new(*s)).collect(),
             custom: None,
+            half_history: false,
         }
     }
 

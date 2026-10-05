@@ -82,6 +82,9 @@ pub enum Query {
     Layers,
     Bpm,
     Beat,
+    /// Program size.
+    Width,
+    Height,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -100,6 +103,10 @@ pub enum Cmd {
     Bpm(f32),
     Quantize(String),
     Crossfade(Crossfade, Option<FadeCurve>),
+    /// Program size.
+    Size(u32, u32),
+    /// `LAYER/EFFECT` or `master/EFFECT`, half-size history on/off.
+    History(String, bool),
     Side(usize, Side),
     Play(bool),
     PadDown(usize),
@@ -217,6 +224,8 @@ fn parse_query(w: &[String]) -> Result<Query, String> {
         "layers" => Query::Layers,
         "bpm" => Query::Bpm,
         "beat" => Query::Beat,
+        "width" => Query::Width,
+        "height" => Query::Height,
         _ => Query::Param(w.join(" ")),
     })
 }
@@ -261,6 +270,22 @@ fn parse_cmd(w: &[String]) -> Result<Vec<Cmd>, String> {
                 Some(c) => return Err(format!("crossfade curve {c:?}: use linear / smooth / cut")),
             };
             one(Cmd::Crossfade(mode, curve))
+        }
+        "size" => {
+            let (w, h) = crate::renderer::parse_size(w.get(1).ok_or("missing size (WxH, 720p, 1080p)")?)?;
+            one(Cmd::Size(w, h))
+        }
+        // history PATH full|half, where PATH (LAYER/EFFECT) may contain spaces.
+        "history" => {
+            let half = match w.last().map(String::as_str) {
+                Some("half") => true,
+                Some("full") => false,
+                _ => return Err("history needs an effect path and full / half".into()),
+            };
+            if w.len() < 3 {
+                return Err("history needs an effect path and full / half".into());
+            }
+            one(Cmd::History(w[1..w.len() - 1].join(" "), half))
         }
         "side" => {
             let side = match w.get(2).map(String::as_str) {
@@ -402,6 +427,18 @@ mod tests {
         assert_eq!(ev[3].cmd, Cmd::Side(0, Side::Both));
         assert!(parse("crossfade bank wobbly\n").unwrap_err().contains("curve"));
         assert!(parse("side 1 c\n").is_err());
+    }
+
+    #[test]
+    fn size_and_history() {
+        let ev = parse("size 1080p\nsize 1366x768\nhistory 2/feedback half\nhistory master/echo full\n").unwrap();
+        assert_eq!(ev[0].cmd, Cmd::Size(1920, 1080));
+        assert_eq!(ev[1].cmd, Cmd::Size(1366, 768));
+        assert_eq!(ev[2].cmd, Cmd::History("2/feedback".into(), true));
+        assert_eq!(ev[3].cmd, Cmd::History("master/echo".into(), false));
+        assert!(parse("size big\n").is_err());
+        assert!(parse("history 2/feedback\n").is_err());
+        assert_eq!(parse("assert width == 1920\n").unwrap()[0].cmd, Cmd::Assert(Query::Width, Op::Eq, 1920.0));
     }
 
     #[test]

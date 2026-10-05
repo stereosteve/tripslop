@@ -10,7 +10,7 @@ use crate::shader::{Role, TEMPLATES};
 use crate::ui::shader_editor;
 use crate::ui::widgets::{self, ACCENT};
 
-fn section(ui: &mut egui::Ui, title: &str, open: bool, body: impl FnOnce(&mut egui::Ui)) {
+pub fn section(ui: &mut egui::Ui, title: &str, open: bool, body: impl FnOnce(&mut egui::Ui)) {
     egui::CollapsingHeader::new(RichText::new(title).strong())
         .default_open(open)
         .show(ui, body);
@@ -102,6 +102,12 @@ pub fn effect_chain(ui: &mut egui::Ui, effects: &mut Vec<Effect>, owner: u64, cl
                 }
                 for p in &mut e.params {
                     widgets::param(ui, p, clock);
+                }
+                if let Some(h) = e.def().history {
+                    ui.checkbox(&mut e.half_history, "Half-size history").on_hover_text(format!(
+                        "Keep the {} frames of history at half the output size: a quarter of the memory, a little softer. Changing it restarts the history.",
+                        h.frames
+                    ));
                 }
                 if let Some(c) = e.custom.as_deref_mut() {
                     ui.horizontal(|ui| {

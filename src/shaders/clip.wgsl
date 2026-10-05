@@ -5,7 +5,7 @@ struct ClipU {
     a: vec4<f32>, // time, aspect, mode (0 texture, 1 generator), opacity
     b: vec4<f32>, // pos x, pos y, scale, rotation (rad)
     c: vec4<f32>, // fit (0 fill, 1 fit, 2 stretch), texture aspect, pattern, frequency
-    d: vec4<f32>, // pattern speed, hue, texture is straight alpha (1) or premultiplied (0), unused
+    d: vec4<f32>, // pattern speed, hue, texture is straight alpha (1) or premultiplied (0), 1 / target height
 };
 
 @group(0) @binding(0) var<uniform> u: ClipU;
@@ -81,7 +81,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let luv = p / ar + 0.5;
 
     // Soft 1px edge on the box.
-    let px = vec2<f32>(1.5 / 720.0) / max(u.b.z, 0.001);
+    let px = vec2<f32>(1.5 * u.d.w) / max(u.b.z, 0.001);
     let edge = smoothstep(vec2<f32>(0.0), px, luv) * smoothstep(vec2<f32>(0.0), px, 1.0 - luv);
     let inside = edge.x * edge.y;
     if (inside <= 0.0) {

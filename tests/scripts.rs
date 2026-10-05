@@ -95,3 +95,18 @@ fn crossfade() {
     let alone = px("a-alone");
     assert!(alone.iter().zip(a).any(|(x, y)| (x - y).abs() > 10.0), "unassigned layer missing from bank A");
 }
+
+#[test]
+#[ignore = "opens a window; needs a GPU"]
+fn resolution() {
+    run("scripts/resolution.tripslop");
+    for (name, w, h) in [("1080p", 1920, 1080), ("1366x768", 1366, 768), ("720p", 1280, 720)] {
+        let path = format!("{}/target/script-out/resolution/{name}.png", env!("CARGO_MANIFEST_DIR"));
+        let img = image::open(&path).unwrap_or_else(|e| panic!("{path}: {e}")).to_rgb8();
+        assert_eq!(img.dimensions(), (w, h), "{name}");
+        // Something was drawn, and rows weren't sheared by readback padding: the two halves of
+        // the footage look alike in brightness rather than one being garbage.
+        let mean = img.pixels().map(|p| p.0.iter().map(|c| *c as u64).sum::<u64>()).sum::<u64>() / (w as u64 * h as u64 * 3);
+        assert!(mean > 5, "{name} is black (mean {mean})");
+    }
+}

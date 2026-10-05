@@ -28,6 +28,12 @@ Press `1`–`4` to launch scenes. Launches are quantized to the next beat.
 
 Any file arguments are loaded into the first layer's cells: `cargo run --release -- a.mp4 b.png`.
 
+**Output size.** The program renders at 1280×720 by default. Pick 1080p, 1440p or a custom
+size in the *Output* section of the Composition tab, or start with `--size 1920x1080` (also
+`720p`, `1080p`). Odd sizes are rounded down to even numbers. Changing the size rebuilds every
+render target, so it clears feedback history and stops a recording. The same section shows a
+rough GPU memory estimate.
+
 Sample credits: *Jellyfish* test clip via test-videos.co.uk (footage from jell.yfish.us);
 *Big Buck Bunny* © Blender Foundation, CC BY 3.0; *Pillars of Creation* (2014) and *Crab Nebula*
 from NASA/ESA Hubble via Wikimedia Commons. See the source pages for the exact terms.
@@ -66,8 +72,8 @@ picks how the fader mixes:
 * Speed, or **BPM sync**, which stretches the clip to N beats.
 * Fit modes: Fill, Fit or Stretch.
 
-On import, each video is transcoded once into in-memory JPEG frames at 1280×720 (the same
-idea as Resolume's DXV codec). That gives instant random access for bounce, reverse and random
+On import, each video is transcoded once into in-memory JPEG frames at 1280×720, whatever the
+output size (the same idea as Resolume's DXV codec). That gives instant random access for bounce, reverse and random
 playback. It takes about 100–150 KB per frame, so a 10 s clip at 30 fps is roughly 40 MB of RAM.
 
 **Generators.** Bars, rings, plasma, checker, an orbiting dot, noise and solid color. Each
@@ -84,7 +90,9 @@ has frequency, speed and hue controls.
 | Stylize | Blur, Edges, CRT, Strobe (beat-synced) |
 
 Effects can be reordered, bypassed and removed. Effects that need history (feedback and the
-delays) each allocate their own 32-frame delay buffer when you add them.
+delays) each allocate their own 32-frame delay buffer when you add them. That's about 112 MB
+at 720p and 253 MB at 1080p each. Tick *Half-size history* on such an effect to keep its
+history at half the output size: a quarter of the memory, and feedback rarely looks different.
 
 Tip: the feedback rig's fractals need a seed that doesn't cover the whole frame. Scale the
 layer down or use a generator. With a full-frame opaque clip, the input simply covers the loop.
@@ -164,7 +172,7 @@ The **Composition** tab lists everything that's automated.
 
 Press `Cmd/Ctrl+R` (or **⏺ Record**) to start and stop. Frames are captured straight from the
 renderer, so the file has no UI in it. It's saved as `tripslop-<timestamp>.mp4` (H.264,
-1280×720, 60 fps) in the directory you launched from, using the hardware encoder on macOS and
+at the output size, 60 fps) in the directory you launched from, using the hardware encoder on macOS and
 x264 elsewhere. The file is finalized even if you quit mid-recording. `--record` starts
 recording at launch. There's no audio.
 
@@ -265,14 +273,15 @@ Layers and columns are **1-based**, like the UI.
 | `set PATH VALUE` | set a parameter (see paths below) |
 | `bpm N` · `quantize off/beat/bar` · `play` · `pause` | transport |
 | `crossfade bank/layer [linear/smooth/cut]` · `side L a/b/off` | crossfader mode and curve; a layer's side |
+| `size WxH` (or `720p`, `1080p`) · `history LAYER/EFFECT full/half` | output size; an effect's history size |
 | `pad KEY down/up/latch/unlatch` · `hold KEY DURATION` | punch-in pads, by key, name or number |
 | `select L C` · `tab layer/composition` · `open-editor L C` | UI state, for screenshots |
 | `snapshot PATH` · `screenshot PATH` · `record start/stop` | output frame, full window, video |
 | `print WHAT` · `assert WHAT OP VALUE` · `quit` | checks; `OP` is one of `== != < <= > >= ~=` |
 
 **`WHAT`** is either a parameter path or one of: `playhead L`, `active L` (1-based column, 0
-for none), `pad KEY` (envelope 0..1), `errors L C` (shader compile errors), `layers`, `bpm`
-or `beat`.
+for none), `pad KEY` (envelope 0..1), `errors L C` (shader compile errors), `layers`, `bpm`,
+`beat`, `width` or `height`.
 
 **Parameter paths** have one of these forms:
 * `LAYER/PARAM`, `LAYER/EFFECT/PARAM`, `LAYER/clip/PARAM` (the playing clip) or
@@ -285,7 +294,7 @@ case-insensitively by prefix, so `2/feedback/rot` works. Paths can contain space
 **Tests:**
 * `cargo test` runs the unit tests (no window).
 * `cargo test --release -- --ignored` also runs the scripts in `scripts/` (smoke, shaders,
-  punch tour, shape, projection, crossfade) as end-to-end tests. These need a GPU and a window session. Captures go to
+  punch tour, shape, projection, crossfade, resolution) as end-to-end tests. These need a GPU and a window session. Captures go to
   `target/script-out/`.
 
 For a quick single still, use `TRIPSLOP_SNAPSHOT=<frames>:<out.png>`. It saves the output after
