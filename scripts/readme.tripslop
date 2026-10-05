@@ -1,0 +1,11 @@
+# The UI screenshot at the top of the README. Run from the repo root:
+#   cargo run --release -- --script scripts/readme.tripslop
+#   sips -Z 1680 docs/images/screenshot.png    # shrink a Retina capture
+
+demo
+size 1080p
+select 2 1
+tab devices
+at 1b    launch-scene 2
+at 40b   screenshot docs/images/screenshot.png
+at 40b   quit

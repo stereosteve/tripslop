@@ -5,3 +5,4 @@
 /tripslop-*.mp4
 # recordings made before the rename
 /trippy-*.mp4
+!docs/images/*.png

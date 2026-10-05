@@ -1,4 +1,8 @@
-# tripslop
+<h1 align="center">
+  <img src="logos/tripslop-wordmark-color.svg" alt="tripslop" width="420">
+</h1>
+
+![The tripslop UI: library browser, layer × scene clip grid, device chain and output preview](docs/images/screenshot.png)
 
 A live video mixer (VJ tool) in Rust, in the spirit of Resolume Avenue: a clip grid of layers
 × scenes, per-layer and master effect chains, blend modes, an A/B crossfader, clip loop modes,
