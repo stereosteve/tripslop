@@ -25,6 +25,7 @@ use crate::composition::{Composition, Side};
 use crate::effects::{EFFECTS, Effect, EffectKind, HistorySource};
 use crate::modulation::Clock;
 use crate::punch::Punch;
+use crate::isf_library::{Kind, Library, Status};
 use crate::shader::{CompileError, CustomShader};
 
 /// Program (output) size until something changes it.
@@ -46,6 +47,27 @@ pub const THUMB_W: u32 = 192;
 pub const THUMB_H: u32 = 108;
 /// Moment at which generator / shader previews are rendered (seconds, beats).
 const PREVIEW_TIME: f64 = 2.0;
+/// Shader library card pictures.
+pub const LIB_W: u32 = 256;
+pub const LIB_H: u32 = 144;
+/// Library pictures kept on the GPU (about 150 KB each); the longest unseen go first.
+const LIB_KEEP: usize = 160;
+/// Time per frame spent compiling new library pictures (at least one is always done).
+const LIB_BUDGET: std::time::Duration = std::time::Duration::from_millis(6);
+/// What effects in the library are shown processing.
+const LIB_INPUT: &[u8] = include_bytes!("../samples/pillars-of-creation.jpg");
+
+/// A shader library card's picture (see `Renderer::library_previews`).
+struct LibThumb {
+    tex: Tex,
+    id: egui::TextureId,
+    shader: CustomShader,
+    /// Pipeline and whether it works in screen space; `None` if the GPU rejected it.
+    gpu: Option<(Pipe, bool)>,
+    rendered: bool,
+    /// `library_previews` call that last asked for it.
+    last_seen: u64,
+}
 
 /// A small GPU texture shown in the clip grid.
 struct Thumb {
@@ -135,6 +157,13 @@ pub struct Renderer {
     /// GL-oriented scratch target for shader previews.
     preview_gl: Tex,
     tick: u64,
+    // Shader library cards.
+    lib_thumbs: HashMap<String, LibThumb>,
+    /// GL-oriented scratch target, the size of a card picture.
+    lib_gl: Tex,
+    /// The picture effects are shown processing: screen-space and GL-oriented.
+    lib_input: Option<[Tex; 2]>,
+    lib_calls: u64,
 }
 
 fn shader(device: &wgpu::Device, label: &str, parts: &[&str]) -> wgpu::ShaderModule {
@@ -424,6 +453,7 @@ impl Renderer {
         );
         let prev_output_gl = tex2d(&device, "previous output (GL)", width, height, RENDER);
         let preview_gl = tex2d(&device, "shader preview", THUMB_W, THUMB_H, RENDER);
+        let lib_gl = tex2d(&device, "library scratch", LIB_W, LIB_H, RENDER);
         let dummy_ring = ring(&device, 1, (1, 1)).view;
         let comp = Some(pair(&device, "comp", (width, height)));
         let output = tex2d(&device, "output", width, height, RENDER);
@@ -462,6 +492,10 @@ impl Renderer {
             thumbs: HashMap::new(),
             preview_gl,
             tick: 0,
+            lib_thumbs: HashMap::new(),
+            lib_gl,
+            lib_input: None,
+            lib_calls: 0,
         }
     }
 
@@ -1027,6 +1061,121 @@ impl Renderer {
     /// Forget all delay/feedback history.
     pub fn clear_history(&mut self) {
         self.rings.clear();
+    }
+
+    /// Card pictures for the shader library. New ones are made for the `visible` keys (a few
+    /// per frame, within a time budget); the `hovered` one is redrawn every frame, `t` seconds
+    /// into its animation.
+    pub fn library_previews(&mut self, lib: &Library, visible: &[String], hovered: Option<(&str, f64)>) {
+        self.lib_calls += 1;
+        // Uniform slots are free again: everything rendered so far has been submitted.
+        self.next_uniform = 0;
+        let start = std::time::Instant::now();
+        let mut enc = self.device.create_command_encoder(&Default::default());
+        let mut work = false;
+        let hovered_key = hovered.map(|(k, _)| k);
+        let order = hovered_key.into_iter().chain(visible.iter().map(String::as_str).filter(|k| Some(*k) != hovered_key));
+        for key in order {
+            let animate = hovered_key == Some(key);
+            match self.lib_thumbs.get_mut(key) {
+                Some(t) => {
+                    t.last_seen = self.lib_calls;
+                    if t.rendered && !animate {
+                        continue;
+                    }
+                }
+                None => {
+                    if work && start.elapsed() > LIB_BUDGET {
+                        continue;
+                    }
+                    let Some(entry) = lib.find(key).filter(|e| e.status == Status::Ok) else { continue };
+                    let Ok(mut shader) = entry.shader() else { continue };
+                    let gpu = shader.poll_compile().and_then(|c| self.build_custom(&c.wgsl, &c.entry).ok().map(|p| (p, c.screen_space)));
+                    let tex = tex2d(&self.device, "library card", LIB_W, LIB_H, RENDER);
+                    let id = self.egui_renderer.write().register_native_texture(&self.device, &tex.view, wgpu::FilterMode::Linear);
+                    let effect = entry.kind == Kind::Effect;
+                    if effect && self.lib_input.is_none() {
+                        self.lib_input = Some(self.library_input());
+                    }
+                    self.lib_thumbs.insert(key.to_string(), LibThumb { tex, id, shader, gpu, rendered: false, last_seen: self.lib_calls });
+                }
+            }
+            let t = if animate { PREVIEW_TIME + hovered.map_or(0.0, |(_, t)| t) } else { PREVIEW_TIME };
+            let effect = lib.find(key).is_some_and(|e| e.kind == Kind::Effect);
+            self.draw_library_card(&mut enc, key, t, effect);
+            work = true;
+        }
+        if work {
+            self.queue.submit([enc.finish()]);
+        }
+        // Forget the pictures that haven't been on screen for the longest.
+        if self.lib_thumbs.len() > LIB_KEEP {
+            let mut ages: Vec<(u64, String)> = self.lib_thumbs.iter().map(|(k, t)| (t.last_seen, k.clone())).collect();
+            ages.sort();
+            for (_, k) in ages.into_iter().take(self.lib_thumbs.len() - LIB_KEEP) {
+                if let Some(t) = self.lib_thumbs.remove(&k) {
+                    self.egui_renderer.write().free_texture(&t.id);
+                }
+            }
+        }
+    }
+
+    /// A rendered library card picture.
+    pub fn library_thumb(&self, key: &str) -> Option<egui::TextureId> {
+        self.lib_thumbs.get(key).filter(|t| t.rendered).map(|t| t.id)
+    }
+
+    fn draw_library_card(&mut self, enc: &mut wgpu::CommandEncoder, key: &str, time: f64, effect: bool) {
+        let clock = Clock { beat: time * 2.0, time, bpm: 120.0 };
+        let Some(t) = self.lib_thumbs.get(key) else { return };
+        let Some((_, screen_space)) = &t.gpu else { return };
+        let screen_space = *screen_space;
+        let frame = ((time - PREVIEW_TIME) * 60.0) as i32;
+        let data = shader_uniforms(&t.shader, (LIB_W, LIB_H), (LIB_W, LIB_H), frame, clock);
+        let alpha = t.shader.alpha.index() as f32;
+        let ub = self.uniform(&data);
+        let flip_ub = self.uniform(&[[alpha, if screen_space { 0.0 } else { 1.0 }, 0.0, 0.0]]);
+        let t = &self.lib_thumbs[key];
+        let (pipe, _) = t.gpu.as_ref().unwrap();
+        let d = &self.dummy_tex.view;
+        let input = match (&self.lib_input, effect) {
+            (Some(inp), true) => &inp[if screen_space { 0 } else { 1 }].view,
+            _ => d,
+        };
+        let bg = self.bind_with(&self.repeat_sampler, &pipe.layout, ub, &[input, d, &self.noise.view, d]);
+        pass(enc, &self.lib_gl.view, Some(wgpu::Color::TRANSPARENT), pipe, &bg);
+        let bg = self.bind(&self.flip_pipe.layout, flip_ub, &[&self.lib_gl.view]);
+        pass(enc, &t.tex.view, Some(wgpu::Color::BLACK), &self.flip_pipe, &bg);
+        self.lib_thumbs.get_mut(key).unwrap().rendered = true;
+    }
+
+    /// The sample picture effects process in the library, cropped to the card size.
+    fn library_input(&self) -> [Tex; 2] {
+        let img = image::load_from_memory(LIB_INPUT).map(|i| i.to_rgba8()).unwrap_or_else(|_| image::RgbaImage::new(LIB_W, LIB_H));
+        // Fill the card: crop the middle to its aspect ratio.
+        let (w, h) = img.dimensions();
+        let (cw, ch) = if w * LIB_H > h * LIB_W { (h * LIB_W / LIB_H, h) } else { (w, w * LIB_H / LIB_W) };
+        let img = image::imageops::crop_imm(&img, (w - cw) / 2, (h - ch) / 2, cw, ch).to_image();
+        let img = image::imageops::resize(&img, LIB_W, LIB_H, image::imageops::FilterType::Triangle);
+        let flipped = image::imageops::flip_vertical(&img);
+        [("library input", &img), ("library input (GL)", &flipped)].map(|(label, img)| {
+            let t = tex2d(&self.device, label, LIB_W, LIB_H, RENDER);
+            self.queue.write_texture(
+                t.tex.as_image_copy(),
+                img.as_raw(),
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * LIB_W),
+                    rows_per_image: Some(LIB_H),
+                },
+                wgpu::Extent3d {
+                    width: LIB_W,
+                    height: LIB_H,
+                    depth_or_array_layers: 1,
+                },
+            );
+            t
+        })
     }
 
     /// Program size in pixels.

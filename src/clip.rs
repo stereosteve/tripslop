@@ -208,7 +208,11 @@ impl Clip {
     }
 
     pub fn shader(name: &str, code: &str) -> Self {
-        Self::new(name.to_string(), Media::Shader(Box::new(CustomShader::new(name, code, Role::Source))))
+        Self::from_shader(CustomShader::new(name, code, Role::Source))
+    }
+
+    pub fn from_shader(shader: CustomShader) -> Self {
+        Self::new(shader.name.clone(), Media::Shader(Box::new(shader)))
     }
 
     pub fn generator(pattern: usize) -> Self {

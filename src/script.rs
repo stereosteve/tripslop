@@ -97,6 +97,10 @@ pub enum Cmd {
     Generator(usize, usize, String),
     Shader(usize, usize, String),
     Camera(usize, usize, u32),
+    /// A generator from the shader library, by name.
+    Isf(usize, usize, String),
+    /// Show the library browser on generators (false) or effects (true), optionally one category.
+    Library(bool, Option<String>),
     /// `None` = master.
     AddEffect(Option<usize>, String),
     Set(String, f32),
@@ -241,6 +245,20 @@ fn parse_cmd(w: &[String]) -> Result<Vec<Cmd>, String> {
         "load" => one(Cmd::Load(idx(w.get(1), "layer")?, idx(w.get(2), "column")?, PathBuf::from(w.get(3).ok_or("missing path")?))),
         "generator" => one(Cmd::Generator(idx(w.get(1), "layer")?, idx(w.get(2), "column")?, w.get(3).ok_or("missing generator name")?.clone())),
         "shader" => one(Cmd::Shader(idx(w.get(1), "layer")?, idx(w.get(2), "column")?, w.get(3).ok_or("missing template name")?.clone())),
+        "isf" => {
+            if w.len() < 4 {
+                return Err("isf needs a layer, a column and a library name".into());
+            }
+            one(Cmd::Isf(idx(w.get(1), "layer")?, idx(w.get(2), "column")?, w[3..].join(" ")))
+        }
+        "library" => {
+            let effects = match w.get(1).map(String::as_str) {
+                Some("generators") => false,
+                Some("effects") => true,
+                _ => return Err("library needs generators / effects [category]".into()),
+            };
+            one(Cmd::Library(effects, (w.len() > 2).then(|| w[2..].join(" "))))
+        }
         "camera" => one(Cmd::Camera(idx(w.get(1), "layer")?, idx(w.get(2), "column")?, num(w.get(3), "device")?)),
         "add-effect" => {
             let target = w.get(1).ok_or("missing layer (or master)")?;
@@ -427,6 +445,15 @@ mod tests {
         assert_eq!(ev[3].cmd, Cmd::Side(0, Side::Both));
         assert!(parse("crossfade bank wobbly\n").unwrap_err().contains("curve"));
         assert!(parse("side 1 c\n").is_err());
+    }
+
+    #[test]
+    fn library_commands() {
+        let ev = parse("isf 1 2 Figure Eight\nlibrary effects Depth & Relief\nlibrary generators\n").unwrap();
+        assert_eq!(ev[0].cmd, Cmd::Isf(0, 1, "Figure Eight".into()));
+        assert_eq!(ev[1].cmd, Cmd::Library(true, Some("Depth & Relief".into())));
+        assert_eq!(ev[2].cmd, Cmd::Library(false, None));
+        assert!(parse("isf 1 2\n").is_err());
     }
 
     #[test]

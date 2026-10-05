@@ -110,3 +110,9 @@ fn resolution() {
         assert!(mean > 5, "{name} is black (mean {mean})");
     }
 }
+
+#[test]
+#[ignore = "opens a window; needs a GPU"]
+fn library() {
+    run("scripts/library.tripslop");
+}

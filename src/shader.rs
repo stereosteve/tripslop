@@ -604,7 +604,10 @@ fn prepare_isf(user: &str, json: Result<serde_json::Value, CompileError>, vertex
         }
     }
 
-    let mut lines: Vec<String> = user.lines().map(|l| rewrite_line(l, &mut params, &names)).collect();
+    // Some ISF code re-declares the built-ins (`uniform float TIME;`); the header has them.
+    names.extend(ISF_BUILTINS.iter().map(|b| b.to_string()));
+    audio_extensions(user, &mut names, &mut defines, &mut input_assigns);
+    let mut lines: Vec<String> = user.lines().map(|l| rewrite_line(&rename_reserved(l), &mut params, &names)).collect();
     let (vs_call, vs) = match vertex {
         Some(vs) => {
             for l in &mut lines {
@@ -629,6 +632,88 @@ fn prepare_isf(user: &str, json: Result<serde_json::Value, CompileError>, vertex
         user_lines: user.lines().count(),
         params,
     }
+}
+
+/// ISF built-ins the header defines.
+const ISF_BUILTINS: &[&str] = &["TIME", "TIMEDELTA", "RENDERSIZE", "FRAMEINDEX", "DATE", "PASSINDEX"];
+
+/// Audio uniforms some ISF hosts (ghost-arcade) add, with tripslop's values: the beat ones
+/// follow the tempo clock; the levels are 0 until there's audio input.
+const AUDIO_UNIFORMS: &[(&str, &str)] = &[
+    ("audioLevel", "0.0"),
+    ("audioBass", "0.0"),
+    ("audioMid", "0.0"),
+    ("audioHigh", "0.0"),
+    ("audioSpectralCentroid", "0.0"),
+    // A pulse on every beat that decays over it, like a kick detector.
+    ("audioBeat", "pow(1.0 - fract(_tripslop_iBeat), 4.0)"),
+    ("audioBeatPhase", "fract(_tripslop_iBeat)"),
+    ("audioBPM", "_tripslop_iBpm"),
+];
+
+/// Provide the audio extensions `user` uses but doesn't declare itself (its `uniform` lines
+/// for them are dropped): globals assigned at the top of `main`, and `sampleFFT` /
+/// `sampleWaveform`, which read silence.
+fn audio_extensions(user: &str, skip: &mut Vec<String>, defines: &mut String, assigns: &mut String) {
+    let declares = |name: &str, kinds: &[&str]| {
+        user.lines().any(|l| {
+            let t = l.trim_start();
+            !t.starts_with("uniform") && kinds.iter().any(|k| t.starts_with(&format!("{k} {name}")))
+        })
+    };
+    for (name, value) in AUDIO_UNIFORMS {
+        if contains_ident(user, name) && !declares(name, &["float", "int", "const float"]) {
+            skip.push(name.to_string());
+            defines.push_str(&format!("float {name};\n"));
+            assigns.push_str(&format!("{name} = {value}; "));
+        }
+    }
+    for f in ["sampleFFT", "sampleWaveform"] {
+        if contains_ident(user, f) && !declares(f, &["float"]) {
+            defines.push_str(&format!("float {f}(float u) {{ return 0.0; }}\n"));
+        }
+    }
+}
+
+/// ISF is WebGL GLSL, where these aren't reserved words yet; as names they break GLSL 4.50.
+const RESERVED_LATER: &[&str] = &["centroid", "patch", "sample", "subroutine"];
+
+fn rename_reserved(line: &str) -> String {
+    let mut out = line.to_string();
+    for w in RESERVED_LATER {
+        if contains_ident(&out, w) {
+            out = replace_ident(&out, w, &format!("_tripslop_{w}"));
+        }
+    }
+    out
+}
+
+/// `code` with every whole-identifier `name` replaced by `with`.
+fn replace_ident(code: &str, name: &str, with: &str) -> String {
+    let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let mut out = String::with_capacity(code.len());
+    let mut last = 0;
+    for (i, _) in code.match_indices(name) {
+        let before = code[..i].chars().next_back();
+        let after = code[i + name.len()..].chars().next();
+        if !before.is_some_and(ident) && !after.is_some_and(ident) {
+            out.push_str(&code[last..i]);
+            out.push_str(with);
+            last = i + name.len();
+        }
+    }
+    out.push_str(&code[last..]);
+    out
+}
+
+/// Whether `code` uses `name` as a whole identifier.
+fn contains_ident(code: &str, name: &str) -> bool {
+    let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    code.match_indices(name).any(|(i, _)| {
+        let before = code[..i].chars().next_back();
+        let after = code[i + name.len()..].chars().next();
+        !before.is_some_and(ident) && !after.is_some_and(ident)
+    })
 }
 
 /// A top-level `varying vec2 x;` / `in vec2 x;` as a plain global (`vec2 x;`).
@@ -778,6 +863,9 @@ pub struct CustomShader {
     pub alpha: Param,
     /// Shadertoy iMouse, in output pixels (y up).
     pub mouse: [f32; 4],
+    /// Starting values for parameters the first time they appear, by name (e.g. a library
+    /// entry's tuned defaults) instead of the shader's own defaults.
+    pub initial: Vec<(String, f32)>,
 }
 
 impl CustomShader {
@@ -798,6 +886,7 @@ impl CustomShader {
             params: Vec::new(),
             alpha: Param::with(Spec::choice("alpha", ALPHA_MODES, alpha_default), alpha_default as f32),
             mouse: [0.0; 4],
+            initial: Vec::new(),
         }
     }
 
@@ -874,7 +963,13 @@ impl CustomShader {
                         p.set(prev.value);
                         p
                     }
-                    None => Param::new(spec),
+                    None => {
+                        let mut p = Param::new(spec);
+                        if let Some((_, v)) = self.initial.iter().find(|(n, _)| *n == d.name) {
+                            p.set(*v);
+                        }
+                        p
+                    }
                 }
             })
             .collect();
@@ -1302,4 +1397,26 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 ",
         );
     }
+
+    #[test]
+    fn isf_from_other_hosts_compiles() {
+        // Re-declared built-ins, ghost-arcade's audio names, and a WebGL-era identifier that's
+        // reserved in GLSL 4.50.
+        let code = r#"/*{ "ISFVSN": "2", "INPUTS": [ {"NAME": "speed", "TYPE": "float", "DEFAULT": 1.0} ] }*/
+uniform float TIME;
+uniform vec2 RENDERSIZE;
+uniform float audioBass;
+void main() {
+    vec2 centroid = isf_FragNormCoord - 0.5;
+    float v = audioBass + audioBeat * sampleFFT(0.1) + speed * TIME;
+    gl_FragColor = vec4(length(centroid) + v, 0.0, 0.0, 1.0);
 }
+"#;
+        let p = prepare(code);
+        assert!(compile(&p).is_ok(), "{:?}", compile(&p).err());
+        // A shader that has its own audioBass keeps it.
+        let own = code.replace("uniform float audioBass;", "float audioBass = 0.5;");
+        assert!(compile(&prepare(&own)).is_ok());
+    }
+}
+

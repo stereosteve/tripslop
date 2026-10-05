@@ -1,0 +1,21 @@
+# The bundled shader library: generators and effects by name, and the browser.
+# Run from the repo root:  cargo run --release -- --script scripts/library.tripslop
+
+isf 1 1 Figure Eight                  # Three-Body Orbits
+isf 2 1 Sphere Cluster                # uses ghost-arcade's audioBeat (follows the tempo here)
+set 2/opacity 0.6
+add-effect 2 "isf:Crystal Refract"    # an effect that re-declares TIME / RENDERSIZE
+launch-scene 1
+library generators
+
+at 60  assert errors 1 1 == 0
+at 60  assert errors 2 1 == 0
+# Fixed-step runs many ticks per drawn frame, and the cards' pictures are drawn a few per
+# frame: leave plenty of ticks between views.
+at 3000 snapshot target/script-out/library/output.png
+at 3000 screenshot target/script-out/library/generators.png
+at 3100 library effects
+at 6000 screenshot target/script-out/library/effects.png
+at 6100 library generators three-body orbits
+at 9000 screenshot target/script-out/library/three-body.png
+at 9000 quit

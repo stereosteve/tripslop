@@ -145,8 +145,42 @@ impl App {
                 self.ensure_layer(*l);
                 self.comp.set_clip(*l, *c, Clip::camera(*index, MEDIA_WIDTH, MEDIA_HEIGHT)?);
             }
+            Cmd::Isf(l, c, name) => {
+                let entry = self.library.find_by_name(name).ok_or_else(|| format!("no library shader {name:?}"))?;
+                if entry.kind != crate::isf_library::Kind::Generator {
+                    return Err(format!("{} is an effect; use add-effect L isf:NAME", entry.name));
+                }
+                let clip = Clip::from_shader(entry.shader()?);
+                self.ensure_layer(*l);
+                self.comp.set_clip(*l, *c, clip);
+            }
+            Cmd::Library(effects, category) => {
+                use crate::isf_library::Kind;
+                self.show_library = true;
+                self.library_view.kind = if *effects { Kind::Effect } else { Kind::Generator };
+                self.library_view.category = match category {
+                    None => None,
+                    Some(c) => Some(
+                        self.library
+                            .categories
+                            .iter()
+                            .find(|k| k.eq_ignore_ascii_case(c))
+                            .ok_or_else(|| format!("no library category {c:?} (have: {})", self.library.categories.join(", ")))?
+                            .clone(),
+                    ),
+                };
+            }
             Cmd::AddEffect(target, name) => {
                 let e = match (name.strip_prefix("shader:"), name.strip_prefix("file:")) {
+                    _ if name.starts_with("isf:") => {
+                        let entry = self.library.find_by_name(&name[4..]).ok_or_else(|| format!("no library shader {:?}", &name[4..]))?;
+                        if entry.kind != crate::isf_library::Kind::Effect {
+                            return Err(format!("{} is a generator; use isf L C NAME", entry.name));
+                        }
+                        let mut e = Effect::new(EffectKind::Shader);
+                        e.custom = Some(Box::new(entry.shader()?));
+                        e
+                    }
                     (Some(t), _) => {
                         let (n, _, code) = template(t)?;
                         Effect::custom(n, code)

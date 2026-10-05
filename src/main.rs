@@ -119,7 +119,6 @@ fn main() -> eframe::Result {
             let rs = cc.wgpu_render_state.as_ref().ok_or("tripslop needs the wgpu renderer")?;
             cc.egui_ctx.set_theme(egui::ThemePreference::Dark);
             egui_extras::install_image_loaders(&cc.egui_ctx);
-            let isf_dirs = if isf_dirs.is_empty() { isf_library::default_dirs() } else { isf_dirs };
             let mut app = App::new(Renderer::new(rs), isf_dirs);
             app.fixed_step = fixed_step;
             if let Some(s) = size {
@@ -232,7 +231,7 @@ impl App {
             recorder: None,
             finishing: Vec::new(),
             editing: None,
-            show_library: !isf_dirs.is_empty(),
+            show_library: true,
             library: isf_library::Library::new(isf_dirs),
             library_view: Default::default(),
             mouse_click: None,
@@ -382,6 +381,7 @@ impl App {
     /// selected / first free cell of `layer`); effects go on `layer`, or the master chain when
     /// `layer` is `None`.
     fn use_library(&mut self, d: &isf_library::Drag, layer: Option<usize>, col: Option<usize>) {
+        let shader = self.library.find(&d.key).ok_or_else(|| format!("{} is no longer in the library", d.name)).and_then(|e| e.shader());
         let result = match d.kind {
             isf_library::Kind::Generator => {
                 let layer = layer.unwrap_or(self.grid.selected_layer);
@@ -393,9 +393,14 @@ impl App {
                         self.comp.add_column();
                         self.comp.columns - 1
                     });
-                self.try_load(layer, col, &d.path)
+                shader.map(|s| {
+                    let c = Clip::from_shader(s);
+                    self.status = format!("Loaded {} into {} / column {}", c.name, self.comp.layers[layer].name, col + 1);
+                    self.comp.set_clip(layer, col, c);
+                    self.grid.selected_clip = Some((layer, col));
+                })
             }
-            _ => shader::CustomShader::from_file(&d.path, shader::Role::Effect).map(|s| {
+            _ => shader.map(|s| {
                 let mut e = Effect::new(EffectKind::Shader);
                 e.custom = Some(Box::new(s));
                 let chain = match layer {
@@ -424,13 +429,17 @@ impl App {
                     let layer = (self.tab == Tab::Layer || d.kind == isf_library::Kind::Generator).then_some(self.grid.selected_layer);
                     self.use_library(&d, layer, None);
                 }
-                LibraryAction::ChooseFolder => {
-                    let mut dialog = rfd::FileDialog::new();
-                    if let Some(d) = self.library.dirs.first() {
-                        dialog = dialog.set_directory(d);
+                LibraryAction::AddFolder => {
+                    if let Some(dir) = rfd::FileDialog::new().pick_folder()
+                        && !self.library.dirs.contains(&dir)
+                    {
+                        self.library.dirs.push(dir);
+                        self.library.rescan();
                     }
-                    if let Some(dir) = dialog.pick_folder() {
-                        self.library.dirs = vec![dir];
+                }
+                LibraryAction::RemoveFolder(i) => {
+                    if i < self.library.dirs.len() {
+                        self.library.dirs.remove(i);
                         self.library.rescan();
                     }
                 }
@@ -804,7 +813,7 @@ impl App {
                 self.save_snapshot(None);
             }
             ui.toggle_value(&mut self.show_output, "🖵 Output window");
-            ui.toggle_value(&mut self.show_library, "ISF library");
+            ui.toggle_value(&mut self.show_library, "Library");
             if ui.button("Perform (Cmd F)").clicked() {
                 self.perform = true;
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
@@ -992,10 +1001,13 @@ impl eframe::App for App {
                 ui::punch::pads(ui, &mut self.punch);
             });
             if self.show_library {
-                egui::Panel::right("library").resizable(true).default_size(260.0).show(ui, |ui| {
-                    let actions = self.library_view.show(ui, &self.library);
+                egui::Panel::right("library").resizable(true).default_size(300.0).show(ui, |ui| {
+                    let renderer = &self.renderer;
+                    let actions = self.library_view.show(ui, &self.library, &|k| renderer.library_thumb(k));
                     self.handle_library(actions);
                 });
+                // Draw the pictures for the cards that were on screen (and animate the hovered one).
+                self.renderer.library_previews(&self.library, &self.library_view.visible, self.library_view.hover());
             }
             egui::Panel::right("clip").resizable(true).default_size(380.0).show(ui, |ui| {
                 ui.label(RichText::new("Clip").strong());

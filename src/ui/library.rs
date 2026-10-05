@@ -1,60 +1,95 @@
-//! The ISF browser: generators and effects from the shader folders, by category. Drag one
-//! onto a grid cell (generators) or a layer (effects), or double-click it.
+//! The shader library browser: generators and effects as picture cards, filed by category.
+//! Hover a card to see it move; drag it onto a grid cell (generators) or a layer (effects), or
+//! double-click it.
 
-use std::collections::BTreeMap;
+use std::time::Instant;
 
-use eframe::egui::{self, Color32, RichText, Sense};
+use eframe::egui::{self, Color32, CornerRadius, Rect, RichText, Sense, Stroke, StrokeKind, TextStyle, TextWrapMode};
 
-use crate::isf_library::{Drag, Kind, Library, Status};
+use crate::isf_library::{Drag, Entry, Kind, Library, Source, Status};
 use crate::ui::widgets::ACCENT;
 
 pub enum LibraryAction {
     /// Double-clicked: a generator goes into the selected cell, an effect onto the selected
     /// layer (or the master chain on the Composition tab).
     Use(Drag),
-    ChooseFolder,
+    AddFolder,
+    RemoveFolder(usize),
     Rescan,
 }
+
+/// Narrowest a card gets before the grid drops a column.
+const MIN_CARD: f32 = 116.0;
+const GAP: f32 = 6.0;
 
 pub struct LibraryView {
     pub search: String,
     pub kind: Kind,
+    /// `None` = all categories.
+    pub category: Option<String>,
     pub show_unsupported: bool,
+    /// Cards on screen in the last frame (keys), for the renderer to draw.
+    pub visible: Vec<String>,
+    /// The card under the pointer and since when.
+    pub hovered: Option<(String, Instant)>,
 }
 
 impl Default for LibraryView {
     fn default() -> Self {
-        Self { search: String::new(), kind: Kind::Effect, show_unsupported: false }
+        Self {
+            search: String::new(),
+            kind: Kind::Generator,
+            category: None,
+            show_unsupported: false,
+            visible: Vec::new(),
+            hovered: None,
+        }
     }
 }
 
 impl LibraryView {
-    pub fn show(&mut self, ui: &mut egui::Ui, lib: &Library) -> Vec<LibraryAction> {
+    /// The hovered card and how long it's been hovered (drives its animation).
+    pub fn hover(&self) -> Option<(&str, f64)> {
+        self.hovered.as_ref().map(|(k, t)| (k.as_str(), t.elapsed().as_secs_f64()))
+    }
+
+    pub fn show(&mut self, ui: &mut egui::Ui, lib: &Library, thumb: &dyn Fn(&str) -> Option<egui::TextureId>) -> Vec<LibraryAction> {
         let mut actions = Vec::new();
+        self.visible.clear();
+        let mut hovered_now = None;
+
         ui.horizontal(|ui| {
-            ui.label(RichText::new("ISF library").strong());
+            ui.label(RichText::new("Library").strong());
+            if lib.scanning {
+                ui.spinner().on_hover_text("Checking which shaders tripslop can run…");
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("⟳").on_hover_text("Rescan folders").clicked() {
+                if ui.small_button("⟳").on_hover_text("Rescan").clicked() {
                     actions.push(LibraryAction::Rescan);
                 }
-                if ui.small_button("Folder…").on_hover_text("Choose an ISF folder").clicked() {
-                    actions.push(LibraryAction::ChooseFolder);
+                if ui.small_button("Add folder…").on_hover_text("Also list the ISF shaders (.fs) in a folder").clicked() {
+                    actions.push(LibraryAction::AddFolder);
                 }
             });
         });
-        if lib.dirs.is_empty() {
-            ui.label(RichText::new("No ISF folder found. Choose one, e.g. /Library/Graphics/ISF.").weak());
-            return actions;
-        }
-        for d in &lib.dirs {
-            ui.label(RichText::new(d.display().to_string()).small().weak());
+        for (i, d) in lib.dirs.iter().enumerate() {
+            ui.horizontal(|ui| {
+                if ui.small_button("×").on_hover_text("Stop listing this folder").clicked() {
+                    actions.push(LibraryAction::RemoveFolder(i));
+                }
+                ui.label(RichText::new(d.display().to_string()).small().weak());
+            });
         }
 
-        let count = |k: Kind| lib.entries.iter().filter(|e| e.kind == k).count();
-        let usable = |k: Kind| lib.entries.iter().filter(|e| e.kind == k && e.status == Status::Ok).count();
+        let usable = |e: &Entry| e.status == Status::Ok;
+        let listed = |e: &Entry| self.show_unsupported || !matches!(e.status, Status::Unsupported(_));
         ui.horizontal(|ui| {
             for (k, label) in [(Kind::Generator, "Generators"), (Kind::Effect, "Effects")] {
-                ui.selectable_value(&mut self.kind, k, format!("{label} {}", usable(k)));
+                let n = lib.entries.iter().filter(|e| e.kind == k && usable(e)).count();
+                if ui.selectable_label(self.kind == k, format!("{label} {n}")).clicked() && self.kind != k {
+                    self.kind = k;
+                    self.category = None;
+                }
             }
         });
         ui.horizontal(|ui| {
@@ -63,51 +98,79 @@ impl LibraryView {
                 self.search.clear();
             }
         });
-        let hidden = count(self.kind) - usable(self.kind);
-        ui.horizontal(|ui| {
-            ui.checkbox(&mut self.show_unsupported, RichText::new(format!("show unsupported ({hidden})")).small());
-            if lib.scanning {
-                ui.spinner();
-                ui.label(RichText::new("checking…").small().weak());
+
+        // Category chips, with how many of each match the search.
+        let needle = self.search.to_lowercase();
+        let matches = |e: &Entry| {
+            needle.is_empty()
+                || e.name.to_lowercase().contains(&needle)
+                || e.category.to_lowercase().contains(&needle)
+                || e.description.to_lowercase().contains(&needle)
+                || e.tags.iter().any(|t| t.to_lowercase().contains(&needle))
+        };
+        let shown: Vec<&Entry> = lib.entries.iter().filter(|e| e.kind == self.kind && listed(e) && matches(e)).collect();
+        let cats: Vec<(&str, usize)> = lib
+            .categories
+            .iter()
+            .map(|c| (c.as_str(), shown.iter().filter(|e| &e.category == c).count()))
+            .filter(|(_, n)| *n > 0)
+            .collect();
+        if self.category.as_ref().is_some_and(|c| !cats.iter().any(|(n, _)| n == c)) {
+            self.category = None;
+        }
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
+            if chip(ui, self.category.is_none(), &format!("All {}", shown.len())).clicked() {
+                self.category = None;
+            }
+            for (c, n) in &cats {
+                let on = self.category.as_deref() == Some(*c);
+                if chip(ui, on, &format!("{c} {n}")).clicked() {
+                    self.category = if on { None } else { Some(c.to_string()) };
+                }
             }
         });
+        let hidden = lib.entries.iter().filter(|e| e.kind == self.kind && matches!(e.status, Status::Unsupported(_))).count();
+        if hidden > 0 {
+            ui.checkbox(&mut self.show_unsupported, RichText::new(format!("show unsupported ({hidden})")).small());
+        }
         ui.separator();
 
-        let needle = self.search.to_lowercase();
-        let mut by_cat: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
-        for (i, e) in lib.entries.iter().enumerate() {
-            let visible = e.kind == self.kind
-                && (self.show_unsupported || !matches!(e.status, Status::Unsupported(_)))
-                && (needle.is_empty()
-                    || e.name.to_lowercase().contains(&needle)
-                    || e.category.to_lowercase().contains(&needle)
-                    || e.description.to_lowercase().contains(&needle));
-            if visible {
-                by_cat.entry(&e.category).or_default().push(i);
-            }
-        }
-        let searching = !needle.is_empty();
-        egui::ScrollArea::vertical().id_salt("library scroll").auto_shrink([false, false]).show(ui, |ui| {
-            if by_cat.is_empty() && !lib.scanning {
-                ui.label(RichText::new("Nothing matches.").weak());
-            }
-            for (cat, items) in by_cat {
-                let header = egui::CollapsingHeader::new(RichText::new(format!("{cat}  ({})", items.len())).strong())
-                    .id_salt(("isf cat", self.kind as u8, cat));
-                let header = if searching { header.open(Some(true)) } else { header };
-                header.show(ui, |ui| {
-                    for i in items {
-                        self.item(ui, lib, i, &mut actions);
+        let footer = 34.0;
+        egui::ScrollArea::vertical()
+            .id_salt("library scroll")
+            .auto_shrink([false, false])
+            .max_height(ui.available_height() - footer)
+            .show(ui, |ui| {
+                if shown.is_empty() && !lib.scanning {
+                    ui.label(RichText::new("Nothing matches.").weak());
+                }
+                let one = self.category.clone();
+                let sections: Vec<&str> = match &one {
+                    Some(c) => vec![c.as_str()],
+                    None => cats.iter().map(|(c, _)| *c).collect(),
+                };
+                for cat in sections {
+                    let items: Vec<&Entry> = shown.iter().copied().filter(|e| e.category == cat).collect();
+                    if one.is_none() {
+                        ui.add_space(4.0);
+                        ui.label(RichText::new(format!("{cat}  ·  {}", items.len())).strong());
                     }
-                });
-            }
-        });
+                    self.grid(ui, &items, thumb, &mut actions, &mut hovered_now);
+                }
+            });
         ui.separator();
         let hint = match self.kind {
-            Kind::Generator => "Drag onto a cell, or double-click to load into the selected cell.",
-            _ => "Drag onto a layer, or double-click to add to the selected layer (master on the Composition tab).",
+            Kind::Generator => "Hover to preview. Drag onto a cell, or double-click to load into the selected cell.",
+            _ => "Hover to preview. Drag onto a layer, or double-click to add to the selected layer (master on the Composition tab).",
         };
         ui.label(RichText::new(hint).small().weak());
+
+        match (hovered_now, &self.hovered) {
+            (Some(k), Some((h, _))) if *h == k => {}
+            (Some(k), _) => self.hovered = Some((k, Instant::now())),
+            (None, _) => self.hovered = None,
+        }
 
         // The dragged item follows the pointer.
         if let Some(d) = egui::DragAndDrop::payload::<Drag>(ui.ctx())
@@ -115,33 +178,97 @@ impl LibraryView {
         {
             let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("isf drag")));
             let text = painter.layout_no_wrap(d.name.clone(), egui::FontId::proportional(13.0), Color32::BLACK);
-            let rect = egui::Rect::from_min_size(pos + egui::vec2(12.0, 4.0), text.size() + egui::vec2(12.0, 6.0));
+            let rect = Rect::from_min_size(pos + egui::vec2(12.0, 4.0), text.size() + egui::vec2(12.0, 6.0));
             painter.rect_filled(rect, 4.0, ACCENT);
             painter.galley(rect.min + egui::vec2(6.0, 3.0), text, Color32::BLACK);
         }
         actions
     }
 
-    fn item(&self, ui: &mut egui::Ui, lib: &Library, i: usize, actions: &mut Vec<LibraryAction>) {
-        let e = &lib.entries[i];
+    fn grid(
+        &mut self,
+        ui: &mut egui::Ui,
+        items: &[&Entry],
+        thumb: &dyn Fn(&str) -> Option<egui::TextureId>,
+        actions: &mut Vec<LibraryAction>,
+        hovered: &mut Option<String>,
+    ) {
+        let width = ui.available_width();
+        let cols = (((width + GAP) / (MIN_CARD + GAP)).floor() as usize).max(1);
+        let card_w = (width - GAP * (cols - 1) as f32) / cols as f32;
+        let pic_h = card_w * 9.0 / 16.0;
+        let card_h = pic_h + 20.0;
+        for row in items.chunks(cols) {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = GAP;
+                for e in row {
+                    self.card(ui, e, egui::vec2(card_w, card_h), pic_h, thumb, actions, hovered);
+                }
+            });
+            ui.add_space(GAP - ui.spacing().item_spacing.y);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn card(
+        &mut self,
+        ui: &mut egui::Ui,
+        e: &Entry,
+        size: egui::Vec2,
+        pic_h: f32,
+        thumb: &dyn Fn(&str) -> Option<egui::TextureId>,
+        actions: &mut Vec<LibraryAction>,
+        hovered: &mut Option<String>,
+    ) {
         let ok = e.status == Status::Ok;
-        let text = match &e.status {
-            Status::Ok => RichText::new(&e.name),
-            Status::Checking => RichText::new(&e.name).weak(),
-            Status::Unsupported(_) => RichText::new(&e.name).weak().strikethrough(),
-        };
         let sense = if ok { Sense::click_and_drag() } else { Sense::hover() };
-        let resp = ui.add(egui::Button::selectable(false, text).sense(sense));
+        let (rect, resp) = ui.allocate_exact_size(size, sense);
+        if !ui.is_rect_visible(rect) {
+            return;
+        }
+        self.visible.push(e.key.clone());
+        let pic = Rect::from_min_size(rect.min, egui::vec2(size.x, pic_h));
+        let painter = ui.painter_at(rect);
+        let radius = CornerRadius::same(4);
+        painter.rect_filled(pic, radius, Color32::from_gray(24));
+        match thumb(&e.key) {
+            Some(id) => {
+                let tint = if ok { Color32::WHITE } else { Color32::from_gray(90) };
+                egui::Image::new((id, pic.size())).corner_radius(radius).tint(tint).paint_at(ui, pic);
+            }
+            None => {
+                let msg = match &e.status {
+                    Status::Unsupported(_) => "unsupported",
+                    _ => "…",
+                };
+                painter.text(pic.center(), egui::Align2::CENTER_CENTER, msg, egui::FontId::proportional(11.0), Color32::from_gray(110));
+            }
+        }
+        if resp.hovered() && ok {
+            painter.rect_stroke(pic, radius, Stroke::new(1.5, ACCENT), StrokeKind::Inside);
+            *hovered = Some(e.key.clone());
+            ui.ctx().request_repaint();
+        }
+        let text = RichText::new(&e.name).size(12.0);
+        let text = if ok { text } else { text.weak().strikethrough() };
+        let galley = egui::WidgetText::from(text).into_galley(ui, Some(TextWrapMode::Truncate), size.x, TextStyle::Small);
+        let color = if ok { ui.visuals().text_color() } else { ui.visuals().weak_text_color() };
+        painter.galley(egui::pos2(rect.left(), pic.bottom() + 3.0), galley, color);
+
         let resp = resp.on_hover_ui(|ui| {
             ui.set_max_width(320.0);
             ui.label(RichText::new(&e.name).strong());
+            let what = if e.kind == Kind::Generator { "generator" } else { "effect" };
+            ui.label(RichText::new(format!("{} · {what}", e.category)).small());
             if !e.description.is_empty() {
                 ui.label(&e.description);
             }
             if !e.credit.is_empty() {
                 ui.label(RichText::new(format!("by {}", e.credit)).small().weak());
             }
-            ui.label(RichText::new(e.path.display().to_string()).small().weak());
+            if matches!(e.source, Source::File(_)) {
+                ui.label(RichText::new(e.location()).small().weak());
+            }
             if let Status::Unsupported(why) = &e.status {
                 ui.colored_label(Color32::from_rgb(255, 120, 100), why);
             }
@@ -149,10 +276,19 @@ impl LibraryView {
         if !ok {
             return;
         }
-        let drag = Drag { path: e.path.clone(), name: e.name.clone(), kind: e.kind };
+        let drag = Drag { key: e.key.clone(), name: e.name.clone(), kind: e.kind };
         if resp.double_clicked() {
             actions.push(LibraryAction::Use(drag.clone()));
         }
         resp.dnd_set_drag_payload(drag);
     }
+}
+
+/// A small toggle button for the category row.
+fn chip(ui: &mut egui::Ui, on: bool, text: &str) -> egui::Response {
+    let text = RichText::new(text).size(11.5);
+    let text = if on { text.color(Color32::BLACK) } else { text };
+    let mut b = egui::Button::new(text).corner_radius(10.0).min_size(egui::vec2(0.0, 20.0));
+    b = if on { b.fill(ACCENT) } else { b.fill(Color32::from_gray(38)) };
+    ui.add(b)
 }

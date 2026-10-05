@@ -120,6 +120,10 @@ compiles as you type, like KodeLife. Add one from a grid cell's right-click menu
   * A companion `Name.vs` vertex shader next to `Name.fs` is picked up automatically. It runs
     per pixel, which matches the usual use (neighbouring-texel coordinates and the like); ones
     that move vertices (`gl_Position`) don't work.
+  * Code written for other hosts mostly works as is: re-declared built-ins (`uniform float
+    TIME;`) are ignored, and `centroid` / `patch` / `sample` are fine as names. The audio names
+    some hosts add (`audioBass`, `audioLevel`, `sampleFFT`, …) read as silence, except
+    `audioBeat`, `audioBeatPhase` and `audioBPM`, which follow the tempo clock.
 * **WGSL** also works. It's detected by `@fragment`, and your own entry point is used. It runs
   in screen space (y down). It can use:
   * `inputs.size` (`vec3f`), `inputs.time`, `inputs.mouse`, `inputs.date`, `inputs.frame`,
@@ -146,19 +150,28 @@ compiles as you type, like KodeLife. Add one from a grid cell's right-click menu
   samplers can't be passed into functions. naga is also stricter than WebGL; for example,
   write `ivec2(p) % ivec2(4)`, not `ivec2(p) % 4`.
 
-**ISF library.** The *ISF library* panel (toggle it in the top bar) browses folders of ISF
-shaders: `/Library/Graphics/ISF` and `~/Library/Graphics/ISF` by default, `--isf DIR` (repeatable)
-or *Folder…* to pick another. Shaders are split into **Generators** and **Effects** and filed by
-their `CATEGORIES`. Search matches names, categories and descriptions.
+**Library.** The *Library* panel (toggle it in the top bar) browses the shaders that come with
+tripslop: about 355 generators and 25 effects, baked into the binary from
+[`assets/isf`](assets/isf/README.md), so it works the same on every platform without looking
+anywhere on disk. They're shown as picture cards, split into **Generators** and **Effects** and
+filed into categories (Fractals, Tunnels & Portals, Three-Body Orbits, 3D Rooms, Simulations…).
+Click a category chip to show just that one. Search matches names, categories, descriptions and
+tags.
+* Hover a card to see it move. Effects are shown processing a sample photo.
 * Drag a generator onto a grid cell, or double-click it to load into the selected cell (or the
   layer's first free one).
 * Drag an effect onto a layer (its header or any of its cells), or double-click it to add it to
   the selected layer; on the Composition tab it goes on the master chain.
-* Every shader is test-compiled in the background. Ones tripslop can't run yet (mostly
-  multi-pass) are hidden; *show unsupported* lists them struck through, with the reason on
-  hover. Transitions aren't supported yet.
-* `cargo test --release isf_folder -- --ignored --nocapture` prints a compatibility report for
-  the installed folders.
+* Shaders start with tuned settings where the library has them.
+* *Add folder…* (or `--isf DIR`, repeatable) also lists your own `.fs` files, filed by their
+  `CATEGORIES`. Nothing outside the bundle is read unless you add it.
+* Every shader is test-compiled in the background. Ones tripslop can't run yet (multi-pass) are
+  hidden; *show unsupported* lists them struck through, with the reason on hover. Transitions
+  aren't supported yet.
+* To add a shader to the bundle, drop it in `assets/isf` and give it a name and category in
+  `assets/isf/library.json`.
+* `cargo test --release isf_report -- --ignored --nocapture` prints a compatibility report for
+  the bundle (plus a folder in `TRIPSLOP_ISF`, if set).
 
 **Automation.** Every parameter has a `~` button that attaches a signal generator:
 * Shapes: sine, triangle, saw up/down, square, sample & hold, smooth random drift, or a
@@ -268,8 +281,9 @@ Layers and columns are **1-based**, like the UI.
 | --- | --- |
 | `demo` | load the demo set |
 | `launch-scene N` · `launch L C` · `stop L` | launch a scene / a clip; stop a layer |
-| `load L C PATH` · `generator L C NAME` · `shader L C TEMPLATE` · `camera L C INDEX` | put media in a cell (layers are created as needed) |
-| `add-effect L NAME` · `add-effect master NAME` | add an effect by name; `shader:TEMPLATE` adds a code effect, `file:PATH` a shader file (e.g. an ISF `.fs`) |
+| `load L C PATH` · `generator L C NAME` · `shader L C TEMPLATE` · `isf L C NAME` · `camera L C INDEX` | put media in a cell (layers are created as needed); `isf` takes a library generator's name |
+| `add-effect L NAME` · `add-effect master NAME` | add an effect by name; `shader:TEMPLATE` adds a code effect, `isf:NAME` a library effect, `file:PATH` a shader file (e.g. an ISF `.fs`) |
+| `library generators/effects [CATEGORY]` | show the library browser on that view (for screenshots) |
 | `set PATH VALUE` | set a parameter (see paths below) |
 | `bpm N` · `quantize off/beat/bar` · `play` · `pause` | transport |
 | `crossfade bank/layer [linear/smooth/cut]` · `side L a/b/off` | crossfader mode and curve; a layer's side |
@@ -294,7 +308,7 @@ case-insensitively by prefix, so `2/feedback/rot` works. Paths can contain space
 **Tests:**
 * `cargo test` runs the unit tests (no window).
 * `cargo test --release -- --ignored` also runs the scripts in `scripts/` (smoke, shaders,
-  punch tour, shape, projection, crossfade, resolution) as end-to-end tests. These need a GPU and a window session. Captures go to
+  punch tour, shape, projection, crossfade, resolution, library) as end-to-end tests. These need a GPU and a window session. Captures go to
   `target/script-out/`.
 
 For a quick single still, use `TRIPSLOP_SNAPSHOT=<frames>:<out.png>`. It saves the output after
