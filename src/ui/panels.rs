@@ -8,7 +8,8 @@ use crate::effects::{EFFECTS, Effect, EffectKind, FEEDBACK_PRESETS, apply_feedba
 use crate::modulation::Clock;
 use crate::shader::{Role, TEMPLATES};
 use crate::ui::shader_editor;
-use crate::ui::widgets::{self, ACCENT};
+use crate::ui::theme;
+use crate::ui::widgets;
 
 pub fn section(ui: &mut egui::Ui, title: &str, open: bool, body: impl FnOnce(&mut egui::Ui)) {
     egui::CollapsingHeader::new(RichText::new(title).strong())
@@ -127,7 +128,7 @@ pub fn effect_chain(ui: &mut egui::Ui, effects: &mut Vec<Effect>, owner: u64, cl
         effects.swap(a, b);
     }
     ui.add_space(4.0);
-    ui.menu_button(RichText::new("+ Add effect").color(ACCENT), |ui| {
+    ui.menu_button(RichText::new("+ Add effect").color(theme::LIVE), |ui| {
         let mut last_cat = "";
         for d in EFFECTS {
             if d.category != last_cat {

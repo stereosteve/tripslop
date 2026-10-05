@@ -10,7 +10,8 @@ use crate::audio::Band;
 use crate::modulation::{BEAT_CHOICES, Clock, Modulator, Polarity, Rate, Shape};
 use crate::param::Param;
 
-pub const ACCENT: Color32 = Color32::from_rgb(255, 120, 220);
+/// Automation pink (see `theme`).
+pub const ACCENT: Color32 = crate::ui::theme::MOD;
 
 /// A parameter slider (or dropdown, for choices) with an automation button.
 pub fn param(ui: &mut egui::Ui, p: &mut Param, clock: Clock) -> egui::Response {

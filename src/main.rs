@@ -122,7 +122,7 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| {
             let rs = cc.wgpu_render_state.as_ref().ok_or("tripslop needs the wgpu renderer")?;
-            cc.egui_ctx.set_theme(egui::ThemePreference::Dark);
+            ui::theme::apply(&cc.egui_ctx);
             egui_extras::install_image_loaders(&cc.egui_ctx);
             if bake {
                 // A build-time chore that needs the GPU: write assets/isf/baked.json and thumbs/, then quit.
@@ -837,13 +837,13 @@ impl App {
         let l = self.audio.levels;
         let (rect, _) = ui.allocate_exact_size(egui::vec2(52.0, 18.0), egui::Sense::hover());
         let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 2.0, Color32::from_gray(20));
+        painter.rect_filled(rect, 2.0, ui::theme::GROUND);
         for (i, v) in [l.level, l.bass, l.mid, l.high].into_iter().enumerate() {
             let x = rect.left() + 2.0 + i as f32 * 10.0;
             let h = (rect.height() - 4.0) * v.clamp(0.0, 1.0);
-            painter.rect_filled(Rect::from_min_max(pos2(x, rect.bottom() - 2.0 - h), pos2(x + 8.0, rect.bottom() - 2.0)), 1.0, ui::widgets::ACCENT);
+            painter.rect_filled(Rect::from_min_max(pos2(x, rect.bottom() - 2.0 - h), pos2(x + 8.0, rect.bottom() - 2.0)), 1.0, ui::theme::AUDIO);
         }
-        painter.circle_filled(pos2(rect.right() - 6.0, rect.center().y), 4.0, Color32::from_rgb(255, 200, 60).gamma_multiply(l.kick.max(0.08)));
+        painter.circle_filled(pos2(rect.right() - 6.0, rect.center().y), 4.0, ui::theme::QUEUED.gamma_multiply(l.kick.max(0.08)));
         if self.audio.source_name().is_some() {
             ui.ctx().request_repaint();
         }
@@ -1036,7 +1036,7 @@ impl App {
             let beat_in_bar = (self.beat.floor() as i64).rem_euclid(4) as usize;
             for i in 0..4 {
                 let c = r.left_center() + egui::vec2(6.0 + i as f32 * 13.0, 0.0);
-                let amber = Color32::from_rgb(255, 190, 40);
+                let amber = ui::theme::LIVE;
                 if i == beat_in_bar {
                     ui.painter().circle_filled(c, 5.0, amber);
                 } else {
@@ -1064,7 +1064,7 @@ impl App {
             };
             let mut rec_btn = egui::Button::new(rec_label);
             if self.recorder.is_some() {
-                rec_btn = rec_btn.fill(Color32::from_rgb(200, 30, 40));
+                rec_btn = rec_btn.fill(ui::theme::RECORD);
             }
             if ui.add(rec_btn).clicked() {
                 self.toggle_recording();
@@ -1127,17 +1127,17 @@ impl App {
             let center = rect.center() + egui::vec2(layer.pos_x.get() * rect.width(), -layer.pos_y.get() * rect.height());
             let r = Rect::from_center_size(center, rect.size() * layer.scale.get());
             let painter = ui.painter_at(rect);
-            painter.rect_stroke(r, 0.0, egui::Stroke::new(1.0, ui::widgets::ACCENT), egui::StrokeKind::Middle);
+            painter.rect_stroke(r, 0.0, egui::Stroke::new(1.0, ui::theme::LIVE), egui::StrokeKind::Middle);
             painter.text(
                 rect.left_top() + egui::vec2(6.0, 6.0),
                 egui::Align2::LEFT_TOP,
                 format!("{}: drag = move, scroll = scale", layer.name),
                 egui::FontId::proportional(12.0),
-                ui::widgets::ACCENT,
+                ui::theme::LIVE,
             );
         }
         if self.recorder.is_some() {
-            ui.painter().circle_filled(rect.right_top() + egui::vec2(-14.0, 14.0), 6.0, Color32::from_rgb(230, 30, 40));
+            ui.painter().circle_filled(rect.right_top() + egui::vec2(-14.0, 14.0), 6.0, ui::theme::RECORD);
         }
     }
 
@@ -1259,7 +1259,7 @@ impl eframe::App for App {
                 });
             });
             egui::Panel::left("monitor").resizable(true).default_size(560.0).show(ui, |ui| {
-                ui.label(RichText::new("Output").strong());
+                ui.label(ui::theme::caption("Output"));
                 let (ow, oh) = self.renderer.size();
                 let h = ui.available_width() * oh as f32 / ow as f32;
                 ui.allocate_ui(egui::vec2(ui.available_width(), h), |ui| self.monitor(ui));
@@ -1277,7 +1277,7 @@ impl eframe::App for App {
                 self.renderer.library_previews(&self.library, &self.library_view.visible, self.library_view.hover());
             }
             egui::Panel::right("clip").resizable(true).default_size(380.0).show(ui, |ui| {
-                ui.label(RichText::new("Clip").strong());
+                ui.label(ui::theme::caption("Clip"));
                 ui.separator();
                 egui::ScrollArea::vertical().id_salt("clip scroll").show(ui, |ui| {
                     let sel = self.grid.selected_clip;

@@ -3,13 +3,14 @@
 use eframe::egui::{self, Color32, RichText, Sense, Stroke, StrokeKind, vec2};
 
 use crate::punch::{PUNCHES, Punch};
+use crate::ui::theme;
 use crate::ui::widgets::ACCENT;
 
-const AMBER: Color32 = Color32::from_rgb(255, 190, 40);
+
 
 pub fn pads(ui: &mut egui::Ui, punch: &mut Punch) {
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Punch-in FX").strong());
+        ui.label(theme::caption("Punch-in"));
         ui.label(RichText::new("hold keys / click · Shift = latch · right-click: MIDI").small().weak());
         if punch.pads.iter().any(|p| p.latched) && ui.small_button("Unlatch all").clicked() {
             for p in &mut punch.pads {
@@ -40,33 +41,33 @@ pub fn pads(ui: &mut egui::Ui, punch: &mut Punch) {
                 let base = ui.visuals().widgets.inactive.bg_fill;
                 let fill = if pad.amount > 0.0 {
                     Color32::from_rgb(
-                        lerp(base.r(), ACCENT.r(), pad.amount),
-                        lerp(base.g(), ACCENT.g(), pad.amount),
-                        lerp(base.b(), ACCENT.b(), pad.amount),
+                        lerp(base.r(), theme::LIVE.r(), pad.amount),
+                        lerp(base.g(), theme::LIVE.g(), pad.amount),
+                        lerp(base.b(), theme::LIVE.b(), pad.amount),
                     )
                 } else {
                     base
                 };
                 painter.rect_filled(rect, 4.0, fill);
                 if pad.latched {
-                    painter.rect_stroke(rect, 4.0, Stroke::new(2.0, AMBER), StrokeKind::Inside);
+                    painter.rect_stroke(rect, 4.0, Stroke::new(2.0, theme::LIVE), StrokeKind::Inside);
                 }
                 if learning {
                     painter.rect_stroke(rect, 4.0, Stroke::new(2.0, ACCENT), StrokeKind::Inside);
                 }
-                let text = if pad.amount > 0.5 { Color32::BLACK } else { ui.visuals().text_color() };
+                let text = if pad.amount > 0.5 { theme::ON_LIT } else { ui.visuals().text_color() };
                 painter.text(
                     rect.left_top() + vec2(5.0, 3.0),
                     egui::Align2::LEFT_TOP,
                     format!("{:?}", def.key),
-                    egui::FontId::monospace(11.0),
+                    theme::bold(12.0),
                     text,
                 );
                 painter.text(
                     rect.left_bottom() + vec2(5.0, -4.0),
                     egui::Align2::LEFT_BOTTOM,
                     def.name,
-                    egui::FontId::proportional(11.0),
+                    theme::semibold(12.5),
                     text,
                 );
             }

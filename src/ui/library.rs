@@ -8,7 +8,7 @@ use std::time::Instant;
 use eframe::egui::{self, Color32, CornerRadius, Rect, RichText, Sense, Stroke, StrokeKind, TextStyle, TextWrapMode};
 
 use crate::isf_library::{Drag, Entry, Kind, Library, Source, Status};
-use crate::ui::widgets::ACCENT;
+use crate::ui::theme;
 
 pub enum LibraryAction {
     /// Double-clicked: a generator goes into the selected cell, an effect onto the selected
@@ -197,7 +197,7 @@ impl LibraryView {
             let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("isf drag")));
             let text = painter.layout_no_wrap(d.name.clone(), egui::FontId::proportional(13.0), Color32::BLACK);
             let rect = Rect::from_min_size(pos + egui::vec2(12.0, 4.0), text.size() + egui::vec2(12.0, 6.0));
-            painter.rect_filled(rect, 4.0, ACCENT);
+            painter.rect_filled(rect, 4.0, theme::LIVE);
             painter.galley(rect.min + egui::vec2(6.0, 3.0), text, Color32::BLACK);
         }
         actions
@@ -267,7 +267,7 @@ impl LibraryView {
             }
         }
         if resp.hovered() && ok {
-            painter.rect_stroke(pic, radius, Stroke::new(1.5, ACCENT), StrokeKind::Inside);
+            painter.rect_stroke(pic, radius, Stroke::new(1.5, theme::LIVE), StrokeKind::Inside);
             *hovered = Some(e.key.clone());
             ui.ctx().request_repaint();
         }
@@ -326,8 +326,8 @@ impl LibraryView {
 /// A small toggle button for the category row.
 fn chip(ui: &mut egui::Ui, on: bool, text: &str) -> egui::Response {
     let text = RichText::new(text).size(11.5);
-    let text = if on { text.color(Color32::BLACK) } else { text };
+    let text = if on { text.color(theme::ON_LIT) } else { text };
     let mut b = egui::Button::new(text).corner_radius(10.0).min_size(egui::vec2(0.0, 20.0));
-    b = if on { b.fill(ACCENT) } else { b.fill(Color32::from_gray(38)) };
+    b = if on { b.fill(theme::LIVE) } else { b.fill(theme::RAISED_HI) };
     ui.add(b)
 }

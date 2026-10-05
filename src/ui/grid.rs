@@ -7,11 +7,12 @@ use eframe::egui::{self, Color32, Rect, RichText, Sense, Stroke, StrokeKind, pos
 use crate::clip::{Media, PATTERNS};
 use crate::composition::{Composition, Launch, Side};
 use crate::isf_library::{Drag, Kind};
+use crate::ui::theme;
 use crate::ui::widgets::ACCENT;
 
 pub const CELL: egui::Vec2 = egui::Vec2::new(112.0, 82.0);
 const HEADER_W: f32 = 236.0;
-const AMBER: Color32 = Color32::from_rgb(255, 190, 40);
+const AMBER: Color32 = theme::QUEUED;
 
 /// Things the grid asks the app to do (they need dialogs, devices or app state).
 pub enum GridAction {
@@ -56,7 +57,7 @@ impl GridView {
                 if pending && blink {
                     b = b.fill(AMBER);
                 } else if active {
-                    b = b.fill(ACCENT.gamma_multiply(0.6));
+                    b = b.fill(theme::LIVE.gamma_multiply(0.8));
                 }
                 let hint = if col < 9 { format!("Launch scene {} (key {})", col + 1, col + 1) } else { format!("Launch scene {}", col + 1) };
                 let key = crate::ui::midi::LearnKey::Scene(col);
@@ -233,16 +234,16 @@ impl GridView {
             if playing && clip.is_timeline() {
                 let t = clip.position as f32 / clip.length().max(1) as f32;
                 let r = Rect::from_min_size(pos2(rect.left(), thumb_rect.bottom() - 2.0), vec2(CELL.x * t, 2.0));
-                painter.rect_filled(r, 0.0, ACCENT);
+                painter.rect_filled(r, 0.0, theme::TEXT_STRONG);
             }
             let name_rect = Rect::from_min_max(pos2(rect.left(), thumb_rect.bottom()), rect.max);
-            painter.rect_filled(name_rect, 0.0, if playing { ACCENT.gamma_multiply(0.7) } else { visuals.faint_bg_color });
+            painter.rect_filled(name_rect, 0.0, if playing { theme::LIVE } else { visuals.faint_bg_color });
             painter.text(
                 name_rect.left_center() + vec2(4.0, 0.0),
                 egui::Align2::LEFT_CENTER,
                 truncate(&clip.name, 16),
                 egui::FontId::proportional(11.5),
-                if playing { Color32::BLACK } else { visuals.text_color() },
+                if playing { theme::ON_LIT } else { visuals.text_color() },
             );
         } else if resp.hovered() {
             painter.text(rect.center(), egui::Align2::CENTER_CENTER, "drop / right-click", egui::FontId::proportional(10.0), visuals.weak_text_color());
@@ -253,7 +254,7 @@ impl GridView {
         } else if selected {
             Stroke::new(2.0, Color32::WHITE)
         } else if playing {
-            Stroke::new(2.0, ACCENT)
+            Stroke::new(2.0, theme::LIVE)
         } else {
             Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color)
         };
