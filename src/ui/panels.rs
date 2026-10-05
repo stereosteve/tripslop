@@ -3,7 +3,7 @@
 use eframe::egui::{self, RichText};
 
 use crate::clip::{Clip, Direction, Fit, LoopMode, Media, Sync};
-use crate::composition::{Blend, Composition, Crossfade, FadeCurve, Quantize, Side};
+use crate::composition::Composition;
 use crate::effects::{EFFECTS, Effect, EffectKind, FEEDBACK_PRESETS, apply_feedback_preset};
 use crate::modulation::Clock;
 use crate::shader::{Role, TEMPLATES};
@@ -26,31 +26,9 @@ pub fn layer_panel(ui: &mut egui::Ui, comp: &mut Composition, li: usize, clock: 
         ui.label("Name");
         ui.text_edit_singleline(&mut layer.name);
     });
-    section(ui, "Layer", true, |ui| {
-        widgets::param(ui, &mut layer.opacity, clock);
-        ui.horizontal(|ui| {
-            egui::ComboBox::from_id_salt(("blend", layer.id))
-                .selected_text(layer.blend.name())
-                .show_ui(ui, |ui| {
-                    for b in Blend::ALL {
-                        ui.selectable_value(&mut layer.blend, b, b.name());
-                    }
-                });
-            ui.label("blend mode");
-        });
-        ui.horizontal(|ui| {
-            ui.label("Crossfader");
-            ui.selectable_value(&mut layer.side, Side::Both, "Off");
-            ui.selectable_value(&mut layer.side, Side::A, "A");
-            ui.selectable_value(&mut layer.side, Side::B, "B");
-            ui.separator();
-            ui.toggle_value(&mut layer.bypass, "Bypass");
-            ui.toggle_value(&mut layer.solo, "Solo");
-        });
-        widgets::param(ui, &mut layer.transition, clock).on_hover_text("Crossfade time when switching clips on this layer");
-    });
-    section(ui, "Transform", true, |ui| {
-        widgets::param_grid(ui, [&mut layer.pos_x, &mut layer.pos_y, &mut layer.scale, &mut layer.rotation], clock);
+    section(ui, "Layer out", true, |ui| {
+        // Opacity, blend, crossfader side and mute / solo live on the layer's header in the grid.
+        widgets::param_grid(ui, [&mut layer.opacity, &mut layer.pos_x, &mut layer.pos_y, &mut layer.scale, &mut layer.rotation, &mut layer.transition], clock);
         if ui.small_button("Reset transform").clicked() {
             for p in [&mut layer.pos_x, &mut layer.pos_y, &mut layer.scale, &mut layer.rotation] {
                 p.set(p.spec.default);
@@ -280,44 +258,9 @@ pub fn clip_panel(ui: &mut egui::Ui, clip: Option<&mut Clip>, clock: Clock) {
     });
 }
 
+/// The master chain and the automation list. Master level, crossfader and launch quantize
+/// live in the right rail and the transport.
 pub fn composition_panel(ui: &mut egui::Ui, comp: &mut Composition, clock: Clock) {
-    section(ui, "Composition", true, |ui| {
-        widgets::param(ui, &mut comp.master, clock);
-        widgets::param(ui, &mut comp.crossfader, clock);
-        ui.horizontal(|ui| {
-            egui::ComboBox::from_id_salt("crossfade mode")
-                .selected_text(comp.crossfade.name())
-                .show_ui(ui, |ui| {
-                    for m in Crossfade::ALL {
-                        ui.selectable_value(&mut comp.crossfade, m, m.name());
-                    }
-                })
-                .response
-                .on_hover_text(
-                    "Banks: A and B layers are composited separately (unassigned layers go in both) and the \
-                     fader dissolves between the two pictures.\nLayer opacity: the fader fades the opacity of \
-                     A / B layers in place.",
-                );
-            if comp.crossfade == Crossfade::Bank {
-                egui::ComboBox::from_id_salt("fade curve")
-                    .selected_text(comp.fade_curve.name())
-                    .show_ui(ui, |ui| {
-                        for c in FadeCurve::ALL {
-                            ui.selectable_value(&mut comp.fade_curve, c, c.name());
-                        }
-                    });
-            }
-        });
-        ui.horizontal(|ui| {
-            egui::ComboBox::from_id_salt("quantize")
-                .selected_text(comp.quantize.name())
-                .show_ui(ui, |ui| {
-                    for q in Quantize::ALL {
-                        ui.selectable_value(&mut comp.quantize, q, q.name());
-                    }
-                });
-        });
-    });
     section(ui, "Master effects", true, |ui| effect_chain(ui, &mut comp.effects, 0, clock));
     section(ui, "Automation", true, |ui| widgets::overview(ui, comp, clock));
 }

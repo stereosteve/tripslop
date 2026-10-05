@@ -10,8 +10,11 @@ use crate::isf_library::{Drag, Kind};
 use crate::ui::theme;
 use crate::ui::widgets::ACCENT;
 
-pub const CELL: egui::Vec2 = egui::Vec2::new(112.0, 82.0);
-const HEADER_W: f32 = 236.0;
+pub const CELL: egui::Vec2 = egui::Vec2::new(124.0, 80.0);
+const HEADER_W: f32 = 204.0;
+const GAP: f32 = 6.0;
+/// Height of the name strip at the bottom of a cell.
+const STRIP: f32 = 19.0;
 const AMBER: Color32 = theme::QUEUED;
 
 /// Things the grid asks the app to do (they need dialogs, devices or app state).
@@ -45,32 +48,39 @@ impl GridView {
     pub fn show(&mut self, ui: &mut egui::Ui, comp: &mut Composition, blink: bool, thumbs: &HashMap<u64, egui::TextureId>) -> Vec<GridAction> {
         let mut actions = Vec::new();
         self.cells.clear();
-        ui.spacing_mut().item_spacing = vec2(3.0, 3.0);
+        ui.spacing_mut().item_spacing = vec2(GAP, GAP);
 
         // Column (scene) headers.
         ui.horizontal(|ui| {
-            ui.add_sized(vec2(HEADER_W, 22.0), egui::Label::new(RichText::new("Scenes").weak()));
+            let (r, _) = ui.allocate_exact_size(vec2(HEADER_W, 26.0), Sense::hover());
+            ui.painter().text(r.left_center() + vec2(2.0, 0.0), egui::Align2::LEFT_CENTER, "LAYERS", theme::semibold(11.0), theme::FAINT);
+            ui.painter().text(r.right_center() - vec2(6.0, 0.0), egui::Align2::RIGHT_CENTER, "SCENES", theme::semibold(11.0), theme::FAINT);
             for col in 0..comp.columns {
                 let pending = comp.is_pending(Launch::Column(col));
                 let active = comp.active_column == Some(col);
-                let mut b = egui::Button::new(RichText::new(format!("▶ {}", col + 1)).strong()).min_size(vec2(CELL.x, 22.0));
-                if pending && blink {
-                    b = b.fill(AMBER);
-                } else if active {
-                    b = b.fill(theme::LIVE.gamma_multiply(0.8));
-                }
-                let hint = if col < 9 { format!("Launch scene {} (key {})", col + 1, col + 1) } else { format!("Launch scene {}", col + 1) };
+                let (fill, text, stroke) = if active {
+                    (theme::LIVE, theme::ON_LIT, Stroke::new(1.0, theme::LIVE))
+                } else if pending {
+                    (theme::CONTROL, theme::QUEUED, Stroke::new(1.0, if blink { theme::QUEUED } else { theme::LINE }))
+                } else {
+                    (theme::RAISED, theme::TEXT, Stroke::new(1.0, theme::LINE_SOFT))
+                };
+                let mut b = egui::Button::new(RichText::new(format!("▶  {}", col + 1)).font(theme::semibold(13.0)).color(text))
+                    .min_size(vec2(CELL.x, 26.0))
+                    .fill(fill)
+                    .stroke(stroke);
                 let key = crate::ui::midi::LearnKey::Scene(col);
                 if crate::ui::midi::is_learning(ui, key) {
-                    b = b.stroke(egui::Stroke::new(2.0, ACCENT));
+                    b = b.stroke(Stroke::new(2.0, ACCENT));
                 }
+                let hint = if col < 9 { format!("Launch scene {} (key {})", col + 1, col + 1) } else { format!("Launch scene {}", col + 1) };
                 let r = ui.add(b).on_hover_text(hint);
                 r.context_menu(|ui| crate::ui::midi::menu(ui, key));
                 if r.clicked() {
                     actions.push(GridAction::Launch(Launch::Column(col)));
                 }
             }
-            if ui.add(egui::Button::new("+").min_size(vec2(26.0, 22.0))).on_hover_text("Add column").clicked() {
+            if ui.add(egui::Button::new("+").min_size(vec2(26.0, 26.0))).on_hover_text("Add a scene").clicked() {
                 actions.push(GridAction::AddColumn);
             }
         });
@@ -83,7 +93,8 @@ impl GridView {
                 }
             });
         }
-        if ui.button("+ Add layer").clicked() {
+        let add = egui::Button::new(RichText::new("+ Add layer").color(theme::MUTED)).min_size(vec2(HEADER_W, 28.0)).fill(egui::Color32::TRANSPARENT);
+        if ui.add(add).clicked() {
             actions.push(GridAction::AddLayer);
         }
         actions
@@ -92,57 +103,90 @@ impl GridView {
     fn layer_header(&mut self, ui: &mut egui::Ui, comp: &mut Composition, li: usize, actions: &mut Vec<GridAction>) {
         let selected = self.selected_layer == li;
         let audible = comp.layer_audible(li);
-        let frame = egui::Frame::group(ui.style())
-            .inner_margin(4.0)
-            .fill(if selected { ui.visuals().selection.bg_fill.gamma_multiply(0.35) } else { ui.visuals().faint_bg_color });
-        let header = frame.show(ui, |ui| {
-            ui.set_width(HEADER_W - 12.0);
-            ui.set_height(CELL.y - 10.0);
-            ui.vertical(|ui| {
-            ui.set_width(HEADER_W - 12.0);
-            ui.spacing_mut().item_spacing = vec2(3.0, 2.0);
-            let l = &mut comp.layers[li];
-            ui.horizontal(|ui| {
-                let name = RichText::new(&l.name).strong().color(if audible { ui.visuals().strong_text_color() } else { ui.visuals().weak_text_color() });
-                if ui.add(egui::Label::new(name).sense(Sense::click())).clicked() {
-                    actions.push(GridAction::Select { layer: li, col: None });
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("×").on_hover_text("Clear layer (stop its clip)").clicked() {
+        let (rect, resp) = ui.allocate_exact_size(vec2(HEADER_W, CELL.y), Sense::click());
+        let l = &mut comp.layers[li];
+        let color = theme::layer_color(l.color);
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 5.0, if selected { theme::SELECTED } else { theme::PANEL });
+        if selected {
+            painter.rect_stroke(rect, 5.0, Stroke::new(1.0, theme::LINE_HI), StrokeKind::Inside);
+        }
+        let strip = Rect::from_min_size(rect.min + vec2(6.0, 7.0), vec2(4.0, rect.height() - 14.0));
+        painter.rect_filled(strip, 2.0, if audible { color } else { color.gamma_multiply(0.35) });
+        if resp.clicked() {
+            actions.push(GridAction::Select { layer: li, col: None });
+        }
+
+        let inner = Rect::from_min_max(rect.min + vec2(18.0, 6.0), rect.max - vec2(8.0, 6.0));
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(inner).layout(egui::Layout::top_down(egui::Align::Min)));
+        let ui = &mut child;
+        ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+        ui.horizontal(|ui| {
+            let name = RichText::new(&l.name).font(theme::semibold(14.5)).color(if audible { theme::TEXT_STRONG } else { theme::FAINT });
+            if ui.add(egui::Label::new(name).sense(Sense::click()).truncate()).clicked() {
+                actions.push(GridAction::Select { layer: li, col: None });
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 3.0;
+                ui.menu_button(RichText::new("…").color(theme::MUTED), |ui| {
+                    if ui.button("Stop layer").clicked() {
                         actions.push(GridAction::Clear(li));
+                        ui.close();
                     }
-                    ui.menu_button("…", |ui| {
-                        if ui.button("Remove layer").clicked() {
-                            actions.push(GridAction::RemoveLayer(li));
-                            ui.close();
+                    if ui.button("Remove layer").clicked() {
+                        actions.push(GridAction::RemoveLayer(li));
+                        ui.close();
+                    }
+                    ui.separator();
+                    ui.label(theme::caption("Color"));
+                    ui.horizontal(|ui| {
+                        for (i, c) in theme::LAYER_COLORS.iter().enumerate() {
+                            let (r, resp) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::click());
+                            ui.painter().rect_filled(r, 3.0, *c);
+                            if l.color % theme::LAYER_COLORS.len() == i {
+                                ui.painter().rect_stroke(r.expand(2.0), 4.0, Stroke::new(1.5, theme::TEXT_STRONG), StrokeKind::Inside);
+                            }
+                            if resp.clicked() {
+                                l.color = i;
+                            }
                         }
                     });
                 });
-            });
-            ui.horizontal(|ui| {
-                ui.toggle_value(&mut l.bypass, "B").on_hover_text("Bypass (hide) layer");
-                ui.toggle_value(&mut l.solo, "S").on_hover_text("Solo");
-                ui.separator();
-                for (side, label) in [(Side::A, "A"), (Side::B, "B")] {
-                    let on = l.side == side;
-                    if ui.selectable_label(on, label).on_hover_text("Crossfader side").clicked() {
-                        l.side = if on { Side::Both } else { side };
-                    }
-                }
-                ui.separator();
-                ui.label(RichText::new(l.blend.name()).small().weak());
-            });
-            ui.horizontal(|ui| {
-                ui.spacing_mut().slider_width = HEADER_W - 64.0;
-                ui.add(egui::Slider::new(&mut l.opacity.value, 0.0..=1.0).show_value(false))
-                    .on_hover_text("Layer opacity");
-                ui.label(RichText::new(format!("{:.0}%", l.opacity.get() * 100.0)).small());
-            });
+                toggle(ui, &mut l.solo, "S", theme::QUEUED, "Solo");
+                toggle(ui, &mut l.bypass, "M", theme::RECORD, "Mute (bypass) this layer");
             });
         });
-        let resp = &header.response;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            egui::ComboBox::from_id_salt(("blend", l.id))
+                .selected_text(RichText::new(l.blend.name()).size(12.5))
+                .width(ui.available_width() - 56.0)
+                .show_ui(ui, |ui| {
+                    for b in crate::composition::Blend::ALL {
+                        ui.selectable_value(&mut l.blend, b, b.name());
+                    }
+                })
+                .response
+                .on_hover_text("Blend mode");
+            for (side, label, c) in [(Side::A, "A", theme::SIDE_A), (Side::B, "B", theme::SIDE_B)] {
+                let on = l.side == side;
+                let b = egui::Button::new(RichText::new(label).font(theme::bold(11.5)).color(if on { theme::ON_LIT } else { theme::FAINT }))
+                    .min_size(vec2(22.0, 20.0))
+                    .fill(if on { c } else { theme::GROUND });
+                if ui.add(b).on_hover_text("Crossfader side").clicked() {
+                    l.side = if on { Side::Both } else { side };
+                }
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.spacing_mut().slider_width = ui.available_width() - 40.0;
+            ui.visuals_mut().selection.bg_fill = color;
+            ui.add(egui::Slider::new(&mut l.opacity.value, 0.0..=1.0).show_value(false)).on_hover_text("Layer opacity");
+            ui.label(RichText::new(format!("{:.0}%", l.opacity.get() * 100.0)).font(theme::mono(10.5)).color(theme::MUTED));
+        });
+
         if let Some(d) = resp.dnd_hover_payload::<Drag>() {
-            drop_hint(ui, resp.rect, &d, None);
+            drop_hint(ui, rect, &d, None);
         }
         if let Some(d) = resp.dnd_release_payload::<Drag>() {
             actions.push(GridAction::Library { layer: li, col: None, drag: (*d).clone() });
@@ -163,102 +207,108 @@ impl GridView {
         let (rect, resp) = ui.allocate_exact_size(CELL, Sense::click());
         self.cells.push(((li, col), rect));
         let layer = &comp.layers[li];
+        let color = theme::layer_color(layer.color);
         let playing = layer.active == Some(col);
         let pending = comp.is_pending(Launch::Clip { layer: li, col });
         let selected = self.selected_clip == Some((li, col));
-        let painter = ui.painter_at(rect);
-        let visuals = ui.visuals();
-        painter.rect_filled(rect, 3.0, visuals.extreme_bg_color);
+        let painter = ui.painter_at(rect.expand(3.0));
 
-        let thumb_rect = Rect::from_min_size(rect.min, vec2(CELL.x, CELL.y - 18.0));
         if let Some(clip) = layer.clips[col].as_ref() {
+            painter.rect_filled(rect, 4.0, egui::Color32::BLACK);
             let procedural = matches!(clip.media, Media::Generator(_) | Media::Shader(_));
-            let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
             let gpu_thumb = thumbs.get(&clip.id).filter(|_| procedural);
+            let dim = if playing || pending { egui::Color32::WHITE } else { egui::Color32::from_gray(205) };
+            let tag = match &clip.media {
+                Media::Generator(_) => Some("GEN"),
+                Media::Shader(_) => Some("GLSL"),
+                Media::Camera { .. } => Some("CAM"),
+                _ => None,
+            };
             if let Some(t) = gpu_thumb {
-                painter.rect_filled(thumb_rect, 3.0, Color32::BLACK);
-                painter.image(*t, thumb_rect, uv, Color32::WHITE);
-                let tag = match &clip.media {
-                    Media::Generator(_) => Some("GEN"),
-                    Media::Shader(_) => Some("GLSL"),
-                    _ => None,
-                };
-                if let Some(tag) = tag {
-                    let tr = Rect::from_min_size(thumb_rect.left_top(), vec2(30.0, 12.0));
-                    painter.rect_filled(tr, 2.0, Color32::from_black_alpha(160));
-                    painter.text(tr.left_center() + vec2(3.0, 0.0), egui::Align2::LEFT_CENTER, tag, egui::FontId::monospace(9.0), Color32::WHITE);
-                }
-                if let Media::Shader(sh) = &clip.media
-                    && !sh.errors.is_empty()
-                {
-                    painter.text(thumb_rect.center(), egui::Align2::CENTER_CENTER, "error", egui::FontId::proportional(12.0), Color32::RED);
-                }
+                painter.image(*t, rect, cover_uv(rect, 16.0 / 9.0), dim);
             } else {
-            match (&clip.thumbnail, &clip.media) {
-                (Some(t), _) => {
-                    painter.image(t.id(), thumb_rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                match (&clip.thumbnail, &clip.media) {
+                    (Some(t), _) => {
+                        let [w, h] = t.size();
+                        painter.image(t.id(), rect, cover_uv(rect, w as f32 / h.max(1) as f32), dim);
+                    }
+                    (None, Media::Generator(g)) => {
+                        let hue = (g.pattern.value * 0.14 + g.hue.value).fract();
+                        painter.rect_filled(rect, 4.0, egui::Color32::from(egui::ecolor::Hsva::new((hue + 0.33) % 1.0, 0.7, 0.3, 1.0)));
+                        painter.circle_filled(rect.center() - vec2(0.0, 8.0), 14.0, egui::Color32::from(egui::ecolor::Hsva::new(hue, 0.7, 0.6, 1.0)));
+                    }
+                    (None, Media::Shader(_)) => {
+                        painter.rect_filled(rect, 4.0, theme::RAISED_HI);
+                        painter.text(rect.center() - vec2(0.0, 8.0), egui::Align2::CENTER_CENTER, "{ }", theme::mono(18.0), theme::TEXT);
+                    }
+                    _ => {}
                 }
-                (None, Media::Generator(g)) => {
-                    // Gradient swatch for generators.
-                    let hue = (g.pattern.value * 0.14 + g.hue.value).fract();
-                    let c1 = egui::ecolor::Hsva::new(hue, 0.7, 0.6, 1.0);
-                    let c2 = egui::ecolor::Hsva::new((hue + 0.33) % 1.0, 0.7, 0.3, 1.0);
-                    painter.rect_filled(thumb_rect, 3.0, Color32::from(c2));
-                    painter.circle_filled(thumb_rect.center(), 14.0, Color32::from(c1));
-                    painter.text(thumb_rect.left_top() + vec2(4.0, 2.0), egui::Align2::LEFT_TOP, "GEN", egui::FontId::monospace(9.0), Color32::WHITE);
-                }
-                (None, Media::Shader(sh)) => {
-                    painter.rect_filled(thumb_rect, 3.0, Color32::from_rgb(30, 24, 48));
-                    painter.text(thumb_rect.left_top() + vec2(4.0, 2.0), egui::Align2::LEFT_TOP, "GLSL", egui::FontId::monospace(9.0), ACCENT);
-                    let mark = if !sh.errors.is_empty() { "error" } else { "{ }" };
-                    painter.text(thumb_rect.center(), egui::Align2::CENTER_CENTER, mark, egui::FontId::monospace(18.0), Color32::WHITE);
-                }
-                (None, Media::Camera { index, .. }) => {
-                    painter.rect_filled(thumb_rect, 3.0, Color32::from_gray(40));
-                    painter.text(thumb_rect.center(), egui::Align2::CENTER_CENTER, format!("CAM {index}"), egui::FontId::monospace(13.0), Color32::WHITE);
-                }
-                _ => {}
             }
+            if let Some(tag) = tag {
+                let galley = painter.layout_no_wrap(tag.into(), theme::mono(9.0), theme::TEXT);
+                let tr = Rect::from_min_size(rect.left_top() + vec2(4.0, 4.0), galley.size() + vec2(6.0, 2.0));
+                painter.rect_filled(tr, 2.0, egui::Color32::from_black_alpha(170));
+                painter.galley(tr.min + vec2(3.0, 1.0), galley, theme::TEXT);
+            }
+            let shader_error = matches!(&clip.media, Media::Shader(sh) if !sh.errors.is_empty());
+            if shader_error || clip.error().is_some() {
+                let galley = painter.layout_no_wrap("ERROR".into(), theme::bold(9.5), theme::ON_LIT);
+                let tr = Rect::from_min_size(rect.right_top() + vec2(-galley.size().x - 10.0, 4.0), galley.size() + vec2(6.0, 2.0));
+                painter.rect_filled(tr, 2.0, theme::RECORD);
+                painter.galley(tr.min + vec2(3.0, 1.0), galley, theme::ON_LIT);
             }
             if let Media::Video(v) = &clip.media {
                 let p = v.progress();
                 if p < 1.0 {
-                    let r = Rect::from_min_size(thumb_rect.left_bottom() - vec2(0.0, 4.0), vec2(CELL.x * p, 4.0));
-                    painter.rect_filled(r, 0.0, AMBER);
-                    painter.text(thumb_rect.center(), egui::Align2::CENTER_CENTER, "importing…", egui::FontId::proportional(11.0), Color32::WHITE);
+                    painter.rect_filled(rect, 4.0, egui::Color32::from_black_alpha(120));
+                    painter.text(rect.center() - vec2(0.0, 8.0), egui::Align2::CENTER_CENTER, "importing…", theme::body(12.0), theme::TEXT);
+                    let r = Rect::from_min_size(rect.left_bottom() - vec2(0.0, STRIP + 3.0), vec2(rect.width() * p, 3.0));
+                    painter.rect_filled(r, 0.0, theme::QUEUED);
                 }
             }
-            if clip.error().is_some() {
-                painter.text(thumb_rect.center(), egui::Align2::CENTER_CENTER, "⚠ error", egui::FontId::proportional(12.0), Color32::RED);
-            }
-            if playing && clip.is_timeline() {
-                let t = clip.position as f32 / clip.length().max(1) as f32;
-                let r = Rect::from_min_size(pos2(rect.left(), thumb_rect.bottom() - 2.0), vec2(CELL.x * t, 2.0));
-                painter.rect_filled(r, 0.0, theme::TEXT_STRONG);
-            }
-            let name_rect = Rect::from_min_max(pos2(rect.left(), thumb_rect.bottom()), rect.max);
-            painter.rect_filled(name_rect, 0.0, if playing { theme::LIVE } else { visuals.faint_bg_color });
-            painter.text(
-                name_rect.left_center() + vec2(4.0, 0.0),
-                egui::Align2::LEFT_CENTER,
-                truncate(&clip.name, 16),
-                egui::FontId::proportional(11.5),
-                if playing { theme::ON_LIT } else { visuals.text_color() },
-            );
-        } else if resp.hovered() {
-            painter.text(rect.center(), egui::Align2::CENTER_CENTER, "drop / right-click", egui::FontId::proportional(10.0), visuals.weak_text_color());
-        }
 
-        let stroke = if pending && blink {
-            Stroke::new(2.0, AMBER)
-        } else if selected {
-            Stroke::new(2.0, Color32::WHITE)
-        } else if playing {
-            Stroke::new(2.0, theme::LIVE)
+            // Name strip: the layer's color while playing, amber while queued.
+            let name_rect = Rect::from_min_max(pos2(rect.left(), rect.bottom() - STRIP), rect.max);
+            let (strip_fill, strip_text) = if playing {
+                (color, theme::ON_LIT)
+            } else if pending {
+                (theme::QUEUED, theme::ON_LIT)
+            } else {
+                (egui::Color32::from_rgba_unmultiplied(14, 9, 18, 215), theme::TEXT)
+            };
+            painter.rect_filled(name_rect, egui::CornerRadius { nw: 0, ne: 0, sw: 4, se: 4 }, strip_fill);
+            painter.text(name_rect.left_center() + vec2(6.0, 0.0), egui::Align2::LEFT_CENTER, truncate(&clip.name, 18), theme::semibold(12.0), strip_text);
+            if playing {
+                painter.text(name_rect.right_center() - vec2(6.0, 0.0), egui::Align2::RIGHT_CENTER, "▶", theme::body(9.0), strip_text);
+                if clip.is_timeline() {
+                    let t = clip.position as f32 / clip.length().max(1) as f32;
+                    let r = Rect::from_min_size(pos2(rect.left(), rect.bottom() - 2.0), vec2(rect.width() * t, 2.0));
+                    painter.rect_filled(r, 0.0, theme::TEXT_STRONG);
+                }
+            }
+            let ring = if pending && blink {
+                Some(theme::QUEUED)
+            } else if playing {
+                Some(color)
+            } else {
+                None
+            };
+            if let Some(c) = ring {
+                painter.rect_stroke(rect, 4.0, Stroke::new(2.0, c), StrokeKind::Inside);
+            }
         } else {
-            Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color)
-        };
-        painter.rect_stroke(rect, 3.0, stroke, StrokeKind::Inside);
+            // Empty slot: a dashed outline, and a hint on hover.
+            let stroke = Stroke::new(1.0, if resp.hovered() { theme::LINE_HI } else { theme::LINE_SOFT });
+            let r = rect.shrink(0.5);
+            let pts = [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom(), r.left_top()];
+            painter.extend(egui::Shape::dashed_line(&pts, stroke, 4.0, 3.0));
+            if resp.hovered() {
+                painter.text(rect.center(), egui::Align2::CENTER_CENTER, "drop · right-click", theme::body(11.5), theme::FAINT);
+            }
+        }
+        if selected {
+            painter.rect_stroke(rect.expand(2.0), 5.0, Stroke::new(1.5, theme::TEXT_STRONG), StrokeKind::Inside);
+        }
 
         if let Some(d) = resp.dnd_hover_payload::<Drag>() {
             drop_hint(ui, rect, &d, Some(&comp.layers[li].name));
@@ -333,6 +383,29 @@ fn drop_hint(ui: &egui::Ui, rect: Rect, d: &Drag, layer: Option<&str>) {
     let r = Rect::from_min_size(rect.left_bottom() - vec2(0.0, text.size().y + 4.0), text.size() + vec2(8.0, 4.0));
     painter.rect_filled(r, 2.0, AMBER);
     painter.galley(r.min + vec2(4.0, 2.0), text, Color32::BLACK);
+}
+
+/// A small toggle that lights up in `on_color` (M / S on the layer header).
+fn toggle(ui: &mut egui::Ui, value: &mut bool, label: &str, on_color: Color32, hint: &str) {
+    let on = *value;
+    let b = egui::Button::new(RichText::new(label).font(theme::bold(11.0)).color(if on { theme::ON_LIT } else { theme::MUTED }))
+        .min_size(vec2(20.0, 18.0))
+        .fill(if on { on_color } else { theme::CONTROL });
+    if ui.add(b).on_hover_text(hint).clicked() {
+        *value = !on;
+    }
+}
+
+/// UVs that crop a picture of `aspect` (w / h) to fill `rect` (like CSS `object-fit: cover`).
+fn cover_uv(rect: Rect, aspect: f32) -> Rect {
+    let target = rect.width() / rect.height();
+    if aspect > target {
+        let w = target / aspect;
+        Rect::from_min_max(pos2(0.5 - w / 2.0, 0.0), pos2(0.5 + w / 2.0, 1.0))
+    } else {
+        let h = aspect / target;
+        Rect::from_min_max(pos2(0.0, 0.5 - h / 2.0), pos2(1.0, 0.5 + h / 2.0))
+    }
 }
 
 fn truncate(s: &str, n: usize) -> String {

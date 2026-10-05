@@ -162,6 +162,8 @@ impl Default for LayerPerf {
 pub struct Layer {
     pub id: u64,
     pub name: String,
+    /// Index into the UI's layer palette; the layer keeps it when others move.
+    pub color: usize,
     pub clips: Vec<Option<Clip>>,
     /// Playing column.
     pub active: Option<usize>,
@@ -187,6 +189,7 @@ impl Layer {
         Self {
             id: next_id(),
             name,
+            color: 0,
             clips: (0..columns).map(|_| None).collect(),
             active: None,
             fade_from: None,
@@ -314,6 +317,9 @@ pub enum Launch {
     Column(usize),
 }
 
+/// How many layer colors the UI has (see `ui::theme::LAYER_COLORS`).
+pub const LAYER_COLORS: usize = 8;
+
 pub struct Composition {
     /// Bottom layer first (drawn first).
     pub layers: Vec<Layer>,
@@ -336,7 +342,13 @@ pub struct Composition {
 impl Composition {
     pub fn new(layers: usize, columns: usize) -> Self {
         Self {
-            layers: (0..layers).map(|i| Layer::new(format!("Layer {}", i + 1), columns)).collect(),
+            layers: (0..layers)
+                .map(|i| {
+                    let mut l = Layer::new(format!("Layer {}", i + 1), columns);
+                    l.color = i;
+                    l
+                })
+                .collect(),
             columns,
             master: Param::new(Spec::new("master", 0.0, 1.0, 1.0)),
             crossfader: Param::new(Spec::new("crossfader", 0.0, 1.0, 0.5)),
@@ -354,7 +366,12 @@ impl Composition {
 
     pub fn add_layer(&mut self) {
         let n = self.layers.len() + 1;
-        self.layers.push(Layer::new(format!("Layer {n}"), self.columns));
+        let mut l = Layer::new(format!("Layer {n}"), self.columns);
+        // The first palette color nobody has, so neighbours don't share one.
+        l.color = (0..LAYER_COLORS)
+            .find(|c| !self.layers.iter().any(|o| o.color % LAYER_COLORS == *c))
+            .unwrap_or(self.layers.len() % LAYER_COLORS);
+        self.layers.push(l);
     }
 
     pub fn add_column(&mut self) {

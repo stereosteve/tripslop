@@ -90,6 +90,11 @@ fn accent_id() -> egui::Id {
     egui::Id::new("knob accent")
 }
 
+/// Color for the value arcs of the knobs drawn after this (the layer's color, say).
+pub fn set_accent(ctx: &egui::Context, c: Color32) {
+    ctx.data_mut(|d| d.insert_temp(accent_id(), c));
+}
+
 fn accent(ui: &egui::Ui) -> Color32 {
     ui.ctx().data(|d| d.get_temp(accent_id())).unwrap_or(crate::ui::theme::LIVE)
 }

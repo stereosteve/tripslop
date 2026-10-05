@@ -15,6 +15,8 @@ pub const PANEL: Color32 = Color32::from_rgb(0x16, 0x0F, 0x1C);
 pub const SUNKEN: Color32 = Color32::from_rgb(0x13, 0x0D, 0x18);
 pub const RAISED: Color32 = Color32::from_rgb(0x1F, 0x16, 0x27);
 pub const RAISED_HI: Color32 = Color32::from_rgb(0x25, 0x1B, 0x2E);
+/// Background of the selected layer's header.
+pub const SELECTED: Color32 = Color32::from_rgb(0x21, 0x1A, 0x2C);
 pub const CONTROL: Color32 = Color32::from_rgb(0x2A, 0x1F, 0x34);
 pub const CONTROL_HI: Color32 = Color32::from_rgb(0x34, 0x27, 0x40);
 pub const LINE: Color32 = Color32::from_rgb(0x34, 0x28, 0x3F);
@@ -35,6 +37,26 @@ pub const MOD: Color32 = Color32::from_rgb(0xFF, 0x78, 0xDC);
 pub const QUEUED: Color32 = Color32::from_rgb(0xFF, 0xB5, 0x47);
 pub const RECORD: Color32 = Color32::from_rgb(0xFF, 0x5A, 0x5F);
 pub const AUDIO: Color32 = Color32::from_rgb(0x5E, 0xE6, 0xFF);
+
+/// Layer colors (`Layer::color` indexes them); a layer keeps its color everywhere in the UI.
+pub const LAYER_COLORS: [Color32; crate::composition::LAYER_COLORS] = [
+    Color32::from_rgb(0xFF, 0x9E, 0x5E),
+    Color32::from_rgb(0x5E, 0xE6, 0xFF),
+    Color32::from_rgb(0xB9, 0x8C, 0xFF),
+    Color32::from_rgb(0x6C, 0xF2, 0xB0),
+    Color32::from_rgb(0x7F, 0xA8, 0xFF),
+    Color32::from_rgb(0xE8, 0xC9, 0x9B),
+    Color32::from_rgb(0xF2, 0x8D, 0xBE),
+    Color32::from_rgb(0xA8, 0xB4, 0xC8),
+];
+
+/// Crossfader sides.
+pub const SIDE_A: Color32 = LAYER_COLORS[2];
+pub const SIDE_B: Color32 = LAYER_COLORS[0];
+
+pub fn layer_color(i: usize) -> Color32 {
+    LAYER_COLORS[i % LAYER_COLORS.len()]
+}
 
 const SEMIBOLD: &str = "semibold";
 const BOLD: &str = "bold";

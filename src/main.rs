@@ -1182,10 +1182,8 @@ impl App {
             .inner_margin(10)
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                let side_color = |side| {
-                    self.comp.layers.iter().position(|l| l.side == side).map(|_| theme::TEXT_STRONG).unwrap_or(theme::FAINT)
-                };
-                let (a, b) = (side_color(composition::Side::A), side_color(composition::Side::B));
+                let side_color = |side, c| if self.comp.layers.iter().any(|l| l.side == side) { c } else { theme::FAINT };
+                let (a, b) = (side_color(composition::Side::A, theme::SIDE_A), side_color(composition::Side::B, theme::SIDE_B));
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("A").font(theme::bold(14.0)).color(a));
                     ui.spacing_mut().slider_width = ui.available_width() - 22.0;
@@ -1408,6 +1406,9 @@ impl eframe::App for App {
                             ui.label(theme::caption("Clip"));
                             egui::ScrollArea::vertical().id_salt("clip scroll").show(ui, |ui| {
                                 let sel = self.grid.selected_clip;
+                                if let Some(l) = sel.and_then(|(l, _)| self.comp.layers.get(l)) {
+                                    ui::widgets::set_accent(ui.ctx(), theme::layer_color(l.color));
+                                }
                                 let clip = sel.and_then(|(l, c)| self.comp.clip_mut(l, c));
                                 ui::panels::clip_panel(ui, clip, clock);
                             });
@@ -1418,8 +1419,14 @@ impl eframe::App for App {
                             ui.selectable_value(&mut self.tab, Tab::Composition, RichText::new("Master").font(theme::semibold(14.0)));
                         });
                         egui::ScrollArea::vertical().id_salt("inspector").show(ui, |ui| match self.tab {
-                            Tab::Layer => ui::panels::layer_panel(ui, &mut self.comp, self.grid.selected_layer, clock),
+                            Tab::Layer => {
+                                if let Some(l) = self.comp.layers.get(self.grid.selected_layer) {
+                                    ui::widgets::set_accent(ui.ctx(), theme::layer_color(l.color));
+                                }
+                                ui::panels::layer_panel(ui, &mut self.comp, self.grid.selected_layer, clock)
+                            }
                             Tab::Composition => {
+                                ui::widgets::set_accent(ui.ctx(), theme::LIVE);
                                 ui::panels::section(ui, "Output", true, |ui| self.output_settings(ui));
                                 ui::panels::composition_panel(ui, &mut self.comp, clock);
                             }
