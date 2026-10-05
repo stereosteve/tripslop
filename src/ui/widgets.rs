@@ -80,6 +80,206 @@ pub fn param_labeled(ui: &mut egui::Ui, p: &mut Param, label: &str, clock: Clock
     .inner
 }
 
+/// Width of one knob cell (knob, value and label).
+pub const KNOB_W: f32 = 58.0;
+const KNOB_R: f32 = 15.0;
+/// The knob's sweep: 135° either side of 12 o'clock.
+const SWEEP: f32 = 135.0;
+
+fn accent_id() -> egui::Id {
+    egui::Id::new("knob accent")
+}
+
+fn accent(ui: &egui::Ui) -> Color32 {
+    ui.ctx().data(|d| d.get_temp(accent_id())).unwrap_or(crate::ui::theme::LIVE)
+}
+
+/// Point on a knob ring: `deg` is clockwise from 12 o'clock.
+fn ring_point(c: Pos2, r: f32, deg: f32) -> Pos2 {
+    let a = deg.to_radians();
+    pos2(c.x + r * a.sin(), c.y - r * a.cos())
+}
+
+fn arc(painter: &egui::Painter, c: Pos2, r: f32, from: f32, to: f32, stroke: Stroke) {
+    let (a, b) = if from <= to { (from, to) } else { (to, from) };
+    if b - a < 0.5 {
+        return;
+    }
+    let n = ((b - a) / 6.0).ceil().max(2.0) as usize;
+    let pts: Vec<Pos2> = (0..=n).map(|i| ring_point(c, r, a + (b - a) * i as f32 / n as f32)).collect();
+    painter.add(egui::Shape::line(pts, stroke));
+}
+
+fn format_value(spec: &crate::param::Spec, v: f32) -> String {
+    if spec.int {
+        return format!("{v:.0}");
+    }
+    let a = v.abs();
+    if a >= 100.0 {
+        format!("{v:.0}")
+    } else if a >= 10.0 {
+        format!("{v:.1}")
+    } else {
+        format!("{v:.2}")
+    }
+}
+
+/// Choice params as a dropdown row, the rest as a wrapping grid of knobs.
+pub fn param_grid<'a>(ui: &mut egui::Ui, params: impl IntoIterator<Item = &'a mut Param>, clock: Clock) {
+    let mut knobs = Vec::new();
+    for p in params {
+        if p.spec.choices.is_empty() {
+            knobs.push(p);
+        } else {
+            param(ui, p, clock);
+        }
+    }
+    if knobs.is_empty() {
+        return;
+    }
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = vec2(2.0, 6.0);
+        for p in knobs {
+            knob(ui, p, clock);
+        }
+    });
+}
+
+/// A rotary knob: drag up / down (Shift = fine), scroll to nudge, double-click to reset,
+/// right-click for automation, MIDI learn and reset. A pink outer arc shows the automation
+/// range, with a dot at the live value.
+pub fn knob(ui: &mut egui::Ui, p: &mut Param, clock: Clock) -> egui::Response {
+    knob_labeled(ui, p, p.spec.label, clock)
+}
+
+pub fn knob_labeled(ui: &mut egui::Ui, p: &mut Param, label: &str, clock: Clock) -> egui::Response {
+    use crate::ui::theme;
+    let size = vec2(KNOB_W, 40.0 + 14.0 + 14.0);
+    let (rect, mut resp) = ui.allocate_exact_size(size, Sense::click_and_drag());
+    let spec = p.spec;
+
+    // Drag accumulates an unsnapped position so integer knobs still move smoothly.
+    let acc_id = resp.id.with("acc");
+    if resp.drag_started() {
+        ui.data_mut(|d| d.insert_temp(acc_id, p.normalized(p.value)));
+    }
+    if resp.dragged() {
+        let fine = ui.input(|i| i.modifiers.shift);
+        let dy = -resp.drag_delta().y / if fine { 900.0 } else { 180.0 };
+        let t = ui.data(|d| d.get_temp::<f32>(acc_id)).unwrap_or(p.normalized(p.value)) + dy;
+        let t = t.clamp(0.0, 1.0);
+        ui.data_mut(|d| d.insert_temp(acc_id, t));
+        p.set_normalized(t);
+        resp.mark_changed();
+    }
+    if resp.double_clicked() {
+        p.set(spec.default);
+        resp.mark_changed();
+    }
+    if resp.hovered() {
+        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+        if scroll != 0.0 {
+            let step = if spec.int { 1.0 / (spec.max - spec.min).max(1.0) } else { 0.01 };
+            let t = p.normalized(p.value) + step * (scroll / 40.0).clamp(-1.0, 1.0).signum();
+            p.set_normalized(t);
+            ui.input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
+            resp.mark_changed();
+        }
+    }
+
+    let painter = ui.painter_at(rect.expand(2.0));
+    let c = pos2(rect.center().x, rect.top() + 20.0);
+    let angle = |t: f32| -SWEEP + 2.0 * SWEEP * t;
+    let color = accent(ui);
+    let hot = resp.hovered() || resp.dragged();
+    arc(&painter, c, KNOB_R, -SWEEP, SWEEP, Stroke::new(3.5, theme::CONTROL));
+    let t = p.normalized(p.value);
+    let from = if spec.min < 0.0 && spec.max > 0.0 { angle(p.normalized(0.0)) } else { -SWEEP };
+    arc(&painter, c, KNOB_R, from, angle(t), Stroke::new(3.5, color));
+    let modulated = p.is_automated();
+    if modulated && let Some(m) = &p.modulator {
+        let a = p.normalized(m.apply(p.value, spec.min, spec.max, 0.0));
+        let b = p.normalized(m.apply(p.value, spec.min, spec.max, 1.0));
+        arc(&painter, c, KNOB_R + 3.5, angle(a), angle(b), Stroke::new(2.0, ACCENT.gamma_multiply(0.75)));
+        painter.circle_filled(ring_point(c, KNOB_R + 3.5, angle(p.normalized(p.live))), 2.6, ACCENT);
+    }
+    let cap = if hot { theme::CONTROL_HI } else { theme::CONTROL };
+    let ring = if resp.dragged() {
+        theme::LIVE
+    } else if modulated {
+        ACCENT
+    } else if hot {
+        theme::FAINT
+    } else {
+        theme::LINE_HI
+    };
+    painter.circle(c, 10.5, cap, Stroke::new(1.0, ring));
+    painter.line_segment([c, ring_point(c, 8.0, angle(t))], Stroke::new(2.0, theme::TEXT_STRONG));
+
+    let key = crate::ui::midi::LearnKey::Param(p.seed);
+    if crate::ui::midi::is_learning(ui, key) {
+        painter.circle_stroke(c, KNOB_R + 4.0, Stroke::new(1.5, ACCENT));
+    } else if crate::ui::midi::mapping(ui, key).is_some() {
+        let r = egui::Rect::from_min_size(pos2(c.x + 12.0, rect.top()), vec2(10.0, 11.0));
+        painter.rect_filled(r, 2.0, theme::LIVE);
+        painter.text(r.center(), egui::Align2::CENTER_CENTER, "M", theme::bold(9.0), theme::ON_LIT);
+    }
+
+    let shown = if modulated { p.live } else { p.value };
+    painter.text(
+        pos2(rect.center().x, rect.top() + 41.0),
+        egui::Align2::CENTER_TOP,
+        format_value(&spec, shown),
+        theme::mono(11.0),
+        if hot { theme::TEXT_STRONG } else { theme::TEXT },
+    );
+    let galley = painter.layout(label.to_string(), theme::body(12.0), theme::MUTED, f32::INFINITY);
+    let label_pos = pos2(rect.center().x - galley.size().x.min(KNOB_W) / 2.0, rect.top() + 54.0);
+    let label_rect = egui::Rect::from_min_size(pos2(rect.left(), label_pos.y), vec2(KNOB_W, 14.0));
+    ui.painter_at(label_rect).galley(label_pos, galley, theme::MUTED);
+
+    let resp = resp.on_hover_ui(|ui| {
+        ui.label(RichText::new(format!("{label}: {}", format_value(&spec, p.value))).strong());
+        if let Some(m) = p.modulator.as_ref().filter(|m| m.enabled) {
+            ui.label(RichText::new(format!("~ {} · {} · {:.0}%", m.shape.name(), source_label(m), m.depth * 100.0)).color(ACCENT));
+        }
+        ui.label(RichText::new("drag · Shift fine · double-click reset · right-click: automate, MIDI").small().weak());
+    });
+
+    let popup_id = resp.id.with("automation");
+    resp.context_menu(|ui| {
+        let label_text = if p.modulator.is_some() { "Edit automation…" } else { "Automate…" };
+        if ui.button(label_text).clicked() {
+            egui::Popup::open_id(ui.ctx(), popup_id);
+        }
+        if p.modulator.is_some() && ui.button("Remove automation").clicked() {
+            p.modulator = None;
+            ui.close();
+        }
+        ui.separator();
+        crate::ui::midi::menu(ui, key);
+        ui.separator();
+        if ui.button("Reset to default").clicked() {
+            p.set(spec.default);
+            ui.close();
+        }
+    });
+    egui::Popup::from_response(&resp)
+        .id(popup_id)
+        .open_memory(None)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show(|ui| {
+            let base = p.value;
+            let seed = p.seed;
+            let m = p.modulator.get_or_insert_with(|| Modulator::new(seed));
+            if editor(ui, &spec, label, m, base, clock) {
+                p.modulator = None;
+                egui::Popup::close_id(ui.ctx(), popup_id);
+            }
+        });
+    resp
+}
+
 /// Dot at the automated value plus a band showing the sweep range, drawn over the rail.
 fn paint_live_marker(ui: &egui::Ui, resp: &egui::Response, p: &Param, m: &Modulator) {
     let rail_h = ui.spacing().interact_size.y;

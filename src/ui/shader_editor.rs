@@ -37,10 +37,7 @@ pub fn params(ui: &mut egui::Ui, s: &mut CustomShader, clock: Clock) {
     if s.params.is_empty() {
         ui.label(RichText::new("No sliders. Add one with: uniform float amount; // 0 1 0.5").small().weak());
     }
-    for p in &mut s.params {
-        widgets::param(ui, p, clock);
-    }
-    widgets::param(ui, &mut s.alpha, clock);
+    widgets::param_grid(ui, s.params.iter_mut().chain([&mut s.alpha]), clock);
 }
 
 pub fn show(ctx: &egui::Context, comp: &mut Composition, open: &mut Option<u64>, clock: Clock) {

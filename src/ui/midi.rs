@@ -56,6 +56,11 @@ pub fn take_requests(ctx: &egui::Context) -> Vec<Request> {
     ctx.data_mut(|d| d.remove_temp::<Vec<Request>>(requests_id())).unwrap_or_default()
 }
 
+/// The control `key` is mapped to, if any ("CC 1 · ch 1").
+pub fn mapping(ui: &egui::Ui, key: LearnKey) -> Option<String> {
+    view(ui).mapped.get(&key).cloned()
+}
+
 pub fn is_learning(ui: &egui::Ui, key: LearnKey) -> bool {
     view(ui).learning == Some(key)
 }

@@ -50,9 +50,7 @@ pub fn layer_panel(ui: &mut egui::Ui, comp: &mut Composition, li: usize, clock: 
         widgets::param(ui, &mut layer.transition, clock).on_hover_text("Crossfade time when switching clips on this layer");
     });
     section(ui, "Transform", true, |ui| {
-        for p in [&mut layer.pos_x, &mut layer.pos_y, &mut layer.scale, &mut layer.rotation] {
-            widgets::param(ui, p, clock);
-        }
+        widgets::param_grid(ui, [&mut layer.pos_x, &mut layer.pos_y, &mut layer.scale, &mut layer.rotation], clock);
         if ui.small_button("Reset transform").clicked() {
             for p in [&mut layer.pos_x, &mut layer.pos_y, &mut layer.scale, &mut layer.rotation] {
                 p.set(p.spec.default);
@@ -101,9 +99,7 @@ pub fn effect_chain(ui: &mut egui::Ui, effects: &mut Vec<Effect>, owner: u64, cl
                             });
                     });
                 }
-                for p in &mut e.params {
-                    widgets::param(ui, p, clock);
-                }
+                widgets::param_grid(ui, e.params.iter_mut(), clock);
                 if let Some(h) = e.def().history {
                     ui.checkbox(&mut e.half_history, "Half-size history").on_hover_text(format!(
                         "Keep the {} frames of history at half the output size: a quarter of the memory, a little softer. Changing it restarts the history.",
@@ -230,9 +226,7 @@ pub fn clip_panel(ui: &mut egui::Ui, clip: Option<&mut Clip>, clock: Clock) {
 
     if let Media::Generator(g) = &mut clip.media {
         section(ui, "Generator", true, |ui| {
-            for p in [&mut g.pattern, &mut g.freq, &mut g.speed, &mut g.hue] {
-                widgets::param(ui, p, clock);
-            }
+            widgets::param_grid(ui, [&mut g.pattern, &mut g.freq, &mut g.speed, &mut g.hue], clock);
         });
     }
     if let Media::Shader(s) = &mut clip.media {
