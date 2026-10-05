@@ -424,7 +424,7 @@ impl Renderer {
         if self.next_uniform == self.uniforms.len() {
             self.uniforms.push(self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("pass uniforms"),
-                size: 256,
+                size: 512,
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             }));
@@ -977,13 +977,13 @@ fn date_now() -> [f32; 4] {
 }
 
 /// Uniform block for user shaders (layout matches `shader.rs`'s GLSL and WGSL preludes).
-fn shader_uniforms(shader: &CustomShader, width: u32, height: u32, frame: i32, clock: Clock) -> [[f32; 4]; 12] {
+fn shader_uniforms(shader: &CustomShader, width: u32, height: u32, frame: i32, clock: Clock) -> [[f32; 4]; 8 + crate::shader::MAX_PARAMS / 4] {
     let (w, h) = (width as f32, height as f32);
     // iMouse is in output pixels; scale it to the render size.
     let sx = w / WIDTH as f32;
     let sy = h / HEIGHT as f32;
     let m = shader.mouse;
-    let mut data = [[0.0f32; 4]; 12];
+    let mut data = [[0.0f32; 4]; 8 + crate::shader::MAX_PARAMS / 4];
     data[0] = [w, h, 1.0, clock.time as f32];
     data[1] = [m[0] * sx, m[1] * sy, m[2] * sx, m[3] * sy];
     data[2] = date_now();

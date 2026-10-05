@@ -190,8 +190,7 @@ impl Clip {
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or(name.clone());
         let media = if source::is_shader(path) {
-            let code = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-            Media::Shader(Box::new(CustomShader::new(&stem, &code, Role::Source)))
+            Media::Shader(Box::new(CustomShader::from_file(path, Role::Source)?))
         } else if source::is_video(path) {
             Media::Video(VideoMedia::import(path, width, height)?)
         } else {

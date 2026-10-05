@@ -17,7 +17,8 @@ use crate::clip::next_id;
 use crate::modulation::Clock;
 use crate::param::{Param, Spec};
 
-pub const MAX_PARAMS: usize = 16;
+/// Slider slots for user shaders: `_tripslop_p[16]` (vec4s) in the GLSL headers below.
+pub const MAX_PARAMS: usize = 64;
 const COMPILE_DELAY: Duration = Duration::from_millis(350);
 
 const HEADER: &str = "#version 450
@@ -31,7 +32,7 @@ layout(set = 0, binding = 0, std140) uniform TripslopUniforms {
     int iFrame;
     float iBeat;
     float iBpm;
-    vec4 _tripslop_p[4];
+    vec4 _tripslop_p[16];
 };
 layout(set = 0, binding = 1) uniform sampler _tripslop_samp;
 layout(set = 0, binding = 2) uniform texture2D _tripslop_ch0;
@@ -77,7 +78,7 @@ layout(set = 0, binding = 0, std140) uniform TripslopUniforms {
     int _tripslop_iFrame;
     float _tripslop_iBeat;
     float _tripslop_iBpm;
-    vec4 _tripslop_p[4];
+    vec4 _tripslop_p[16];
 };
 layout(set = 0, binding = 1) uniform sampler _tripslop_samp;
 layout(set = 0, binding = 2) uniform texture2D _tripslop_ch0;
@@ -175,18 +176,24 @@ fn is_ident(s: &str) -> bool {
 
 /// Wrap user code into a complete GLSL 4.50 fragment shader. Every user line maps to exactly
 /// one output line, so error line numbers can be mapped back.
+#[cfg(test)]
 pub fn prepare(user: &str) -> Prepared {
+    prepare_with(user, None)
+}
+
+/// `vertex`: an ISF shader's companion `.vs` (see `CustomShader::vertex`).
+pub fn prepare_with(user: &str, vertex: Option<&str>) -> Prepared {
     if lang_of(user) == Lang::Wgsl {
         return prepare_wgsl(user);
     }
     if let Some(json) = isf_json(user) {
-        return prepare_isf(user, json);
+        return prepare_isf(user, json, vertex);
     }
     let dialect = if user.contains("mainImage") { Dialect::Shadertoy } else { Dialect::Sandbox };
     let mut params = Vec::new();
     let user_lines = user.lines().count();
     let mut lines: Vec<String> = user.lines().map(|l| rewrite_line(l, &mut params, &[])).collect();
-    let hoisted = hoist_global_initializers(&mut lines, dialect == Dialect::Sandbox);
+    let hoisted = hoist_global_initializers(&mut lines, dialect == Dialect::Sandbox, "");
     let body: String = lines.iter().map(|l| format!("{l}\n")).collect();
     let mut header = HEADER.to_string();
     if dialect == Dialect::Sandbox {
@@ -336,8 +343,9 @@ const GLSL_TYPES: &[&str] = &[
 /// actually stores the value, so they read as zero. Rewrite each such line into a plain
 /// declaration and return the assignments, to be run at the start of `main` (in order).
 /// Line count is preserved. When `inject_into_main` is set (shaders with their own
-/// `void main`), the assignments are appended to the line holding main's opening brace.
-fn hoist_global_initializers(lines: &mut [String], inject_into_main: bool) -> Vec<String> {
+/// `void main`), `prologue`, then the assignments, are appended to the line holding main's
+/// opening brace.
+fn hoist_global_initializers(lines: &mut [String], inject_into_main: bool, prologue: &str) -> Vec<String> {
     let mut assigns = Vec::new();
     let mut depth = 0i32;
     let mut in_block = false;
@@ -407,10 +415,10 @@ fn hoist_global_initializers(lines: &mut [String], inject_into_main: bool) -> Ve
         assigns.push(format!("{name} = {expr};"));
         *line = format!("{ty} {name};");
     }
-    if inject_into_main && !assigns.is_empty() {
+    if inject_into_main && !(assigns.is_empty() && prologue.is_empty()) {
         if let Some(n) = main_brace {
-            let joined = assigns.join(" ");
-            lines[n].push_str(&format!(" {joined}"));
+            let joined: Vec<&str> = Some(prologue.trim()).filter(|p| !p.is_empty()).into_iter().chain(assigns.iter().map(String::as_str)).collect();
+            lines[n].push_str(&format!(" {}", joined.join(" ")));
         }
         return Vec::new();
     }
@@ -462,7 +470,7 @@ fn isf_json(user: &str) -> Option<Result<serde_json::Value, CompileError>> {
 /// ISF: the JSON `INPUTS` become sliders (float), toggles (bool/event), dropdowns (long),
 /// x/y sliders (point2D) and r/g/b/a sliders (color). Images map to channels: the first
 /// image (usually `inputImage`) is `iChannel0` (the layer input), others the composition.
-fn prepare_isf(user: &str, json: Result<serde_json::Value, CompileError>) -> Prepared {
+fn prepare_isf(user: &str, json: Result<serde_json::Value, CompileError>, vertex: Option<&str>) -> Prepared {
     let mut errors = Vec::new();
     let json = json.unwrap_or_else(|e| {
         errors.push(e);
@@ -472,6 +480,7 @@ fn prepare_isf(user: &str, json: Result<serde_json::Value, CompileError>) -> Pre
     let mut defines = String::new();
     let mut names: Vec<String> = Vec::new();
     let mut images = 0;
+    let mut input_assigns = String::new();
     let f = |v: &serde_json::Value| v.as_f64().map(|x| x as f32).or_else(|| v.as_bool().map(|b| if b { 1.0 } else { 0.0 }));
     let arr = |v: &serde_json::Value| -> Option<Vec<f32>> { v.as_array().map(|a| a.iter().filter_map(|x| x.as_f64().map(|x| x as f32)).collect()) };
     for input in json["INPUTS"].as_array().into_iter().flatten() {
@@ -559,7 +568,22 @@ fn prepare_isf(user: &str, json: Result<serde_json::Value, CompileError>) -> Pre
                 continue;
             }
         };
-        defines.push_str(&format!("#define {name} {define}\n"));
+        // Samplers can't be variables; everything else is a real global, assigned at the top of
+        // `main`, so it can't clobber swizzles (`.r`) or same-named function parameters.
+        let global = match ty {
+            "float" => "float",
+            "bool" | "event" => "bool",
+            "long" => "int",
+            "point2D" => "vec2",
+            "color" => "vec4",
+            _ => "",
+        };
+        if global.is_empty() {
+            defines.push_str(&format!("#define {name} {define}\n"));
+        } else {
+            defines.push_str(&format!("{global} {name};\n"));
+            input_assigns.push_str(&format!("{name} = {define}; "));
+        }
     }
     if params.len() > MAX_PARAMS {
         errors.push(CompileError {
@@ -581,18 +605,66 @@ fn prepare_isf(user: &str, json: Result<serde_json::Value, CompileError>) -> Pre
     }
 
     let mut lines: Vec<String> = user.lines().map(|l| rewrite_line(l, &mut params, &names)).collect();
-    hoist_global_initializers(&mut lines, true);
+    let (vs_call, vs) = match vertex {
+        Some(vs) => {
+            for l in &mut lines {
+                if let Some(decl) = varying_decl(l) {
+                    *l = decl;
+                }
+            }
+            defines.push_str("#define isf_vertShaderInit()\nvoid _tripslop_vs_main();\n");
+            ("_tripslop_vs_main();", vertex_as_function(vs))
+        }
+        None => ("", String::new()),
+    };
+    hoist_global_initializers(&mut lines, true, &format!("{input_assigns}{vs_call}"));
     let body: String = lines.iter().map(|l| format!("{l}\n")).collect();
     let header = format!("{ISF_HEADER}{defines}");
     let header_lines = header.matches('\n').count();
     Prepared {
         errors,
         lang: Lang::Glsl,
-        code: format!("{header}{body}"),
+        code: format!("{header}{body}{vs}"),
         header_lines,
         user_lines: user.lines().count(),
         params,
     }
+}
+
+/// A top-level `varying vec2 x;` / `in vec2 x;` as a plain global (`vec2 x;`).
+fn varying_decl(line: &str) -> Option<String> {
+    let t = line.trim_start();
+    let rest = ["varying ", "in ", "out ", "attribute "].iter().find_map(|k| t.strip_prefix(k))?;
+    let words: Vec<&str> = rest.split_whitespace().filter(|w| !matches!(*w, "highp" | "mediump" | "lowp" | "flat" | "smooth")).collect();
+    match words.as_slice() {
+        [ty, name] if GLSL_TYPES.contains(ty) && name.ends_with(';') => Some(format!("{ty} {name}")),
+        _ => None,
+    }
+}
+
+/// ISF vertex shaders mostly compute per-pixel coordinates (neighbouring texels, rotated
+/// coordinates) from `isf_FragNormCoord`. Those are affine, so running the vertex `main` per
+/// fragment gives the same values as interpolating it: the `.vs` becomes a function that the
+/// fragment `main` calls first, writing the (now plain global) varyings. Its declarations of
+/// varyings and uniforms are dropped (the fragment shader has its own).
+fn vertex_as_function(vs: &str) -> String {
+    let mut out = String::new();
+    for line in vs.lines() {
+        let t = line.trim_start();
+        if t.starts_with("#version") || t.starts_with("precision ") || t.starts_with("uniform ") || varying_decl(line).is_some() {
+            out.push('\n');
+            continue;
+        }
+        let renamed = match t.strip_prefix("void") {
+            Some(after) if after.trim_start().starts_with("main") && after.trim_start()[4..].trim_start().starts_with('(') => {
+                line.replacen("main", "_tripslop_vs_main", 1)
+            }
+            _ => line.to_string(),
+        };
+        out.push_str(&renamed);
+        out.push('\n');
+    }
+    out
 }
 
 /// User code -> validated naga module -> WGSL for wgpu.
@@ -688,6 +760,8 @@ pub struct CustomShader {
     pub id: u64,
     pub name: String,
     pub source: String,
+    /// An ISF shader's companion vertex shader (`Name.vs` next to `Name.fs`), if any.
+    pub vertex: Option<String>,
     /// Bumped on every edit.
     pub rev: u64,
     pub edited_at: Instant,
@@ -713,6 +787,7 @@ impl CustomShader {
             id: next_id(),
             name: name.to_string(),
             source: source.to_string(),
+            vertex: None,
             rev: 1,
             edited_at: Instant::now() - COMPILE_DELAY,
             live: true,
@@ -724,6 +799,17 @@ impl CustomShader {
             alpha: Param::with(Spec::choice("alpha", ALPHA_MODES, alpha_default), alpha_default as f32),
             mouse: [0.0; 4],
         }
+    }
+
+    /// Load a shader file. An ISF `.fs` picks up its companion `.vs` when there is one.
+    pub fn from_file(path: &std::path::Path, role: Role) -> Result<Self, String> {
+        let code = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        let mut s = Self::new(&name, &code, role);
+        if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("fs")) {
+            s.vertex = std::fs::read_to_string(path.with_extension("vs")).ok();
+        }
+        Ok(s)
     }
 
     pub fn edited(&mut self) {
@@ -743,7 +829,7 @@ impl CustomShader {
         }
         self.compile_requested = false;
         self.compiled_rev = Some(self.rev);
-        let prepared = prepare(&self.source);
+        let prepared = prepare_with(&self.source, self.vertex.as_deref());
         match compile(&prepared) {
             Ok(compiled) => {
                 self.errors.clear();
@@ -1108,7 +1194,7 @@ void main( void )
         .iter()
         .map(|s| s.to_string())
         .collect();
-        hoist_global_initializers(&mut lines, true);
+        hoist_global_initializers(&mut lines, true, "");
         assert_eq!(lines[1], "vec3 R;");
         assert_eq!(lines[2], "const float K = 2.0;", "const stays");
         assert_eq!(lines[3], "float a = 1.0, b = 2.0;", "multiple declarators left alone");

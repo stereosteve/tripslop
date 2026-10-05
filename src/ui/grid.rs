@@ -6,6 +6,7 @@ use eframe::egui::{self, Color32, Rect, RichText, Sense, Stroke, StrokeKind, pos
 
 use crate::clip::{Media, PATTERNS};
 use crate::composition::{Composition, Launch, Side};
+use crate::isf_library::{Drag, Kind};
 use crate::ui::widgets::ACCENT;
 
 pub const CELL: egui::Vec2 = egui::Vec2::new(112.0, 82.0);
@@ -21,6 +22,9 @@ pub enum GridAction {
     Generator { layer: usize, col: usize, pattern: usize },
     /// New shader clip from `shader::TEMPLATES[template]`.
     Shader { layer: usize, col: usize, template: usize },
+    /// Something dropped from the ISF browser: a generator onto a cell (`col: None` = the
+    /// layer's first free cell), or an effect onto a layer.
+    Library { layer: usize, col: Option<usize>, drag: Drag },
     Remove { layer: usize, col: usize },
     Clear(usize),
     AddLayer,
@@ -84,7 +88,7 @@ impl GridView {
         let frame = egui::Frame::group(ui.style())
             .inner_margin(4.0)
             .fill(if selected { ui.visuals().selection.bg_fill.gamma_multiply(0.35) } else { ui.visuals().faint_bg_color });
-        frame.show(ui, |ui| {
+        let header = frame.show(ui, |ui| {
             ui.set_width(HEADER_W - 12.0);
             ui.set_height(CELL.y - 10.0);
             ui.vertical(|ui| {
@@ -129,6 +133,13 @@ impl GridView {
             });
             });
         });
+        let resp = &header.response;
+        if let Some(d) = resp.dnd_hover_payload::<Drag>() {
+            drop_hint(ui, resp.rect, &d, None);
+        }
+        if let Some(d) = resp.dnd_release_payload::<Drag>() {
+            actions.push(GridAction::Library { layer: li, col: None, drag: (*d).clone() });
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -242,7 +253,14 @@ impl GridView {
         };
         painter.rect_stroke(rect, 3.0, stroke, StrokeKind::Inside);
 
-        let has_clip = layer.clips[col].is_some();
+        if let Some(d) = resp.dnd_hover_payload::<Drag>() {
+            drop_hint(ui, rect, &d, Some(&comp.layers[li].name));
+        }
+        if let Some(d) = resp.dnd_release_payload::<Drag>() {
+            actions.push(GridAction::Library { layer: li, col: Some(col), drag: (*d).clone() });
+        }
+
+        let has_clip = comp.layers[li].clips[col].is_some();
         if resp.clicked() {
             actions.push(GridAction::Select { layer: li, col: Some(col) });
             if has_clip {
@@ -292,6 +310,22 @@ impl GridView {
             }
         });
     }
+}
+
+/// Outline + label on a drop target while an ISF shader is dragged over it.
+fn drop_hint(ui: &egui::Ui, rect: Rect, d: &Drag, layer: Option<&str>) {
+    let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("isf drop hint")));
+    painter.rect_stroke(rect, 3.0, Stroke::new(2.5, AMBER), StrokeKind::Inside);
+    let label = match (d.kind, layer) {
+        (Kind::Generator, Some(_)) => "load here".to_string(),
+        (Kind::Generator, None) => "load into first free cell".to_string(),
+        (_, Some(name)) => format!("add to {name}"),
+        (_, None) => "add effect to layer".to_string(),
+    };
+    let text = painter.layout_no_wrap(label, egui::FontId::proportional(11.0), Color32::BLACK);
+    let r = Rect::from_min_size(rect.left_bottom() - vec2(0.0, text.size().y + 4.0), text.size() + vec2(8.0, 4.0));
+    painter.rect_filled(r, 2.0, AMBER);
+    painter.galley(r.min + vec2(4.0, 2.0), text, Color32::BLACK);
 }
 
 fn truncate(s: &str, n: usize) -> String {

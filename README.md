@@ -98,6 +98,9 @@ compiles as you type, like KodeLife. Add one from a grid cell's right-click menu
   * The first `image` input (e.g. `inputImage`) is the layer input.
   * A single `PERSISTENT` pass target is the shader's own previous frame. Multi-pass ISF isn't
     supported yet.
+  * A companion `Name.vs` vertex shader next to `Name.fs` is picked up automatically. It runs
+    per pixel, which matches the usual use (neighbouring-texel coordinates and the like); ones
+    that move vertices (`gl_Position`) don't work.
 * **WGSL** also works. It's detected by `@fragment`, and your own entry point is used. It runs
   in screen space (y down). It can use:
   * `inputs.size` (`vec3f`), `inputs.time`, `inputs.mouse`, `inputs.date`, `inputs.frame`,
@@ -123,6 +126,20 @@ compiles as you type, like KodeLife. Add one from a grid cell's right-click menu
 * **Limits**: no Shadertoy multipass buffers (A–D), audio, video or cubemap inputs, and
   samplers can't be passed into functions. naga is also stricter than WebGL; for example,
   write `ivec2(p) % ivec2(4)`, not `ivec2(p) % 4`.
+
+**ISF library.** The *ISF library* panel (toggle it in the top bar) browses folders of ISF
+shaders: `/Library/Graphics/ISF` and `~/Library/Graphics/ISF` by default, `--isf DIR` (repeatable)
+or *Folder…* to pick another. Shaders are split into **Generators** and **Effects** and filed by
+their `CATEGORIES`. Search matches names, categories and descriptions.
+* Drag a generator onto a grid cell, or double-click it to load into the selected cell (or the
+  layer's first free one).
+* Drag an effect onto a layer (its header or any of its cells), or double-click it to add it to
+  the selected layer; on the Composition tab it goes on the master chain.
+* Every shader is test-compiled in the background. Ones tripslop can't run yet (mostly
+  multi-pass) are hidden; *show unsupported* lists them struck through, with the reason on
+  hover. Transitions aren't supported yet.
+* `cargo test --release isf_folder -- --ignored --nocapture` prints a compatibility report for
+  the installed folders.
 
 **Automation.** Every parameter has a `~` button that attaches a signal generator:
 * Shapes: sine, triangle, saw up/down, square, sample & hold, smooth random drift, or a
@@ -228,7 +245,7 @@ Layers and columns are **1-based**, like the UI.
 | `demo` | load the demo set |
 | `launch-scene N` · `launch L C` · `stop L` | launch a scene / a clip; stop a layer |
 | `load L C PATH` · `generator L C NAME` · `shader L C TEMPLATE` · `camera L C INDEX` | put media in a cell (layers are created as needed) |
-| `add-effect L NAME` · `add-effect master NAME` | add an effect by name; `shader:TEMPLATE` adds a code effect |
+| `add-effect L NAME` · `add-effect master NAME` | add an effect by name; `shader:TEMPLATE` adds a code effect, `file:PATH` a shader file (e.g. an ISF `.fs`) |
 | `set PATH VALUE` | set a parameter (see paths below) |
 | `bpm N` · `quantize off/beat/bar` · `play` · `pause` | transport |
 | `pad KEY down/up/latch/unlatch` · `hold KEY DURATION` | punch-in pads, by key, name or number |

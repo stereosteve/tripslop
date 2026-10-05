@@ -145,12 +145,17 @@ impl App {
                 self.comp.set_clip(*l, *c, Clip::camera(*index, WIDTH, HEIGHT)?);
             }
             Cmd::AddEffect(target, name) => {
-                let e = match name.strip_prefix("shader:") {
-                    Some(t) => {
+                let e = match (name.strip_prefix("shader:"), name.strip_prefix("file:")) {
+                    (Some(t), _) => {
                         let (n, _, code) = template(t)?;
                         Effect::custom(n, code)
                     }
-                    None => {
+                    (_, Some(path)) => {
+                        let mut e = Effect::new(EffectKind::Shader);
+                        e.custom = Some(Box::new(crate::shader::CustomShader::from_file(std::path::Path::new(path), crate::shader::Role::Effect)?));
+                        e
+                    }
+                    (None, None) => {
                         let names: Vec<String> = EFFECTS.iter().map(|d| d.name.to_lowercase()).collect();
                         let i = best_match(&names, name).ok_or_else(|| format!("no effect {name:?} (have: {})", names.join(", ")))?;
                         let mut e = Effect::new(EFFECTS[i].kind);

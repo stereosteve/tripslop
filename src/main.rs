@@ -5,6 +5,7 @@ mod automation;
 mod clip;
 mod composition;
 mod effects;
+mod isf_library;
 mod modulation;
 mod param;
 mod punch;
@@ -31,7 +32,7 @@ use ui::grid::{GridAction, GridView};
 
 const TICK: f64 = 1.0 / 60.0;
 
-const USAGE: &str = "usage: tripslop [--demo] [--record] [--script FILE] [--fixed-step | --realtime] [MEDIA...]";
+const USAGE: &str = "usage: tripslop [--demo] [--record] [--script FILE] [--isf DIR]... [--fixed-step | --realtime] [MEDIA...]";
 
 /// Window / dock icon: the color flower, rasterized centered on a square transparent canvas.
 fn app_icon() -> egui::IconData {
@@ -58,6 +59,7 @@ fn main() -> eframe::Result {
     let mut demo = false;
     let mut script_path: Option<PathBuf> = None;
     let mut fixed_step: Option<bool> = None;
+    let mut isf_dirs: Vec<PathBuf> = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -65,6 +67,10 @@ fn main() -> eframe::Result {
             "--demo" => demo = true,
             "--script" => match args.next() {
                 Some(p) => script_path = Some(PathBuf::from(p)),
+                None => exit_with(USAGE, 2),
+            },
+            "--isf" => match args.next() {
+                Some(p) => isf_dirs.push(PathBuf::from(p)),
                 None => exit_with(USAGE, 2),
             },
             "--fixed-step" => fixed_step = Some(true),
@@ -106,7 +112,8 @@ fn main() -> eframe::Result {
             let rs = cc.wgpu_render_state.as_ref().ok_or("tripslop needs the wgpu renderer")?;
             cc.egui_ctx.set_theme(egui::ThemePreference::Dark);
             egui_extras::install_image_loaders(&cc.egui_ctx);
-            let mut app = App::new(Renderer::new(rs));
+            let isf_dirs = if isf_dirs.is_empty() { isf_library::default_dirs() } else { isf_dirs };
+            let mut app = App::new(Renderer::new(rs), isf_dirs);
             app.fixed_step = fixed_step;
             app.script = events.into_iter().map(|event| automation::Pending { event, done: false }).collect();
             if demo {
@@ -168,6 +175,9 @@ struct App {
     finishing: Vec<Finishing>,
     /// Shader open in the code editor.
     editing: Option<u64>,
+    library: isf_library::Library,
+    library_view: ui::library::LibraryView,
+    show_library: bool,
     /// Pointer position (output pixels, y up) where the current iMouse drag started.
     mouse_click: Option<[f32; 2]>,
     /// `--script` events (see `script.rs`).
@@ -183,7 +193,7 @@ struct App {
 }
 
 impl App {
-    fn new(renderer: Renderer) -> Self {
+    fn new(renderer: Renderer, isf_dirs: Vec<PathBuf>) -> Self {
         Self {
             renderer,
             comp: Composition::new(3, 8),
@@ -206,6 +216,9 @@ impl App {
             recorder: None,
             finishing: Vec::new(),
             editing: None,
+            show_library: !isf_dirs.is_empty(),
+            library: isf_library::Library::new(isf_dirs),
+            library_view: Default::default(),
             mouse_click: None,
             script: Vec::new(),
             fixed_step: false,
@@ -331,6 +344,7 @@ impl App {
                     self.comp.set_clip(layer, col, Clip::generator(pattern));
                     self.grid.selected_clip = Some((layer, col));
                 }
+                GridAction::Library { layer, col, drag } => self.use_library(&drag, Some(layer), col),
                 GridAction::Remove { layer, col } => self.comp.layers[layer].remove_clip(col),
                 GridAction::Clear(layer) => self.comp.layers[layer].clear(),
                 GridAction::AddLayer => self.comp.add_layer(),
@@ -343,6 +357,67 @@ impl App {
                         self.grid.selected_clip = None;
                     }
                 }
+            }
+        }
+    }
+
+    /// Put an ISF shader from the browser to use. Generators load into `col` (or the
+    /// selected / first free cell of `layer`); effects go on `layer`, or the master chain when
+    /// `layer` is `None`.
+    fn use_library(&mut self, d: &isf_library::Drag, layer: Option<usize>, col: Option<usize>) {
+        let result = match d.kind {
+            isf_library::Kind::Generator => {
+                let layer = layer.unwrap_or(self.grid.selected_layer);
+                let free = |comp: &Composition| comp.layers[layer].clips.iter().position(|c| c.is_none());
+                let col = col
+                    .or(self.grid.selected_clip.filter(|(l, c)| *l == layer && self.comp.layers[layer].clips[*c].is_none()).map(|(_, c)| c))
+                    .or_else(|| free(&self.comp))
+                    .unwrap_or_else(|| {
+                        self.comp.add_column();
+                        self.comp.columns - 1
+                    });
+                self.try_load(layer, col, &d.path)
+            }
+            _ => shader::CustomShader::from_file(&d.path, shader::Role::Effect).map(|s| {
+                let mut e = Effect::new(EffectKind::Shader);
+                e.custom = Some(Box::new(s));
+                let chain = match layer {
+                    Some(l) => &mut self.comp.layers[l].effects,
+                    None => &mut self.comp.effects,
+                };
+                chain.push(e);
+                let target = layer.map(|l| self.comp.layers[l].name.clone()).unwrap_or_else(|| "master".into());
+                self.status = format!("Added {} to {target}", d.name);
+                if let Some(l) = layer {
+                    self.grid.selected_layer = l;
+                }
+                self.tab = if layer.is_some() { Tab::Layer } else { Tab::Composition };
+            }),
+        };
+        if let Err(e) = result {
+            self.status = format!("Error: {e}");
+        }
+    }
+
+    fn handle_library(&mut self, actions: Vec<ui::library::LibraryAction>) {
+        use ui::library::LibraryAction;
+        for a in actions {
+            match a {
+                LibraryAction::Use(d) => {
+                    let layer = (self.tab == Tab::Layer || d.kind == isf_library::Kind::Generator).then_some(self.grid.selected_layer);
+                    self.use_library(&d, layer, None);
+                }
+                LibraryAction::ChooseFolder => {
+                    let mut dialog = rfd::FileDialog::new();
+                    if let Some(d) = self.library.dirs.first() {
+                        dialog = dialog.set_directory(d);
+                    }
+                    if let Some(dir) = dialog.pick_folder() {
+                        self.library.dirs = vec![dir];
+                        self.library.rescan();
+                    }
+                }
+                LibraryAction::Rescan => self.library.rescan(),
             }
         }
     }
@@ -634,6 +709,7 @@ impl App {
                 self.save_snapshot(None);
             }
             ui.toggle_value(&mut self.show_output, "🖵 Output window");
+            ui.toggle_value(&mut self.show_library, "ISF library");
             if ui.button("Perform (Cmd F)").clicked() {
                 self.perform = true;
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
@@ -764,6 +840,7 @@ impl eframe::App for App {
         self.handle_input(&ctx);
         self.render_frame();
         self.make_thumbnails(&ctx);
+        self.library.poll();
         if let Some(id) = ui::shader_editor::take_request(&ctx) {
             self.editing = Some(id);
         }
@@ -815,6 +892,12 @@ impl eframe::App for App {
                 ui.add_space(8.0);
                 ui::punch::pads(ui, &mut self.punch);
             });
+            if self.show_library {
+                egui::Panel::right("library").resizable(true).default_size(260.0).show(ui, |ui| {
+                    let actions = self.library_view.show(ui, &self.library);
+                    self.handle_library(actions);
+                });
+            }
             egui::Panel::right("clip").resizable(true).default_size(380.0).show(ui, |ui| {
                 ui.label(RichText::new("Clip").strong());
                 ui.separator();
