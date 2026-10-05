@@ -50,6 +50,8 @@ pub struct Pad {
     pub mouse_held: bool,
     /// Held by an automation script (`--script`).
     pub script_held: bool,
+    /// Held by a MIDI note.
+    pub midi_held: bool,
     pub latched: bool,
     /// Smoothed 0..1 envelope.
     pub amount: f32,
@@ -65,7 +67,7 @@ pub struct Pad {
 
 impl Pad {
     pub fn active(&self) -> bool {
-        self.key_held || self.mouse_held || self.script_held || self.latched
+        self.key_held || self.mouse_held || self.script_held || self.midi_held || self.latched
     }
 
     /// Get (or create) this pad's `slot`-th effect for a layer, and include it this tick.

@@ -487,6 +487,29 @@ impl Composition {
 }
 
 impl Composition {
+    /// Every parameter with its script path (`2/fx1/rotate °`, `master/crossfader`, …): the
+    /// form `set` / `assert` and saved MIDI mappings use. Layers, effects and clips go by
+    /// number, so a path survives renaming.
+    pub fn visit_paths(&mut self, f: &mut dyn FnMut(&str, &mut Param)) {
+        f("master/master", &mut self.master);
+        f("master/crossfader", &mut self.crossfader);
+        for (i, e) in self.effects.iter_mut().enumerate() {
+            e.visit_params(&mut |label, p| f(&format!("master/fx{}/{label}", i + 1), p));
+        }
+        for (li, l) in self.layers.iter_mut().enumerate() {
+            let n = li + 1;
+            l.visit_params(&mut |label, p| f(&format!("{n}/{label}"), p));
+            for (i, e) in l.effects.iter_mut().enumerate() {
+                e.visit_params(&mut |label, p| f(&format!("{n}/fx{}/{label}", i + 1), p));
+            }
+            for (col, c) in l.clips.iter_mut().enumerate() {
+                if let Some(c) = c {
+                    c.visit_params(&mut |label, p| f(&format!("{n}/clip{}/{label}", col + 1), p));
+                }
+            }
+        }
+    }
+
     /// Every user shader in the composition (clips and effects, drawn or not).
     pub fn for_each_shader(&mut self, f: &mut dyn FnMut(&mut crate::shader::CustomShader)) {
         for e in &mut self.effects {

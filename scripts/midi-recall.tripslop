@@ -1,0 +1,8 @@
+# Run after midi.tripslop with the same TRIPSLOP_CONFIG_DIR: the learned knob still works.
+
+demo
+midi cc 1 0
+at 2 assert Fractal/feedback/rotate ~= -180
+at 2 midi cc 1 127
+at 3 assert Fractal/feedback/rotate ~= 180
+at 3 quit

@@ -1,0 +1,38 @@
+# MIDI without hardware: pads, latching with a learned Shift, learning a knob, following clock.
+# Run from the repo root:  cargo run --release -- --script scripts/midi.tripslop
+# (with TRIPSLOP_CONFIG_DIR set, the learned mappings are saved there; see midi-recall.tripslop)
+
+demo
+# Notes 36–51 play the pads in Q…K order.
+midi note 36 on
+at 30  assert pad Q > 0.9
+at 30  midi note 36 off
+at 60  assert pad Q < 0.1
+
+# A learned Shift control: hold it and hit a pad to latch the pad.
+at 61  midi learn shift
+at 61  midi cc 64 127                  # learns CC 64
+at 62  midi cc 64 127                  # Shift down
+at 62  midi note 37 on                 # latches W
+at 63  midi note 37 off
+at 63  midi cc 64 0                    # Shift up
+at 90  assert pad W > 0.9              # still on: latched
+at 91  midi cc 64 127
+at 91  midi note 37 on                 # unlatch
+at 92  midi note 37 off
+at 92  midi cc 64 0
+at 150 assert pad W < 0.1
+
+# Learn CC 1 for the Fractal rig's rotation; it covers the slider's range.
+at 151 midi learn Fractal/feedback/rotate
+at 151 midi cc 1 64                    # learns CC 1
+at 152 midi cc 1 0
+at 153 assert Fractal/feedback/rotate ~= -180
+at 153 midi cc 1 127
+at 154 assert Fractal/feedback/rotate ~= 180
+
+# MIDI clock sets the tempo when followed.
+at 155 midi follow on
+at 155 midi clock 128
+at 156 assert bpm ~= 128
+at 156 quit

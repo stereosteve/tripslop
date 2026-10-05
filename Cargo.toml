@@ -10,6 +10,7 @@ eframe = "0.36.2"
 egui_extras = { version = "0.36.2", default-features = false, features = ["svg"] }
 hound = "3.5.1"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+midir = "0.11.0"
 naga = { version = "30.0.1", features = ["glsl-in", "wgsl-in", "wgsl-out"] }
 pollster = "1.0.1"
 realfft = "3.5.0"

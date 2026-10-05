@@ -163,6 +163,7 @@ impl App {
                 }
                 p.modulator = Some(m);
             })?,
+            Cmd::Midi(m) => self.script_midi(m)?,
             Cmd::Audio(None) => self.audio.stop(),
             Cmd::Audio(Some(path)) => self.audio.open_file(path, self.sim_time)?,
             Cmd::Library(effects, category) => {
@@ -367,6 +368,42 @@ impl App {
 }
 
 impl App {
+    /// A `midi …` script command: messages go through the same path as hardware input.
+    fn script_midi(&mut self, cmd: &crate::script::MidiCmd) -> Result<(), String> {
+        use crate::midi::{Msg, Target};
+        use crate::script::{LearnWhat, MidiCmd};
+        let now = (self.sim_time * 1e6) as u64;
+        match cmd {
+            MidiCmd::Msg(m) => {
+                let actions = self.midi.handle(*m, now);
+                self.apply_midi(actions);
+            }
+            MidiCmd::Learn(what) => {
+                self.midi.learning = Some(match what {
+                    LearnWhat::Param(path) => {
+                        let mut seed = 0;
+                        self.with_param(path, |p| seed = p.seed)?;
+                        let paths = self.param_paths();
+                        Target::Param(paths.into_iter().find(|(_, s)| *s == seed).map(|(p, _)| p).ok_or("parameter has no path")?)
+                    }
+                    LearnWhat::Pad(i) => Target::Pad(*i),
+                    LearnWhat::Scene(c) => Target::Scene(*c),
+                    LearnWhat::Shift => Target::Shift,
+                });
+            }
+            MidiCmd::Follow(on) => self.midi.set_follow_clock(*on),
+            MidiCmd::Clock(bpm) => {
+                let step = 60e6 / (*bpm as f64 * 24.0);
+                let mut actions = self.midi.handle(Msg::Start, now);
+                for i in 0..48 {
+                    actions.extend(self.midi.handle(Msg::Clock, now + (i as f64 * step) as u64));
+                }
+                self.apply_midi(actions);
+            }
+        }
+        Ok(())
+    }
+
     /// Run `f` on the effect at `LAYER/EFFECT` or `master/EFFECT`.
     pub(crate) fn with_effect(&mut self, path: &str, f: impl FnOnce(&mut Effect)) -> Result<(), String> {
         let segs: Vec<&str> = path.split('/').map(str::trim).collect();

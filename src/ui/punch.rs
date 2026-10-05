@@ -10,7 +10,7 @@ const AMBER: Color32 = Color32::from_rgb(255, 190, 40);
 pub fn pads(ui: &mut egui::Ui, punch: &mut Punch) {
     ui.horizontal(|ui| {
         ui.label(RichText::new("Punch-in FX").strong());
-        ui.label(RichText::new("hold keys / click · Shift = latch").small().weak());
+        ui.label(RichText::new("hold keys / click · Shift = latch · right-click: MIDI").small().weak());
         if punch.pads.iter().any(|p| p.latched) && ui.small_button("Unlatch all").clicked() {
             for p in &mut punch.pads {
                 p.latched = false;
@@ -28,7 +28,10 @@ pub fn pads(ui: &mut egui::Ui, punch: &mut Punch) {
                 let def = &PUNCHES[i];
                 let pad = &mut punch.pads[i];
                 let (rect, resp) = ui.allocate_exact_size(size, Sense::click_and_drag());
-                let resp = resp.on_hover_text(format!("{} ({:?})\n{}", def.name, def.key, def.hint));
+                let resp = resp.on_hover_text(format!("{} ({:?}, MIDI note {})\n{}", def.name, def.key, crate::midi::PAD_BASE_NOTE as usize + i, def.hint));
+                let key = crate::ui::midi::LearnKey::Pad(i);
+                resp.context_menu(|ui| crate::ui::midi::menu(ui, key));
+                let learning = crate::ui::midi::is_learning(ui, key);
                 pad.mouse_held = resp.is_pointer_button_down_on() && !ui.input(|i| i.modifiers.shift);
                 if resp.clicked() && ui.input(|i| i.modifiers.shift) {
                     pad.latched = !pad.latched;
@@ -47,6 +50,9 @@ pub fn pads(ui: &mut egui::Ui, punch: &mut Punch) {
                 painter.rect_filled(rect, 4.0, fill);
                 if pad.latched {
                     painter.rect_stroke(rect, 4.0, Stroke::new(2.0, AMBER), StrokeKind::Inside);
+                }
+                if learning {
+                    painter.rect_stroke(rect, 4.0, Stroke::new(2.0, ACCENT), StrokeKind::Inside);
                 }
                 let text = if pad.amount > 0.5 { Color32::BLACK } else { ui.visuals().text_color() };
                 painter.text(

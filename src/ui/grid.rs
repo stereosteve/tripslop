@@ -59,7 +59,13 @@ impl GridView {
                     b = b.fill(ACCENT.gamma_multiply(0.6));
                 }
                 let hint = if col < 9 { format!("Launch scene {} (key {})", col + 1, col + 1) } else { format!("Launch scene {}", col + 1) };
-                if ui.add(b).on_hover_text(hint).clicked() {
+                let key = crate::ui::midi::LearnKey::Scene(col);
+                if crate::ui::midi::is_learning(ui, key) {
+                    b = b.stroke(egui::Stroke::new(2.0, ACCENT));
+                }
+                let r = ui.add(b).on_hover_text(hint);
+                r.context_menu(|ui| crate::ui::midi::menu(ui, key));
+                if r.clicked() {
                     actions.push(GridAction::Launch(Launch::Column(col)));
                 }
             }

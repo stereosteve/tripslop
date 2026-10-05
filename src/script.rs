@@ -104,6 +104,7 @@ pub enum Cmd {
     /// Attach automation to a parameter (`None`: remove it): shape, audio band (for the Audio
     /// shape), depth, cycle length in beats.
     Automate(String, Option<(crate::modulation::Shape, Option<crate::audio::Band>, f32, f32)>),
+    Midi(MidiCmd),
     /// Analyse a WAV file in step with the clock (`None`: audio off).
     Audio(Option<PathBuf>),
     /// Show the library browser on generators (false) or effects (true), optionally one category.
@@ -132,6 +133,25 @@ pub enum Cmd {
     Print(Query),
     Assert(Query, Op, f64),
     Quit,
+}
+
+/// `midi …` script commands: fake hardware input.
+#[derive(Clone, Debug, PartialEq)]
+pub enum MidiCmd {
+    Msg(crate::midi::Msg),
+    /// Start MIDI learn for a parameter path, `pad KEY`, `scene N` or `shift`.
+    Learn(LearnWhat),
+    Follow(bool),
+    /// Send Start and two beats of clock at this tempo.
+    Clock(f32),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum LearnWhat {
+    Param(String),
+    Pad(usize),
+    Scene(usize),
+    Shift,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -286,6 +306,43 @@ fn parse_cmd(w: &[String]) -> Result<Vec<Cmd>, String> {
                 .ok_or_else(|| format!("no automation shape {name:?}"))?;
             let num = |i: usize, default: f32| w[w.len() - nums..].get(i).and_then(|x| x.parse().ok()).unwrap_or(default);
             one(Cmd::Automate(path, Some((shape, band, num(0, 0.25), num(1, 4.0)))))
+        }
+        "midi" => {
+            use crate::midi::Msg;
+            let byte = |i: usize, what: &str| -> Result<u8, String> { num::<u8>(w.get(i), what).and_then(|v| if v < 128 { Ok(v) } else { Err(format!("{what} is 0–127")) }) };
+            // Channels are 1-based in scripts, like on hardware.
+            let ch = |i: usize| -> Result<u8, String> {
+                match w.get(i) {
+                    None => Ok(0),
+                    Some(_) => num::<u8>(w.get(i), "channel").and_then(|c| (1..=16).contains(&c).then(|| c - 1).ok_or_else(|| "channel is 1–16".to_string())),
+                }
+            };
+            let cmd = match w.get(1).map(String::as_str) {
+                Some("note") => {
+                    let note = byte(2, "note")?;
+                    match w.get(3).map(String::as_str) {
+                        Some("on") => MidiCmd::Msg(Msg::NoteOn { ch: ch(5)?, note, vel: if w.get(4).is_some() { byte(4, "velocity")?.max(1) } else { 100 } }),
+                        Some("off") => MidiCmd::Msg(Msg::NoteOff { ch: ch(4)?, note }),
+                        _ => return Err("midi note N on [VEL] [CH] / off [CH]".into()),
+                    }
+                }
+                Some("cc") => MidiCmd::Msg(Msg::Cc { cc: byte(2, "cc")?, value: byte(3, "value")?, ch: ch(4)? }),
+                Some("learn") => MidiCmd::Learn(match w.get(2).map(String::as_str) {
+                    Some("shift") => LearnWhat::Shift,
+                    Some("pad") => LearnWhat::Pad(parse_pad(&w[3..].join(" "))?),
+                    Some("scene") => LearnWhat::Scene(idx(w.get(3), "scene")?),
+                    Some(_) => LearnWhat::Param(w[2..].join(" ")),
+                    None => return Err("midi learn needs a parameter path, pad KEY, scene N or shift".into()),
+                }),
+                Some("follow") => MidiCmd::Follow(match w.get(2).map(String::as_str) {
+                    Some("on") => true,
+                    Some("off") => false,
+                    _ => return Err("midi follow on / off".into()),
+                }),
+                Some("clock") => MidiCmd::Clock(num(w.get(2), "bpm")?),
+                _ => return Err("midi needs note / cc / learn / follow / clock".into()),
+            };
+            one(Cmd::Midi(cmd))
         }
         "audio" => match w.get(1).map(String::as_str) {
             Some("off") => one(Cmd::Audio(None)),
@@ -486,6 +543,28 @@ mod tests {
         assert_eq!(ev[3].cmd, Cmd::Side(0, Side::Both));
         assert!(parse("crossfade bank wobbly\n").unwrap_err().contains("curve"));
         assert!(parse("side 1 c\n").is_err());
+    }
+
+    #[test]
+    fn midi_commands() {
+        use crate::midi::Msg;
+        let ev = parse("midi note 36 on\nmidi note 36 off 10\nmidi cc 1 127 2\nmidi learn Fractal/feedback/rotate\nmidi learn pad W\nmidi learn shift\nmidi follow on\nmidi clock 128\n").unwrap();
+        let cmds: Vec<Cmd> = ev.into_iter().map(|e| e.cmd).collect();
+        assert_eq!(
+            cmds,
+            vec![
+                Cmd::Midi(MidiCmd::Msg(Msg::NoteOn { ch: 0, note: 36, vel: 100 })),
+                Cmd::Midi(MidiCmd::Msg(Msg::NoteOff { ch: 9, note: 36 })),
+                Cmd::Midi(MidiCmd::Msg(Msg::Cc { ch: 1, cc: 1, value: 127 })),
+                Cmd::Midi(MidiCmd::Learn(LearnWhat::Param("Fractal/feedback/rotate".into()))),
+                Cmd::Midi(MidiCmd::Learn(LearnWhat::Pad(1))),
+                Cmd::Midi(MidiCmd::Learn(LearnWhat::Shift)),
+                Cmd::Midi(MidiCmd::Follow(true)),
+                Cmd::Midi(MidiCmd::Clock(128.0)),
+            ]
+        );
+        assert!(parse("midi cc 1 200\n").is_err());
+        assert!(parse("midi note 36 on 100 17\n").is_err());
     }
 
     #[test]

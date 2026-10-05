@@ -7,6 +7,7 @@ mod clip;
 mod composition;
 mod effects;
 mod isf_library;
+mod midi;
 mod modulation;
 mod param;
 mod punch;
@@ -133,6 +134,16 @@ fn main() -> eframe::Result {
             }
             let mut app = App::new(Renderer::new(rs), isf_dirs);
             app.fixed_step = fixed_step;
+            // Scripts stay away from the hardware and the user's saved mappings, unless a config
+            // dir is given explicitly (the MIDI tests do, to check mappings survive a restart).
+            if script_path.is_some() {
+                app.midi = midi::Midi::new(std::env::var_os("TRIPSLOP_CONFIG_DIR").map(PathBuf::from));
+                app.midi.port = midi::Port::Off;
+            } else {
+                app.midi = midi::Midi::new(midi::config_dir());
+                let port = app.midi.port.clone();
+                app.midi.connect(port);
+            }
             if let Some(s) = size {
                 app.set_size(s)?;
             }
@@ -216,6 +227,8 @@ struct App {
     quit_requested: bool,
     /// Sound input and its analysis.
     audio: audio::Audio,
+    /// MIDI input, mappings and learn state.
+    midi: midi::Midi,
     /// Custom size typed into the Output settings, applied with its button.
     size_edit: (u32, u32),
 }
@@ -256,6 +269,8 @@ impl App {
             screenshot_requested: false,
             quit_requested: false,
             audio: Default::default(),
+            // Replaced in `main` (scripts don't touch the saved mappings or the hardware).
+            midi: midi::Midi::new(None),
             size_edit: renderer::DEFAULT_SIZE,
         }
     }
@@ -609,6 +624,165 @@ impl App {
         Ok(())
     }
 
+    /// Carry out what MIDI messages asked for.
+    fn apply_midi(&mut self, actions: Vec<midi::Action>) {
+        use midi::Action;
+        for a in actions {
+            match a {
+                Action::Param(path, t) => {
+                    if let Err(e) = self.with_param(&path, |p| p.set_normalized(t)) {
+                        self.status = format!("MIDI: {e}");
+                    }
+                }
+                Action::Pad(i, down) => self.punch.pads[i].midi_held = down,
+                Action::ToggleLatch(i) => self.punch.pads[i].latched = !self.punch.pads[i].latched,
+                Action::Launch(c) => {
+                    if c < self.comp.columns {
+                        self.comp.launch(Launch::Column(c));
+                    }
+                }
+                Action::Bpm(b) => self.comp.bpm = b,
+                // Keep the beat in phase with the incoming quarter notes.
+                Action::Beat => {
+                    let nearest = self.beat.round();
+                    if (self.beat - nearest).abs() < 0.25 {
+                        self.beat = nearest;
+                    }
+                }
+                Action::Start => self.beat = (self.beat / 4.0).round() * 4.0,
+                Action::Learned(m) => self.status = format!("MIDI: {} → {}", m.control.describe(), m.target.describe()),
+            }
+        }
+    }
+
+    /// Every parameter's script path and seed (MIDI mappings use paths, the UI uses seeds).
+    fn param_paths(&mut self) -> Vec<(String, u64)> {
+        let mut out = Vec::new();
+        self.comp.visit_paths(&mut |path, p| out.push((path.to_string(), p.seed)));
+        out
+    }
+
+    /// Take the UI's MIDI learn requests, and tell it what's mapped.
+    fn sync_midi_ui(&mut self, ctx: &egui::Context) {
+        use midi::Target;
+        use ui::midi::{LearnKey, Request};
+        let requests = ui::midi::take_requests(ctx);
+        let paths = self.param_paths();
+        let target_of = |k: LearnKey| match k {
+            LearnKey::Param(seed) => paths.iter().find(|(_, s)| *s == seed).map(|(p, _)| Target::Param(p.clone())),
+            LearnKey::Pad(i) => Some(Target::Pad(i)),
+            LearnKey::Scene(c) => Some(Target::Scene(c)),
+            LearnKey::Shift => Some(Target::Shift),
+        };
+        for r in requests {
+            match r {
+                Request::Learn(k) => {
+                    self.midi.learning = target_of(k);
+                    if let Some(t) = &self.midi.learning {
+                        self.status = format!("MIDI learn: move a control for {}", t.describe());
+                    }
+                }
+                Request::Forget(k) => {
+                    if let Some(t) = target_of(k) {
+                        self.midi.forget(&t);
+                    }
+                }
+                Request::Cancel => self.midi.learning = None,
+            }
+        }
+        let key_of = |t: &Target| match t {
+            Target::Param(path) => paths.iter().find(|(p, _)| p == path).map(|(_, s)| LearnKey::Param(*s)),
+            Target::Pad(i) => Some(LearnKey::Pad(*i)),
+            Target::Scene(c) => Some(LearnKey::Scene(*c)),
+            Target::Shift => Some(LearnKey::Shift),
+        };
+        let view = ui::midi::View {
+            mapped: self.midi.mappings.iter().filter_map(|m| Some((key_of(&m.target)?, m.control.describe()))).collect(),
+            learning: self.midi.learning.as_ref().and_then(key_of),
+        };
+        ui::midi::publish(ctx, view);
+        if self.midi.learning.is_some() {
+            ctx.request_repaint();
+        }
+    }
+
+    /// MIDI input picker, clock, Shift and the list of mappings, in the top bar.
+    fn midi_controls(&mut self, ui: &mut egui::Ui) {
+        let label = match (&self.midi.port, self.midi.connected()) {
+            (midi::Port::Off, _) => "🎹 MIDI off".to_string(),
+            (_, 0) => "🎹 MIDI (no device)".to_string(),
+            (midi::Port::All, n) => format!("🎹 MIDI ({n})"),
+            (midi::Port::Named(name), _) => format!("🎹 {name}"),
+        };
+        ui.menu_button(label, |ui| {
+            ui.set_min_width(260.0);
+            let mut choice = None;
+            ui.label(RichText::new("Input").strong());
+            if ui.selectable_label(self.midi.port == midi::Port::Off, "Off").clicked() {
+                choice = Some(midi::Port::Off);
+            }
+            if ui.selectable_label(self.midi.port == midi::Port::All, "All devices").clicked() {
+                choice = Some(midi::Port::All);
+            }
+            for name in midi::ports() {
+                let named = midi::Port::Named(name.clone());
+                if ui.selectable_label(self.midi.port == named, &name).clicked() {
+                    choice = Some(named);
+                }
+            }
+            if ui.button("Rescan devices").clicked() {
+                choice = Some(self.midi.port.clone());
+            }
+            if let Some(p) = choice {
+                self.midi.connect(p);
+            }
+            if let Some(e) = &self.midi.error {
+                ui.colored_label(Color32::from_rgb(255, 120, 100), e);
+            }
+            ui.separator();
+            let mut follow = self.midi.follow_clock;
+            if ui.checkbox(&mut follow, "Follow MIDI clock").on_hover_text("Tempo and beat from the incoming clock; Start resets to a downbeat").changed() {
+                self.midi.set_follow_clock(follow);
+            }
+            ui.horizontal(|ui| {
+                ui::midi::menu(ui, ui::midi::LearnKey::Shift);
+                ui.label(RichText::new("Shift: hold + pad = latch").small().weak());
+            });
+            ui.label(
+                RichText::new(format!(
+                    "Pads: notes {}–{} · right-click a slider, pad or scene to learn",
+                    midi::PAD_BASE_NOTE,
+                    midi::PAD_BASE_NOTE + 15
+                ))
+                .small()
+                .weak(),
+            );
+            if !self.midi.mappings.is_empty() {
+                ui.separator();
+                ui.label(RichText::new("Mappings").strong());
+                let mut forget = None;
+                for m in &self.midi.mappings {
+                    ui.horizontal(|ui| {
+                        if ui.small_button("×").clicked() {
+                            forget = Some(m.target.clone());
+                        }
+                        ui.label(RichText::new(format!("{} → {}", m.control.describe(), m.target.describe())).small());
+                    });
+                }
+                if let Some(t) = forget {
+                    self.midi.forget(&t);
+                }
+                if ui.button("Forget all").clicked() {
+                    self.midi.forget_all();
+                }
+            }
+            if let Some(last) = &self.midi.last {
+                ui.separator();
+                ui.label(RichText::new(format!("last: {last}")).small().weak());
+            }
+        });
+    }
+
     /// Audio input picker and level meter, in the top bar.
     fn audio_controls(&mut self, ui: &mut egui::Ui) {
         let current = self.audio.source_name().map(str::to_string);
@@ -902,6 +1076,7 @@ impl App {
             ui.toggle_value(&mut self.show_library, "Library");
             ui.separator();
             self.audio_controls(ui);
+            self.midi_controls(ui);
             ui.separator();
             if ui.button("Perform (Cmd F)").clicked() {
                 self.perform = true;
@@ -1032,6 +1207,9 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         self.poll_finished_recordings();
         self.handle_input(&ctx);
+        let midi = self.midi.poll();
+        self.apply_midi(midi);
+        self.sync_midi_ui(&ctx);
         self.render_frame();
         self.update_fps();
         self.make_thumbnails(&ctx);

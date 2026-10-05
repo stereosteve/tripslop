@@ -256,6 +256,30 @@ They never modify your set: release a pad and everything is exactly as it was.
 | J | Wash out | Whiteout transition over a bar |
 | K | Trance gate | Master chopped by a 16-step gate |
 
+## MIDI
+
+The **🎹 MIDI** menu in the top bar picks the input: all devices (the default), one device, or
+off. *Rescan devices* picks up a controller plugged in later.
+* **Pads:** notes 36–51 (the usual drum-pad layout) play the 16 punch pads, in Q…K order.
+  Note on holds a pad, note off releases it.
+* **MIDI learn:** right-click any slider, punch pad or scene button → *Learn MIDI*, then move
+  a knob or hit a pad. A CC sweeps a slider across its range (following log sliders and
+  snapping choices); a note sets it to the top while held. Mapped sliders show a small **M**;
+  the same menu shows the mapping and offers *Forget MIDI*. Learned mappings win over the
+  default pad notes, and each control drives one thing.
+* **Shift:** learn a button as *Shift* (in the MIDI menu); hold it and hit a pad to latch or
+  unlatch the pad, like Shift on the keyboard.
+* **MIDI clock:** with *Follow MIDI clock* on, the incoming clock sets the BPM, each quarter note
+  keeps the beat in phase, and Start lines the beat up with a downbeat.
+* The menu lists every mapping (× to forget one) and the last message received.
+
+Mappings belong to the controller rather than the set, so they're saved in `midi.json` in
+tripslop's config directory (`~/Library/Application Support/tripslop` on macOS,
+`~/.config/tripslop` on Linux, `%APPDATA%\tripslop` on Windows, or `TRIPSLOP_CONFIG_DIR`).
+Parameters are saved by their path (`2/fx1/rotate °`: layer 2, its first effect), so a mapping
+follows the layer and effect position, not their names. Scripts leave the hardware and the
+saved mappings alone unless `TRIPSLOP_CONFIG_DIR` is set.
+
 ## Controls
 
 | Key | Action |
@@ -321,6 +345,9 @@ Layers and columns are **1-based**, like the UI.
 | `snapshot PATH` · `screenshot PATH` · `record start/stop` | output frame, full window, video |
 | `audio FILE.wav` · `audio off` | analyse a WAV file in step with the clock (deterministic) |
 | `automate PATH SHAPE [DEPTH] [BEATS]` · `automate PATH off` | attach automation: `sine`, `square`, `drift`, … or `audio:BAND` (e.g. `audio:kick`) |
+| `midi note N on [VEL] [CH]` · `midi note N off [CH]` · `midi cc N VALUE [CH]` | fake MIDI input (channels 1–16, default 1); goes through the same mappings as hardware |
+| `midi learn PATH` · `midi learn pad KEY` · `midi learn scene N` · `midi learn shift` | start MIDI learn; the next note or CC is mapped |
+| `midi follow on/off` · `midi clock BPM` | follow MIDI clock; send Start and two beats of clock |
 | `print WHAT` · `assert WHAT OP VALUE` · `quit` | checks; `OP` is one of `== != < <= > >= ~=` |
 
 **`WHAT`** is either a parameter path or one of: `playhead L`, `active L` (1-based column, 0
@@ -338,7 +365,7 @@ case-insensitively by prefix, so `2/feedback/rot` works. Paths can contain space
 **Tests:**
 * `cargo test` runs the unit tests (no window).
 * `cargo test --release -- --ignored` also runs the scripts in `scripts/` (smoke, shaders,
-  punch tour, shape, projection, crossfade, resolution, library, audio) as end-to-end tests. These need a GPU and a window session. Captures go to
+  punch tour, shape, projection, crossfade, resolution, library, audio, midi) as end-to-end tests. These need a GPU and a window session. Captures go to
   `target/script-out/`.
 
 For a quick single still, use `TRIPSLOP_SNAPSHOT=<frames>:<out.png>`. It saves the output after

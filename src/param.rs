@@ -122,6 +122,21 @@ impl Param {
     }
 
     /// Slider position (0..1) of a value, matching egui's linear/log mapping.
+    /// Set from a 0..1 control position (a MIDI knob), following the slider's linear / log
+    /// mapping. Choices and integers snap.
+    pub fn set_normalized(&mut self, t: f32) {
+        let s = &self.spec;
+        let t = t.clamp(0.0, 1.0);
+        let v = if !s.choices.is_empty() {
+            (t * (s.choices.len() - 1) as f32).round()
+        } else if s.log && s.min > 0.0 {
+            s.min * (s.max / s.min).powf(t)
+        } else {
+            s.min + t * (s.max - s.min)
+        };
+        self.set(if s.int { v.round() } else { v });
+    }
+
     pub fn normalized(&self, v: f32) -> f32 {
         let s = &self.spec;
         if s.log && s.min > 0.0 {

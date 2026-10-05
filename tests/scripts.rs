@@ -10,9 +10,14 @@ use std::time::{Duration, Instant};
 const TIMEOUT: Duration = Duration::from_secs(180);
 
 fn run(script: &str) {
+    run_with_env(script, &[]);
+}
+
+fn run_with_env(script: &str, env: &[(&str, &str)]) {
     let root = env!("CARGO_MANIFEST_DIR");
     let mut child = Command::new(env!("CARGO_BIN_EXE_tripslop"))
         .args(["--script", script])
+        .envs(env.iter().copied())
         .current_dir(root)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -121,4 +126,14 @@ fn library() {
 #[ignore = "opens a window; needs a GPU"]
 fn audio() {
     run("scripts/audio.tripslop");
+}
+
+#[test]
+#[ignore = "opens a window; needs a GPU"]
+fn midi() {
+    // Learn in one run, check the mapping in the next: it has to survive a restart.
+    let config = format!("{}/target/script-out/midi-config", env!("CARGO_MANIFEST_DIR"));
+    let _ = std::fs::remove_dir_all(&config);
+    run_with_env("scripts/midi.tripslop", &[("TRIPSLOP_CONFIG_DIR", &config)]);
+    run_with_env("scripts/midi-recall.tripslop", &[("TRIPSLOP_CONFIG_DIR", &config)]);
 }

@@ -59,6 +59,9 @@ pub fn param_labeled(ui: &mut egui::Ui, p: &mut Param, label: &str, clock: Clock
             }
             r
         };
+        let key = crate::ui::midi::LearnKey::Param(p.seed);
+        resp.context_menu(|ui| crate::ui::midi::menu(ui, key));
+        crate::ui::midi::badge(ui, key);
 
         egui::Popup::from_toggle_button_response(&btn)
             .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
