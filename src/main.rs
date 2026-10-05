@@ -1,6 +1,7 @@
 //! tripslop — a live video mixer: layered clip grid with scenes, per-layer effects and an
 //! emulated analog video-feedback rig.
 
+mod audio;
 mod automation;
 mod clip;
 mod composition;
@@ -213,6 +214,8 @@ struct App {
     pending_screenshot: Option<PathBuf>,
     screenshot_requested: bool,
     quit_requested: bool,
+    /// Sound input and its analysis.
+    audio: audio::Audio,
     /// Custom size typed into the Output settings, applied with its button.
     size_edit: (u32, u32),
 }
@@ -252,6 +255,7 @@ impl App {
             pending_screenshot: None,
             screenshot_requested: false,
             quit_requested: false,
+            audio: Default::default(),
             size_edit: renderer::DEFAULT_SIZE,
         }
     }
@@ -261,6 +265,7 @@ impl App {
             beat: self.beat,
             time: self.sim_time,
             bpm: self.comp.bpm,
+            audio: self.audio.levels,
         }
     }
 
@@ -604,6 +609,72 @@ impl App {
         Ok(())
     }
 
+    /// Audio input picker and level meter, in the top bar.
+    fn audio_controls(&mut self, ui: &mut egui::Ui) {
+        let current = self.audio.source_name().map(str::to_string);
+        let label = match &current {
+            Some(n) => format!("🔊 {n}"),
+            None => "🔇 Audio off".to_string(),
+        };
+        let mut pick: Option<Option<Option<String>>> = None;
+        let mut file = false;
+        egui::ComboBox::from_id_salt("audio input")
+            .selected_text(label)
+            .width(150.0)
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(current.is_none(), "Off").clicked() {
+                    pick = Some(None);
+                }
+                if ui.selectable_label(false, "Default input").clicked() {
+                    pick = Some(Some(None));
+                }
+                for name in audio::input_devices() {
+                    if ui.selectable_label(current.as_deref() == Some(&name), &name).clicked() {
+                        pick = Some(Some(Some(name)));
+                    }
+                }
+                ui.separator();
+                if ui.selectable_label(self.audio.is_file(), "WAV file…").on_hover_text("Analyse a WAV file in step with the clock (silent)").clicked() {
+                    file = true;
+                }
+            })
+            .response
+            .on_hover_text("Sound input for the Audio automation shape and audio-reactive shaders. For what the computer is playing, use a loopback device such as BlackHole.");
+        match pick {
+            Some(None) => {
+                self.audio.stop();
+                self.status = "Audio off".into();
+            }
+            Some(Some(name)) => {
+                self.status = match self.audio.open_device(name.as_deref()) {
+                    Ok(()) => format!("Listening to {}", self.audio.source_name().unwrap_or("input")),
+                    Err(e) => format!("Audio input failed: {e}"),
+                };
+            }
+            None => {}
+        }
+        if file && let Some(path) = rfd::FileDialog::new().add_filter("WAV", &["wav"]).pick_file() {
+            self.status = match self.audio.open_file(&path, self.sim_time) {
+                Ok(()) => format!("Analysing {}", path.display()),
+                Err(e) => format!("Can't read audio: {e}"),
+            };
+        }
+        // Level, bass, mid, high bars and a kick light.
+        let l = self.audio.levels;
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(52.0, 18.0), egui::Sense::hover());
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 2.0, Color32::from_gray(20));
+        for (i, v) in [l.level, l.bass, l.mid, l.high].into_iter().enumerate() {
+            let x = rect.left() + 2.0 + i as f32 * 10.0;
+            let h = (rect.height() - 4.0) * v.clamp(0.0, 1.0);
+            painter.rect_filled(Rect::from_min_max(pos2(x, rect.bottom() - 2.0 - h), pos2(x + 8.0, rect.bottom() - 2.0)), 1.0, ui::widgets::ACCENT);
+        }
+        painter.circle_filled(pos2(rect.right() - 6.0, rect.center().y), 4.0, Color32::from_rgb(255, 200, 60).gamma_multiply(l.kick.max(0.08)));
+        if self.audio.source_name().is_some() {
+            ui.ctx().request_repaint();
+        }
+    }
+
     /// Program size and memory, on the Composition tab.
     fn output_settings(&mut self, ui: &mut egui::Ui) {
         let (w, h) = self.renderer.size();
@@ -725,6 +796,10 @@ impl App {
         self.beat += TICK * self.comp.bpm as f64 / 60.0;
         self.sim_time += TICK;
         self.frame_count += 1;
+        self.audio.tick(self.sim_time, TICK as f32);
+        if self.audio.source_name().is_some() {
+            self.renderer.set_audio(&self.audio.spectrum, &self.audio.waveform);
+        }
         let clock = self.clock();
         self.punch.update(&mut self.comp, clock, TICK);
         self.comp.tick(TICK, prev_beat, clock);
@@ -825,6 +900,9 @@ impl App {
             }
             ui.toggle_value(&mut self.show_output, "🖵 Output window");
             ui.toggle_value(&mut self.show_library, "Library");
+            ui.separator();
+            self.audio_controls(ui);
+            ui.separator();
             if ui.button("Perform (Cmd F)").clicked() {
                 self.perform = true;
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));

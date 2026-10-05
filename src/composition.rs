@@ -545,11 +545,7 @@ mod tests {
     use super::*;
 
     fn clock(beat: f64) -> Clock {
-        Clock {
-            beat,
-            time: beat / 2.0,
-            bpm: 120.0,
-        }
+        Clock::new(beat, beat / 2.0, 120.0)
     }
 
     fn comp() -> Composition {

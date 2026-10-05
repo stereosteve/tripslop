@@ -116,3 +116,9 @@ fn resolution() {
 fn library() {
     run("scripts/library.tripslop");
 }
+
+#[test]
+#[ignore = "opens a window; needs a GPU"]
+fn audio() {
+    run("scripts/audio.tripslop");
+}

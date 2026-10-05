@@ -154,6 +154,17 @@ impl App {
                 self.ensure_layer(*l);
                 self.comp.set_clip(*l, *c, clip);
             }
+            Cmd::Automate(path, None) => self.with_param(path, |p| p.modulator = None)?,
+            Cmd::Automate(path, Some((shape, band, depth, beats))) => self.with_param(path, |p| {
+                let mut m = crate::modulation::Modulator::lfo(p.seed, *shape, *beats, *depth);
+                if let Some(b) = band {
+                    m.band = *b;
+                    m.polarity = crate::modulation::Polarity::Up;
+                }
+                p.modulator = Some(m);
+            })?,
+            Cmd::Audio(None) => self.audio.stop(),
+            Cmd::Audio(Some(path)) => self.audio.open_file(path, self.sim_time)?,
             Cmd::Library(effects, category) => {
                 use crate::isf_library::Kind;
                 self.show_library = true;
@@ -312,6 +323,7 @@ impl App {
             },
             Query::Layers => self.comp.layers.len() as f64,
             Query::Width => self.renderer.size().0 as f64,
+            Query::Audio(band) => self.audio.levels.get(*band) as f64,
             Query::Height => self.renderer.size().1 as f64,
             Query::Bpm => self.comp.bpm as f64,
             Query::Beat => self.beat,

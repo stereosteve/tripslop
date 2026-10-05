@@ -6,6 +6,7 @@
 
 use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Stroke, pos2, vec2};
 
+use crate::audio::Band;
 use crate::modulation::{BEAT_CHOICES, Clock, Modulator, Polarity, Rate, Shape};
 use crate::param::Param;
 
@@ -109,10 +110,60 @@ fn editor(ui: &mut egui::Ui, spec: &crate::param::Spec, label: &str, m: &mut Mod
 
     ui.horizontal_wrapped(|ui| {
         for s in Shape::ALL {
-            ui.selectable_value(&mut m.shape, s, s.name());
+            if ui.selectable_value(&mut m.shape, s, s.name()).clicked() && s == Shape::Audio {
+                // Audio is 0 in silence: push the value up from the slider rather than swing around it.
+                m.polarity = Polarity::Up;
+            }
         }
     });
 
+    if m.shape == Shape::Audio {
+        ui.horizontal(|ui| {
+            ui.label("Follow");
+            for b in Band::ALL {
+                ui.selectable_value(&mut m.band, b, b.name());
+            }
+        });
+        if !clock.audio.active {
+            ui.label(RichText::new("No audio input: pick one in the top bar.").small().weak());
+        }
+    } else {
+        rate_editor(ui, m);
+    }
+
+    ui.add(egui::Slider::new(&mut m.depth, 0.0..=1.0).text("depth"));
+    ui.horizontal(|ui| {
+        for p in Polarity::ALL {
+            ui.selectable_value(&mut m.polarity, p, p.name());
+        }
+    });
+    if m.shape != Shape::Audio {
+        ui.add(egui::Slider::new(&mut m.phase, 0.0..=1.0).text("phase"));
+    }
+    if m.shape == Shape::Square {
+        ui.add(egui::Slider::new(&mut m.width, 0.02..=0.98).text("pulse width"));
+    }
+
+    if m.shape == Shape::Audio {
+        meter_plot(ui, m, clock);
+    } else {
+        plot(ui, m, clock);
+    }
+
+    let a = m.apply(base, spec.min, spec.max, 0.0);
+    let b = m.apply(base, spec.min, spec.max, 1.0);
+    ui.label(
+        RichText::new(format!("slider {base:.3} · sweeps {:.3} … {:.3}", a.min(b), a.max(b)))
+            .small()
+            .weak(),
+    );
+    if m.shape == Shape::Envelope {
+        ui.label(RichText::new("click: add point · drag: move · right-click: delete").small().weak());
+    }
+    remove
+}
+
+fn rate_editor(ui: &mut egui::Ui, m: &mut Modulator) {
     ui.horizontal(|ui| {
         ui.label("Rate");
         let synced = matches!(m.rate, Rate::Beats(_));
@@ -135,31 +186,17 @@ fn editor(ui: &mut egui::Ui, spec: &crate::param::Spec, label: &str, m: &mut Mod
             ui.add(egui::Slider::new(hz, 0.01..=20.0).logarithmic(true).text("Hz"));
         }
     }
+}
 
-    ui.add(egui::Slider::new(&mut m.depth, 0.0..=1.0).text("depth"));
-    ui.horizontal(|ui| {
-        for p in Polarity::ALL {
-            ui.selectable_value(&mut m.polarity, p, p.name());
-        }
-    });
-    ui.add(egui::Slider::new(&mut m.phase, 0.0..=1.0).text("phase"));
-    if m.shape == Shape::Square {
-        ui.add(egui::Slider::new(&mut m.width, 0.02..=0.98).text("pulse width"));
-    }
-
-    plot(ui, m, clock);
-
-    let a = m.apply(base, spec.min, spec.max, 0.0);
-    let b = m.apply(base, spec.min, spec.max, 1.0);
-    ui.label(
-        RichText::new(format!("slider {base:.3} · sweeps {:.3} … {:.3}", a.min(b), a.max(b)))
-            .small()
-            .weak(),
-    );
-    if m.shape == Shape::Envelope {
-        ui.label(RichText::new("click: add point · drag: move · right-click: delete").small().weak());
-    }
-    remove
+/// The Audio shape's current value, as a bar.
+fn meter_plot(ui: &mut egui::Ui, m: &Modulator, clock: Clock) {
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 4.0, ui.visuals().extreme_bg_color);
+    let v = m.signal(clock);
+    let color = if m.enabled { ACCENT } else { ui.visuals().weak_text_color() };
+    painter.rect_filled(Rect::from_min_size(rect.min, vec2(rect.width() * v, rect.height())), 4.0, color);
+    ui.ctx().request_repaint();
 }
 
 /// One cycle of the signal (four steps for the random shapes) with a playhead.
@@ -259,10 +296,18 @@ fn edit_envelope(ui: &egui::Ui, m: &mut Modulator, rect: Rect, resp: &egui::Resp
     }
 }
 
-pub fn rate_label(rate: Rate) -> String {
+fn rate_label(rate: Rate) -> String {
     match rate {
         Rate::Beats(b) => format!("{} beat{}", beats_label(b), if b == 1.0 { "" } else { "s" }),
         Rate::Hz(hz) => format!("{hz:.2} Hz"),
+    }
+}
+
+/// What drives a modulator, for lists: its rate, or the audio band it follows.
+pub fn source_label(m: &Modulator) -> String {
+    match m.shape {
+        Shape::Audio => m.band.name().to_string(),
+        _ => rate_label(m.rate),
     }
 }
 
@@ -281,7 +326,7 @@ pub fn overview(ui: &mut egui::Ui, comp: &mut crate::composition::Composition, c
             ui.painter().rect_filled(r, 1.0, ui.visuals().extreme_bg_color);
             ui.painter().rect_filled(Rect::from_min_max(pos2(r.left(), r.bottom() - v * r.height()), r.max), 1.0, ACCENT);
             ui.label(path);
-            ui.label(RichText::new(format!("{} · {} · {:.0}%", m.shape.name(), rate_label(m.rate), m.depth * 100.0)).weak().small());
+            ui.label(RichText::new(format!("{} · {} · {:.0}%", m.shape.name(), source_label(m), m.depth * 100.0)).weak().small());
             remove = ui.small_button("×").on_hover_text("Remove").clicked();
         });
         if remove {

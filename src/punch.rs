@@ -426,7 +426,7 @@ mod tests {
     }
 
     fn clock(beat: f64) -> Clock {
-        Clock { beat, time: beat / 2.0, bpm: 120.0 }
+        Clock::new(beat, beat / 2.0, 120.0)
     }
 
     /// Every pad can run for a few bars without panicking (e.g. on a wrong parameter label)

@@ -41,6 +41,7 @@ const RENDER: wgpu::TextureUsages = wgpu::TextureUsages::RENDER_ATTACHMENT
     .union(wgpu::TextureUsages::COPY_SRC)
     .union(wgpu::TextureUsages::COPY_DST);
 const NOISE_SIZE: u32 = 256;
+const AUDIO_USAGE: wgpu::TextureUsages = wgpu::TextureUsages::TEXTURE_BINDING.union(wgpu::TextureUsages::COPY_DST);
 /// composite.wgsl mode that dissolves to the second texture instead of blending it on top.
 const XFADE: f32 = 9.0;
 pub const THUMB_W: u32 = 192;
@@ -148,6 +149,8 @@ pub struct Renderer {
     flip_pipe: Pipe,
     repeat_sampler: wgpu::Sampler,
     noise: Tex,
+    /// Audio spectrum and waveform for shaders (`audio::TEX_LEN` × 1, value in red).
+    audio_tex: [Tex; 2],
     /// Last frame's output in GL orientation (`iChannel3`).
     prev_output_gl: Tex,
     custom: HashMap<u64, CustomGpu>,
@@ -454,6 +457,10 @@ impl Renderer {
         let prev_output_gl = tex2d(&device, "previous output (GL)", width, height, RENDER);
         let preview_gl = tex2d(&device, "shader preview", THUMB_W, THUMB_H, RENDER);
         let lib_gl = tex2d(&device, "library scratch", LIB_W, LIB_H, RENDER);
+        let audio_tex = [
+            tex2d(&device, "audio spectrum", crate::audio::TEX_LEN as u32, 1, AUDIO_USAGE),
+            tex2d(&device, "audio waveform", crate::audio::TEX_LEN as u32, 1, AUDIO_USAGE),
+        ];
         let dummy_ring = ring(&device, 1, (1, 1)).view;
         let comp = Some(pair(&device, "comp", (width, height)));
         let output = tex2d(&device, "output", width, height, RENDER);
@@ -486,6 +493,7 @@ impl Renderer {
             flip_pipe,
             repeat_sampler,
             noise,
+            audio_tex,
             prev_output_gl,
             custom: HashMap::new(),
             egui_renderer: rs.renderer.clone(),
@@ -701,7 +709,7 @@ impl Renderer {
             label: Some("user shader"),
             source: wgpu::ShaderSource::Wgsl(wgsl.into()),
         });
-        let layout = bind_layout(&self.device, &[false; 4]);
+        let layout = bind_layout(&self.device, &[false; 6]);
         let pipeline_layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("user shader"),
             bind_group_layouts: &[Some(&layout)],
@@ -809,7 +817,8 @@ impl Renderer {
         };
         let bufs = gpu.bufs.get_or_insert_with(|| pair(&self.device, "user shader", self.size));
         let prev = &bufs[1 - gpu.cur].view;
-        let bg = self.bind_with(&self.repeat_sampler, &pipe.layout, ub, &[ch0, prev, &self.noise.view, ch3]);
+        let (fft, wave) = (&self.audio_tex[0].view, &self.audio_tex[1].view);
+        let bg = self.bind_with(&self.repeat_sampler, &pipe.layout, ub, &[ch0, prev, &self.noise.view, ch3, fft, wave]);
         pass(enc, &bufs[gpu.cur].view, Some(wgpu::Color::TRANSPARENT), pipe, &bg);
         let out = &bufs[gpu.cur];
         let mode = shader.alpha.index() as f32;
@@ -993,11 +1002,7 @@ impl Renderer {
     /// generator's settings change), never by playback or automation. Also frees the
     /// thumbnails of deleted clips.
     fn previews(&mut self, enc: &mut wgpu::CommandEncoder, comp: &mut Composition) {
-        let clock = Clock {
-            beat: PREVIEW_TIME * 2.0,
-            time: PREVIEW_TIME,
-            bpm: 120.0,
-        };
+        let clock = Clock::new(PREVIEW_TIME * 2.0, PREVIEW_TIME, 120.0);
         let mut existing = HashSet::new();
         for layer in &comp.layers {
             for clip in layer.clips.iter().flatten() {
@@ -1038,7 +1043,7 @@ impl Renderer {
                         let ub = self.uniform(&data);
                         let pipe = self.custom[&sh.id].pipe.as_ref().unwrap();
                         let d = &self.dummy_tex.view;
-                        let bg = self.bind_with(&self.repeat_sampler, &pipe.layout, ub, &[d, d, &self.noise.view, d]);
+                        let bg = self.bind_with(&self.repeat_sampler, &pipe.layout, ub, &[d, d, &self.noise.view, d, d, d]);
                         pass(enc, &self.preview_gl.view, Some(wgpu::Color::TRANSPARENT), pipe, &bg);
                         let flip = if screen_space { 0.0 } else { 1.0 };
                         let ub = self.uniform(&[[sh.alpha.index() as f32, flip, 0.0, 0.0]]);
@@ -1155,7 +1160,7 @@ impl Renderer {
     }
 
     fn draw_library_card(&mut self, enc: &mut wgpu::CommandEncoder, key: &str, time: f64, effect: bool) {
-        let clock = Clock { beat: time * 2.0, time, bpm: 120.0 };
+        let clock = Clock::new(time * 2.0, time, 120.0);
         let Some(t) = self.lib_thumbs.get(key) else { return };
         let Ok((_, screen_space)) = &t.gpu else { return };
         let screen_space = *screen_space;
@@ -1171,7 +1176,7 @@ impl Renderer {
             (Some(inp), true) => &inp[if screen_space { 0 } else { 1 }].view,
             _ => d,
         };
-        let bg = self.bind_with(&self.repeat_sampler, &pipe.layout, ub, &[input, d, &self.noise.view, d]);
+        let bg = self.bind_with(&self.repeat_sampler, &pipe.layout, ub, &[input, d, &self.noise.view, d, d, d]);
         pass(enc, &self.lib_gl.view, Some(wgpu::Color::TRANSPARENT), pipe, &bg);
         let bg = self.bind(&self.flip_pipe.layout, flip_ub, &[&self.lib_gl.view]);
         pass(enc, &t.tex.view, Some(wgpu::Color::BLACK), &self.flip_pipe, &bg);
@@ -1205,6 +1210,33 @@ impl Renderer {
             );
             t
         })
+    }
+
+    /// Upload this tick's audio spectrum (0..1) and waveform (-1..1) for shaders.
+    pub fn set_audio(&mut self, spectrum: &[f32], waveform: &[f32]) {
+        for (tex, values, map) in [
+            (&self.audio_tex[0], spectrum, (|v: f32| v) as fn(f32) -> f32),
+            (&self.audio_tex[1], waveform, |v: f32| v * 0.5 + 0.5),
+        ] {
+            let bytes: Vec<u8> = values.iter().flat_map(|v| {
+                let b = (map(*v).clamp(0.0, 1.0) * 255.0).round() as u8;
+                [b, b, b, 255]
+            }).collect();
+            self.queue.write_texture(
+                tex.tex.as_image_copy(),
+                &bytes,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * values.len() as u32),
+                    rows_per_image: Some(1),
+                },
+                wgpu::Extent3d {
+                    width: values.len() as u32,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
     }
 
     /// Program size in pixels.
@@ -1324,13 +1356,13 @@ fn date_now() -> [f32; 4] {
 }
 
 /// Uniform block for user shaders (layout matches `shader.rs`'s GLSL and WGSL preludes).
-fn shader_uniforms(shader: &CustomShader, (width, height): (u32, u32), output: (u32, u32), frame: i32, clock: Clock) -> [[f32; 4]; 8 + crate::shader::MAX_PARAMS / 4] {
+fn shader_uniforms(shader: &CustomShader, (width, height): (u32, u32), output: (u32, u32), frame: i32, clock: Clock) -> [[f32; 4]; 10 + crate::shader::MAX_PARAMS / 4] {
     let (w, h) = (width as f32, height as f32);
     // iMouse is in output pixels; scale it to the render size.
     let sx = w / output.0 as f32;
     let sy = h / output.1 as f32;
     let m = shader.mouse;
-    let mut data = [[0.0f32; 4]; 8 + crate::shader::MAX_PARAMS / 4];
+    let mut data = [[0.0f32; 4]; 10 + crate::shader::MAX_PARAMS / 4];
     data[0] = [w, h, 1.0, clock.time as f32];
     data[1] = [m[0] * sx, m[1] * sy, m[2] * sx, m[3] * sy];
     data[2] = date_now();
@@ -1339,8 +1371,11 @@ fn shader_uniforms(shader: &CustomShader, (width, height): (u32, u32), output: (
     data[5] = [NOISE_SIZE as f32, NOISE_SIZE as f32, 1.0, 0.0];
     data[6] = [w, h, 1.0, 0.0];
     data[7] = [1.0 / 60.0, f32::from_bits(frame as u32), clock.beat as f32, clock.bpm];
+    let a = clock.audio;
+    data[8] = [a.level, a.bass, a.mid, a.high];
+    data[9] = [a.kick, if a.active { 1.0 } else { 0.0 }, a.centroid, 0.0];
     for (i, p) in shader.params.iter().enumerate().take(crate::shader::MAX_PARAMS) {
-        data[8 + i / 4][i % 4] = p.get();
+        data[10 + i / 4][i % 4] = p.get();
     }
     data
 }

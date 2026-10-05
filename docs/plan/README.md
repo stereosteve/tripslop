@@ -9,7 +9,7 @@ blocking.
 | 1 | ✅ [Recording that never stalls](01-recording.md) | small | Recording can hitch the live output |
 | 2 | ✅ [Bank crossfader](02-crossfader.md) | small–medium | A/B fades feel like a delayed cut |
 | 3 | ✅ [Output resolution](03-resolution.md) | medium | Stuck at 720p |
-| 4 | [Audio reactivity](04-audio.md) | medium | Visuals that follow the music |
+| 4 | ✅ [Audio reactivity](04-audio.md) | medium | Visuals that follow the music |
 | 5 | [MIDI](05-midi.md) | small–medium | Play the punch pads on hardware |
 | 6 | [Offline export](06-export.md) | small–medium | Frame-perfect renders from a script |
 | 7 | [Frame-time overlay](07-perf-overlay.md) | small | Know when you're dropping frames |

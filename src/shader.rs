@@ -32,6 +32,11 @@ layout(set = 0, binding = 0, std140) uniform TripslopUniforms {
     int iFrame;
     float iBeat;
     float iBpm;
+    vec4 iAudio;
+    float iKick;
+    float _tripslop_audioOn;
+    float _tripslop_centroid;
+    float _tripslop_pad;
     vec4 _tripslop_p[16];
 };
 layout(set = 0, binding = 1) uniform sampler _tripslop_samp;
@@ -39,6 +44,8 @@ layout(set = 0, binding = 2) uniform texture2D _tripslop_ch0;
 layout(set = 0, binding = 3) uniform texture2D _tripslop_ch1;
 layout(set = 0, binding = 4) uniform texture2D _tripslop_ch2;
 layout(set = 0, binding = 5) uniform texture2D _tripslop_ch3;
+layout(set = 0, binding = 6) uniform texture2D _tripslop_fft;
+layout(set = 0, binding = 7) uniform texture2D _tripslop_wave;
 layout(location = 0) out vec4 _tripslop_out;
 #define iChannel0 sampler2D(_tripslop_ch0, _tripslop_samp)
 #define iChannel1 sampler2D(_tripslop_ch1, _tripslop_samp)
@@ -78,6 +85,11 @@ layout(set = 0, binding = 0, std140) uniform TripslopUniforms {
     int _tripslop_iFrame;
     float _tripslop_iBeat;
     float _tripslop_iBpm;
+    vec4 _tripslop_iAudio;
+    float _tripslop_iKick;
+    float _tripslop_audioOn;
+    float _tripslop_centroid;
+    float _tripslop_pad;
     vec4 _tripslop_p[16];
 };
 layout(set = 0, binding = 1) uniform sampler _tripslop_samp;
@@ -85,6 +97,8 @@ layout(set = 0, binding = 2) uniform texture2D _tripslop_ch0;
 layout(set = 0, binding = 3) uniform texture2D _tripslop_ch1;
 layout(set = 0, binding = 4) uniform texture2D _tripslop_ch2;
 layout(set = 0, binding = 5) uniform texture2D _tripslop_ch3;
+layout(set = 0, binding = 6) uniform texture2D _tripslop_fft;
+layout(set = 0, binding = 7) uniform texture2D _tripslop_wave;
 layout(location = 0) out vec4 _tripslop_out;
 #define TIME _tripslop_iTime
 #define TIMEDELTA _tripslop_iTimeDelta
@@ -216,7 +230,9 @@ pub fn prepare_with(user: &str, vertex: Option<&str>) -> Prepared {
 }
 
 /// Names of fields already in the WGSL `inputs` struct.
-const WGSL_FIELDS: &[&str] = &["size", "time", "mouse", "date", "channel_resolution", "time_delta", "frame", "beat", "bpm"];
+const WGSL_FIELDS: &[&str] = &[
+    "size", "time", "mouse", "date", "channel_resolution", "time_delta", "frame", "beat", "bpm", "audio", "kick", "audio_on", "centroid",
+];
 
 /// WGSL: user code is kept verbatim after a prelude declaring `inputs`, `samp` and
 /// `iChannel0..3`. Sliders are declared with `// @param name min max default` and read as
@@ -264,6 +280,11 @@ fn prepare_wgsl(user: &str) -> Prepared {
     frame: i32,
     beat: f32,
     bpm: f32,
+    audio: vec4f,
+    kick: f32,
+    audio_on: f32,
+    centroid: f32,
+    _tripslop_pad: f32,
 {fields}}};
 @group(0) @binding(0) var<uniform> inputs: TripslopInputs;
 @group(0) @binding(1) var samp: sampler;
@@ -271,6 +292,8 @@ fn prepare_wgsl(user: &str) -> Prepared {
 @group(0) @binding(3) var iChannel1: texture_2d<f32>;
 @group(0) @binding(4) var iChannel2: texture_2d<f32>;
 @group(0) @binding(5) var iChannel3: texture_2d<f32>;
+@group(0) @binding(6) var audio_fft: texture_2d<f32>;
+@group(0) @binding(7) var audio_wave: texture_2d<f32>;
 "
     );
     let header_lines = prelude.matches('\n').count();
@@ -562,7 +585,8 @@ fn prepare_isf(user: &str, json: Result<serde_json::Value, CompileError>, vertex
                 let ch = if images == 1 { 0 } else { 3 };
                 format!("sampler2D(_tripslop_ch{ch}, _tripslop_samp)")
             }
-            "audio" | "audioFFT" => "sampler2D(_tripslop_ch2, _tripslop_samp)".into(),
+            "audio" => "sampler2D(_tripslop_wave, _tripslop_samp)".into(),
+            "audioFFT" => "sampler2D(_tripslop_fft, _tripslop_samp)".into(),
             other => {
                 errors.push(CompileError { line: None, message: format!("ISF input type {other:?} ({name}) isn't supported") });
                 continue;
@@ -637,23 +661,22 @@ fn prepare_isf(user: &str, json: Result<serde_json::Value, CompileError>, vertex
 /// ISF built-ins the header defines.
 const ISF_BUILTINS: &[&str] = &["TIME", "TIMEDELTA", "RENDERSIZE", "FRAMEINDEX", "DATE", "PASSINDEX"];
 
-/// Audio uniforms some ISF hosts (ghost-arcade) add, with tripslop's values: the beat ones
-/// follow the tempo clock; the levels are 0 until there's audio input.
+/// Audio uniforms some ISF hosts (ghost-arcade) add, fed from tripslop's audio input. Without
+/// an input the levels are 0 and `audioBeat` pulses with the tempo clock instead of kicks.
 const AUDIO_UNIFORMS: &[(&str, &str)] = &[
-    ("audioLevel", "0.0"),
-    ("audioBass", "0.0"),
-    ("audioMid", "0.0"),
-    ("audioHigh", "0.0"),
-    ("audioSpectralCentroid", "0.0"),
-    // A pulse on every beat that decays over it, like a kick detector.
-    ("audioBeat", "pow(1.0 - fract(_tripslop_iBeat), 4.0)"),
+    ("audioLevel", "_tripslop_iAudio.x"),
+    ("audioBass", "_tripslop_iAudio.y"),
+    ("audioMid", "_tripslop_iAudio.z"),
+    ("audioHigh", "_tripslop_iAudio.w"),
+    ("audioSpectralCentroid", "_tripslop_centroid"),
+    ("audioBeat", "mix(pow(1.0 - fract(_tripslop_iBeat), 4.0), _tripslop_iKick, _tripslop_audioOn)"),
     ("audioBeatPhase", "fract(_tripslop_iBeat)"),
     ("audioBPM", "_tripslop_iBpm"),
 ];
 
 /// Provide the audio extensions `user` uses but doesn't declare itself (its `uniform` lines
-/// for them are dropped): globals assigned at the top of `main`, and `sampleFFT` /
-/// `sampleWaveform`, which read silence.
+/// for them are dropped): globals assigned at the top of `main`, and `sampleFFT(u)` (0..1, log
+/// frequency 30 Hz → 16 kHz) / `sampleWaveform(u)` (-1..1).
 fn audio_extensions(user: &str, skip: &mut Vec<String>, defines: &mut String, assigns: &mut String) {
     let declares = |name: &str, kinds: &[&str]| {
         user.lines().any(|l| {
@@ -668,9 +691,14 @@ fn audio_extensions(user: &str, skip: &mut Vec<String>, defines: &mut String, as
             assigns.push_str(&format!("{name} = {value}; "));
         }
     }
-    for f in ["sampleFFT", "sampleWaveform"] {
+    // Texel centres only, so the repeating sampler never blends the two ends.
+    let at = "vec2(clamp(u, 0.0, 1.0) * (511.0 / 512.0) + 0.5 / 512.0, 0.5)";
+    for (f, body) in [
+        ("sampleFFT", format!("texture(sampler2D(_tripslop_fft, _tripslop_samp), {at}).r")),
+        ("sampleWaveform", format!("texture(sampler2D(_tripslop_wave, _tripslop_samp), {at}).r * 2.0 - 1.0")),
+    ] {
         if contains_ident(user, f) && !declares(f, &["float"]) {
-            defines.push_str(&format!("float {f}(float u) {{ return 0.0; }}\n"));
+            defines.push_str(&format!("float {f}(float u) {{ return {body}; }}\n"));
         }
     }
 }
@@ -1417,6 +1445,24 @@ void main() {
         // A shader that has its own audioBass keeps it.
         let own = code.replace("uniform float audioBass;", "float audioBass = 0.5;");
         assert!(compile(&prepare(&own)).is_ok());
+    }
+
+    #[test]
+    fn audio_inputs_in_every_dialect() {
+        let toy = "void mainImage(out vec4 c, in vec2 p) { c = vec4(iAudio.y + iKick, iAudio.x, 0.0, 1.0); }";
+        assert!(compile(&prepare(toy)).is_ok(), "{:?}", compile(&prepare(toy)).err());
+        let wgsl = "// @param speed 0 4 1
+@fragment fn main(@builtin(position) p: vec4f) -> @location(0) vec4f {
+    let s = textureSampleLevel(audio_fft, samp, vec2f(0.1, 0.5), 0.0).r;
+    return vec4f(inputs.audio.y + inputs.kick + s, inputs.speed, 0.0, 1.0);
+}";
+        let p = prepare(wgsl);
+        assert!(compile(&p).is_ok(), "{:?}", compile(&p).err());
+        assert_eq!(p.params[0].name, "speed");
+        let isf = r#"/*{ "INPUTS": [ {"NAME": "fft", "TYPE": "audioFFT"}, {"NAME": "wave", "TYPE": "audio"} ] }*/
+void main() { gl_FragColor = vec4(IMG_NORM_PIXEL(fft, vec2(0.2, 0.5)).r + IMG_NORM_PIXEL(wave, vec2(0.2, 0.5)).r); }
+"#;
+        assert!(compile(&prepare(isf)).is_ok(), "{:?}", compile(&prepare(isf)).err());
     }
 }
 

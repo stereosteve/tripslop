@@ -1,0 +1,21 @@
+# Sound reactivity, deterministically: a WAV file drives automation and an audio-reactive shader.
+# Run from the repo root:  cargo run --release -- --script scripts/audio.tripslop
+
+audio samples/beat.wav                 # 120 BPM: a kick on every beat, hi-hats in between
+isf 1 1 Spectral Aurora                # audioLevel / Bass / Mid, audioBeat, sampleFFT, sampleWaveform
+automate 1/scale audio:kick 0.5        # the layer pumps on every kick
+launch-scene 1
+
+at 30 assert errors 1 1 == 0
+# Kicks land on the beats (every 0.5 s); the envelope decays between them.
+at 1.05s assert audio kick > 0.5
+at 1.05s assert audio bass > 0.5
+at 1.05s assert 1/scale > 2
+at 1.05s snapshot target/script-out/audio/kick.png
+at 1.35s assert audio kick < 0.3
+at 1.35s assert 1/scale < 1.5
+at 1.35s snapshot target/script-out/audio/between.png
+at 2s    audio off
+at 2.1s  assert audio level == 0
+at 2.1s  assert 1/scale ~= 1
+at 2.1s  quit

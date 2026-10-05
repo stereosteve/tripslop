@@ -1,5 +1,7 @@
-//! Per-parameter automation: a signal generator (or drawn envelope) that sweeps a slider
-//! around its hand-set value.
+//! Per-parameter automation: a signal generator (or drawn envelope, or the audio input) that
+//! sweeps a slider around its hand-set value.
+
+use crate::audio::{Band, Levels};
 
 /// Global clock the modulators run on.
 #[derive(Clone, Copy, Debug, Default)]
@@ -9,6 +11,14 @@ pub struct Clock {
     /// Seconds elapsed.
     pub time: f64,
     pub bpm: f32,
+    /// The audio input's analysis this tick (silence when there's none).
+    pub audio: Levels,
+}
+
+impl Clock {
+    pub fn new(beat: f64, time: f64, bpm: f32) -> Self {
+        Self { beat, time, bpm, audio: Levels::default() }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -21,10 +31,12 @@ pub enum Shape {
     SampleHold,
     SmoothRandom,
     Envelope,
+    /// Follows a band of the audio input instead of a cycle.
+    Audio,
 }
 
 impl Shape {
-    pub const ALL: [Shape; 8] = [
+    pub const ALL: [Shape; 9] = [
         Shape::Sine,
         Shape::Triangle,
         Shape::SawUp,
@@ -33,6 +45,7 @@ impl Shape {
         Shape::SampleHold,
         Shape::SmoothRandom,
         Shape::Envelope,
+        Shape::Audio,
     ];
     pub fn name(self) -> &'static str {
         match self {
@@ -44,6 +57,7 @@ impl Shape {
             Shape::SampleHold => "S&H",
             Shape::SmoothRandom => "Drift",
             Shape::Envelope => "Envelope",
+            Shape::Audio => "Audio",
         }
     }
     pub fn is_random(self) -> bool {
@@ -99,6 +113,8 @@ pub struct Modulator {
     pub points: Vec<[f32; 2]>,
     /// Makes random shapes differ between parameters.
     pub seed: u64,
+    /// What the Audio shape follows.
+    pub band: Band,
 }
 
 impl Modulator {
@@ -114,6 +130,7 @@ impl Modulator {
             // A "pluck": fast attack on the beat, then decay.
             points: vec![[0.0, 0.0], [0.08, 1.0], [0.6, 0.15]],
             seed,
+            band: Band::Bass,
         }
     }
 
@@ -157,11 +174,16 @@ impl Modulator {
                 self.hash(cycle) * (1.0 - t) + self.hash(cycle + 1) * t
             }
             Shape::Envelope => envelope(&self.points, x),
+            // Not periodic: see `signal`.
+            Shape::Audio => 0.0,
         }
     }
 
     pub fn signal(&self, clock: Clock) -> f32 {
-        self.signal_at(self.position(clock))
+        match self.shape {
+            Shape::Audio => clock.audio.get(self.band),
+            _ => self.signal_at(self.position(clock)),
+        }
     }
 
     /// Apply to a slider value with the given range; the result stays in range.

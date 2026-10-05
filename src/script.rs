@@ -85,6 +85,8 @@ pub enum Query {
     /// Program size.
     Width,
     Height,
+    /// The audio analysis: level, bass, mid, high or kick.
+    Audio(crate::audio::Band),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -99,6 +101,11 @@ pub enum Cmd {
     Camera(usize, usize, u32),
     /// A generator from the shader library, by name.
     Isf(usize, usize, String),
+    /// Attach automation to a parameter (`None`: remove it): shape, audio band (for the Audio
+    /// shape), depth, cycle length in beats.
+    Automate(String, Option<(crate::modulation::Shape, Option<crate::audio::Band>, f32, f32)>),
+    /// Analyse a WAV file in step with the clock (`None`: audio off).
+    Audio(Option<PathBuf>),
     /// Show the library browser on generators (false) or effects (true), optionally one category.
     Library(bool, Option<String>),
     /// `None` = master.
@@ -229,6 +236,11 @@ fn parse_query(w: &[String]) -> Result<Query, String> {
         "bpm" => Query::Bpm,
         "beat" => Query::Beat,
         "width" => Query::Width,
+        "audio" => {
+            let b = w.get(1).ok_or("audio needs level / bass / mid / high / kick")?;
+            let band = crate::audio::Band::ALL.into_iter().find(|x| x.name().eq_ignore_ascii_case(b)).ok_or_else(|| format!("no audio band {b:?}"))?;
+            Query::Audio(band)
+        }
         "height" => Query::Height,
         _ => Query::Param(w.join(" ")),
     })
@@ -251,6 +263,35 @@ fn parse_cmd(w: &[String]) -> Result<Vec<Cmd>, String> {
             }
             one(Cmd::Isf(idx(w.get(1), "layer")?, idx(w.get(2), "column")?, w[3..].join(" ")))
         }
+        // automate PATH SHAPE [DEPTH] [BEATS], where PATH may contain spaces and SHAPE is e.g.
+        // sine, square or audio:kick; or automate PATH off.
+        "automate" => {
+            let nums = w.iter().rev().take_while(|x| x.parse::<f32>().is_ok()).count();
+            let words = &w[1..w.len() - nums];
+            let (shape, path) = words.split_last().filter(|(_, p)| !p.is_empty()).ok_or("automate needs a parameter path and a shape (or off)")?;
+            let path = path.join(" ");
+            if shape == "off" {
+                return one(Cmd::Automate(path, None));
+            }
+            let (name, band) = match shape.split_once(':') {
+                Some((n, b)) => {
+                    let band = crate::audio::Band::ALL.into_iter().find(|x| x.name().eq_ignore_ascii_case(b)).ok_or_else(|| format!("no audio band {b:?}"))?;
+                    (n, Some(band))
+                }
+                None => (shape.as_str(), None),
+            };
+            let shape = crate::modulation::Shape::ALL
+                .into_iter()
+                .find(|s| s.name().eq_ignore_ascii_case(name) || format!("{s:?}").eq_ignore_ascii_case(name))
+                .ok_or_else(|| format!("no automation shape {name:?}"))?;
+            let num = |i: usize, default: f32| w[w.len() - nums..].get(i).and_then(|x| x.parse().ok()).unwrap_or(default);
+            one(Cmd::Automate(path, Some((shape, band, num(0, 0.25), num(1, 4.0)))))
+        }
+        "audio" => match w.get(1).map(String::as_str) {
+            Some("off") => one(Cmd::Audio(None)),
+            Some(_) => one(Cmd::Audio(Some(PathBuf::from(rest())))),
+            None => Err("audio needs a WAV file or off".into()),
+        },
         "library" => {
             let effects = match w.get(1).map(String::as_str) {
                 Some("generators") => false,
@@ -445,6 +486,19 @@ mod tests {
         assert_eq!(ev[3].cmd, Cmd::Side(0, Side::Both));
         assert!(parse("crossfade bank wobbly\n").unwrap_err().contains("curve"));
         assert!(parse("side 1 c\n").is_err());
+    }
+
+    #[test]
+    fn automate_and_audio() {
+        use crate::audio::Band;
+        use crate::modulation::Shape;
+        let ev = parse("automate 1/scale audio:kick 0.5\nautomate Fractal/feedback/rotate ° sine 0.2 8\nautomate 1/scale off\naudio samples/beat.wav\nassert audio kick > 0.5\n").unwrap();
+        assert_eq!(ev[0].cmd, Cmd::Automate("1/scale".into(), Some((Shape::Audio, Some(Band::Kick), 0.5, 4.0))));
+        assert_eq!(ev[1].cmd, Cmd::Automate("Fractal/feedback/rotate °".into(), Some((Shape::Sine, None, 0.2, 8.0))));
+        assert_eq!(ev[2].cmd, Cmd::Automate("1/scale".into(), None));
+        assert_eq!(ev[3].cmd, Cmd::Audio(Some("samples/beat.wav".into())));
+        assert_eq!(ev[4].cmd, Cmd::Assert(Query::Audio(Band::Kick), Op::Gt, 0.5));
+        assert!(parse("automate 1/scale wobble\n").is_err());
     }
 
     #[test]

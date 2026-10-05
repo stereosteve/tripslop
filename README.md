@@ -37,6 +37,7 @@ rough GPU memory estimate.
 Sample credits: *Jellyfish* test clip via test-videos.co.uk (footage from jell.yfish.us);
 *Big Buck Bunny* © Blender Foundation, CC BY 3.0; *Pillars of Creation* (2014) and *Crab Nebula*
 from NASA/ESA Hubble via Wikimedia Commons. See the source pages for the exact terms.
+`beat.wav` (a 120 BPM drum loop for the audio test) is generated, not recorded.
 
 ## Concepts
 
@@ -122,12 +123,17 @@ compiles as you type, like KodeLife. Add one from a grid cell's right-click menu
     that move vertices (`gl_Position`) don't work.
   * Code written for other hosts mostly works as is: re-declared built-ins (`uniform float
     TIME;`) are ignored, and `centroid` / `patch` / `sample` are fine as names. The audio names
-    some hosts add (`audioBass`, `audioLevel`, `sampleFFT`, …) read as silence, except
-    `audioBeat`, `audioBeatPhase` and `audioBPM`, which follow the tempo clock.
+    some hosts add are fed from the audio input: `audioLevel`, `audioBass`, `audioMid`,
+    `audioHigh`, `audioSpectralCentroid`, `audioBeat` (the kick envelope, or a pulse on every
+    beat of the tempo clock when there's no input), `audioBeatPhase`, `audioBPM`,
+    `sampleFFT(u)` and `sampleWaveform(u)`. `audio` / `audioFFT` image inputs get the
+    waveform / spectrum.
 * **WGSL** also works. It's detected by `@fragment`, and your own entry point is used. It runs
   in screen space (y down). It can use:
   * `inputs.size` (`vec3f`), `inputs.time`, `inputs.mouse`, `inputs.date`, `inputs.frame`,
     `inputs.time_delta`, `inputs.beat`, `inputs.bpm`
+  * `inputs.audio` (`vec4f`: level, bass, mid, high), `inputs.kick`, `inputs.audio_on`,
+    `inputs.centroid`, and the `audio_fft` / `audio_wave` textures (see **Sound**)
   * `iChannel0`–`3` with the sampler `samp`
   * sliders declared as `// @param speed 0 4 1` and read as `inputs.speed`
 
@@ -140,6 +146,8 @@ compiles as you type, like KodeLife. Add one from a grid cell's right-click menu
 * **Sliders from code**: `uniform float amount; // min max default` (or `int`) becomes a
   slider with the usual `~` automation.
 * **Tempo**: `iBeat` and `iBpm` expose the tempo clock.
+* **Sound**: `iAudio` (`vec4`: level, bass, mid, high, each 0..1) and `iKick` (0..1) follow
+  the audio input (see **Sound** below).
 * **Errors** appear with their line numbers (marked red in the gutter), and the last working
   version keeps running until you fix them. A bad shader can't crash the app, because the
   code is compiled and validated by naga before it reaches the GPU.
@@ -177,12 +185,29 @@ tags.
   the bundle (plus a folder in `TRIPSLOP_ISF`, if set).
 
 **Automation.** Every parameter has a `~` button that attaches a signal generator:
-* Shapes: sine, triangle, saw up/down, square, sample & hold, smooth random drift, or a
-  hand-drawn envelope.
+* Shapes: sine, triangle, saw up/down, square, sample & hold, smooth random drift, a
+  hand-drawn envelope, or **Audio**, which follows a band of the audio input (level, bass,
+  mid, high or kick) instead of a cycle.
 * Rate: synced to the BPM or free-running in Hz.
 * Depth, polarity and phase.
 
 The **Composition** tab lists everything that's automated.
+
+**Sound.** Pick an input in the top bar's audio menu: the default input, a specific device,
+or a WAV file. To react to what the computer itself is playing, use a loopback device such as
+BlackHole. Each tick, tripslop analyses the latest ~40 ms into:
+* `level`: overall loudness
+* `bass` (20–150 Hz), `mid` (150 Hz–2 kHz) and `high` (2–12 kHz)
+* `kick`: jumps to 1 on a bass hit and fades over ~150 ms
+* the spectral centroid (brightness), a 512-band spectrum (log frequency, 30 Hz → 16 kHz) and
+  the latest 512 samples, for shaders
+
+Every value has auto-gain, so it uses the whole 0..1 range at any input volume, and fast
+attack / slower release smoothing. Silence reads as 0. The meter next to the menu shows level,
+bass, mid and high, with a light for the kick. Use them with the **Audio** automation shape,
+in your own shaders (`iAudio`, `iKick`), and in the library's **Audio Reactive** shaders.
+A WAV file is read in step with tripslop's clock rather than played out loud, which keeps
+scripts deterministic.
 
 ## Recording
 
@@ -294,11 +319,13 @@ Layers and columns are **1-based**, like the UI.
 | `pad KEY down/up/latch/unlatch` · `hold KEY DURATION` | punch-in pads, by key, name or number |
 | `select L C` · `tab layer/composition` · `open-editor L C` | UI state, for screenshots |
 | `snapshot PATH` · `screenshot PATH` · `record start/stop` | output frame, full window, video |
+| `audio FILE.wav` · `audio off` | analyse a WAV file in step with the clock (deterministic) |
+| `automate PATH SHAPE [DEPTH] [BEATS]` · `automate PATH off` | attach automation: `sine`, `square`, `drift`, … or `audio:BAND` (e.g. `audio:kick`) |
 | `print WHAT` · `assert WHAT OP VALUE` · `quit` | checks; `OP` is one of `== != < <= > >= ~=` |
 
 **`WHAT`** is either a parameter path or one of: `playhead L`, `active L` (1-based column, 0
 for none), `pad KEY` (envelope 0..1), `errors L C` (shader compile errors), `layers`, `bpm`,
-`beat`, `width` or `height`.
+`beat`, `width`, `height` or `audio BAND` (`level`, `bass`, `mid`, `high` or `kick`).
 
 **Parameter paths** have one of these forms:
 * `LAYER/PARAM`, `LAYER/EFFECT/PARAM`, `LAYER/clip/PARAM` (the playing clip) or
@@ -311,7 +338,7 @@ case-insensitively by prefix, so `2/feedback/rot` works. Paths can contain space
 **Tests:**
 * `cargo test` runs the unit tests (no window).
 * `cargo test --release -- --ignored` also runs the scripts in `scripts/` (smoke, shaders,
-  punch tour, shape, projection, crossfade, resolution, library) as end-to-end tests. These need a GPU and a window session. Captures go to
+  punch tour, shape, projection, crossfade, resolution, library, audio) as end-to-end tests. These need a GPU and a window session. Captures go to
   `target/script-out/`.
 
 For a quick single still, use `TRIPSLOP_SNAPSHOT=<frames>:<out.png>`. It saves the output after
