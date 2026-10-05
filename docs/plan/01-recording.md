@@ -1,5 +1,10 @@
 # 1. Recording that never stalls
 
+**Status: done.** `recorder::Mode::{Live, Exact}`. Cmd+R and `--record` use `Live`;
+fixed-step runs (scripts) use `Exact`. The overload logic lives in `FrameSink` and
+`write_frames` and is unit-tested without a GPU. Checked by hand: with the writer slowed to
+~25 fps, a 3 s realtime recording still ran in real time and came out as 180 frames / 3.000 s.
+
 ## Problem
 
 `Recorder::capture` (`src/recorder.rs`) chooses "never drop a frame" over "never hitch":

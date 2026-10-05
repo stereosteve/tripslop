@@ -542,7 +542,9 @@ impl App {
         }
         let path = std::env::current_dir().unwrap_or_default().join(format!("tripslop-{}.mp4", unix_time()));
         let (device, _, _) = self.renderer.output();
-        match Recorder::start(device, path) {
+        // Fixed-step runs (scripts) want every tick in the file; live sets must never stall.
+        let mode = if self.fixed_step { recorder::Mode::Exact } else { recorder::Mode::Live };
+        match Recorder::start(device, path, mode) {
             Ok(rec) => {
                 self.status = format!("Recording to {} ({})", rec.path.display(), rec.encoder);
                 self.recorder = Some(rec);
@@ -566,8 +568,15 @@ impl App {
         let (done, pending): (Vec<_>, Vec<_>) = self.finishing.drain(..).partition(|f| f.is_done());
         self.finishing = pending;
         for f in done {
+            let dropped = f.dropped;
             self.status = match f.join() {
-                Ok((path, frames)) => format!("Saved {} ({:.1}s)", path.display(), frames as f64 / recorder::FPS as f64),
+                Ok((path, frames)) => {
+                    let mut msg = format!("Saved {} ({:.1}s)", path.display(), frames as f64 / recorder::FPS as f64);
+                    if dropped > 0 {
+                        msg += &format!(", {dropped} dropped frames repeated");
+                    }
+                    msg
+                }
                 Err(e) => format!("Recording failed: {e}"),
             };
         }
@@ -693,8 +702,12 @@ impl App {
             ui.separator();
             let rec_label = match &self.recorder {
                 Some(r) => {
-                    let secs = r.frames / recorder::FPS as u64;
-                    RichText::new(format!("⏺ {}:{:02}  Stop (Cmd R)", secs / 60, secs % 60)).color(Color32::WHITE)
+                    let secs = r.frames() / recorder::FPS as u64;
+                    let dropped = match r.dropped() {
+                        0 => String::new(),
+                        n => format!("  dropped {n}"),
+                    };
+                    RichText::new(format!("⏺ {}:{:02}{dropped}  Stop (Cmd R)", secs / 60, secs % 60)).color(Color32::WHITE)
                 }
                 None => RichText::new("⏺ Record (Cmd R)"),
             };

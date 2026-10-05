@@ -152,10 +152,15 @@ The **Composition** tab lists everything that's automated.
 ## Recording
 
 Press `Cmd/Ctrl+R` (or **⏺ Record**) to start and stop. Frames are captured straight from the
-renderer, so the file has no UI and doesn't drop frames. It's saved as
-`tripslop-<timestamp>.mp4` (H.264, 1280×720, 60 fps) in the directory you launched from, using
-the hardware encoder on macOS and x264 elsewhere. The file is finalized even if you quit
-mid-recording. `--record` starts recording at launch. There's no audio.
+renderer, so the file has no UI in it. It's saved as `tripslop-<timestamp>.mp4` (H.264,
+1280×720, 60 fps) in the directory you launched from, using the hardware encoder on macOS and
+x264 elsewhere. The file is finalized even if you quit mid-recording. `--record` starts
+recording at launch. There's no audio.
+
+Recording never slows down the live output. If the GPU readback or the encoder falls behind,
+the frame is dropped and the previous one is repeated in its place, so the file keeps its
+real-time length. The record button shows how many frames were dropped. Scripts (fixed-step
+mode) record every tick instead, waiting for the encoder if they have to.
 
 ## Punch-in FX
 
