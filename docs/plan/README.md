@@ -15,6 +15,28 @@ blocking.
 | 7 | [Frame-time overlay](07-perf-overlay.md) | small | Know when you're dropping frames |
 | 8 | ✅ [UI redesign](08-ui-redesign.md) | large | It looks like a debug panel; hard to see what's live |
 
+### Ideas from Arkestra
+
+[Arkestra](https://www.arkestra.app/) is the closest app to tripslop. [arkestra.md](arkestra.md)
+covers what it has, what we already have, and what we're leaving out.
+
+| # | What | Size | Why |
+| --- | --- | --- | --- |
+| 9 | [Dry/wet on every effect](09-dry-wet.md) | small | Effects are all or nothing |
+| 10 | [Step sequencer and response shaping](10-sequencer.md) | small–medium | No rhythmic patterns of your own; audio mappings jitter |
+| 11 | [Macros and shared modulators](11-macros.md) | medium | One knob can't drive a whole look; LFOs can't be shared |
+| 12 | [Snapshots that morph](12-snapshots.md) | medium | A good look is lost as soon as you touch a knob |
+| 13 | [Time and glitch effects](13-time-fx.md) | medium | Stutter, buffer loop, slit scan, datamosh, pixel sort |
+| 14 | [LUTs](14-lut.md) | small | No colour grades |
+| 15 | [Cue](15-cue.md) | small–medium | New looks get built in front of the audience |
+| 16 | [Effect-bus layers and masks](16-bus-masks.md) | medium | Effects are per layer or master, nothing between |
+| 17 | [OSC and Ableton Link](17-osc-link.md) | medium | Phones (TDLiDAR), TouchOSC, and band sync |
+| 18 | [Point clouds](18-point-clouds.md) | large | Pictures lifted into 3D and blown apart on the kick |
+| 19 | [Saving sets](19-sets.md) | medium–large | Nothing survives a restart; 12 makes that hurt |
+| 20 | [Claude in the Code tab](20-claude-code-tab.md) | medium | Describe a shader, get one that compiles |
+
+9 to 12 are what changes how it plays; do those first. 19 is needed once 12 lands.
+
 The order is a suggestion. 4 and 5 are the fun ones, and nothing stops you doing them first.
 
 ## Ground rules
