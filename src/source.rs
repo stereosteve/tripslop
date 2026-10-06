@@ -43,6 +43,24 @@ pub fn load_image(path: &Path) -> Result<Frame, String> {
     decode_image(&bytes).map_err(|e| format!("{}: {e}", path.display()))
 }
 
+/// Rasterize an SVG centered on a transparent `width`×`height` canvas, scaled to fill `fill`
+/// of it (0..1) in whichever direction is tighter.
+pub fn render_svg(svg: &[u8], width: u32, height: u32, fill: f32) -> Result<Frame, String> {
+    let tree = resvg::usvg::Tree::from_data(svg, &resvg::usvg::Options::default()).map_err(|e| e.to_string())?;
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height).ok_or("empty canvas")?;
+    let (w, h) = (tree.size().width(), tree.size().height());
+    let scale = (width as f32 * fill / w).min(height as f32 * fill / h);
+    let (dx, dy) = ((width as f32 - w * scale) / 2.0, (height as f32 - h * scale) / 2.0);
+    let xf = resvg::tiny_skia::Transform::from_scale(scale, scale).post_translate(dx, dy);
+    resvg::render(&tree, xf, &mut pixmap.as_mut());
+    // tiny-skia is premultiplied; frames are straight alpha.
+    let rgba = pixmap.pixels().iter().flat_map(|p| {
+        let c = p.demultiply();
+        [c.red(), c.green(), c.blue(), c.alpha()]
+    });
+    Ok(Frame { width, height, rgba: rgba.collect() })
+}
+
 /// Decode a still image from memory (also what files dropped into the browser build use).
 pub fn decode_image(bytes: &[u8]) -> Result<Frame, String> {
     let img = image::load_from_memory(bytes).map_err(|e| e.to_string())?;

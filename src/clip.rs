@@ -269,6 +269,11 @@ impl Clip {
         Ok(Self::new(stem, media))
     }
 
+    /// A still made in code (the demo's logos).
+    pub fn image(name: &str, frame: Frame) -> Self {
+        Self::new(name.to_string(), Media::Image { frame, uploaded: false })
+    }
+
     pub fn camera(index: u32, width: u32, height: u32) -> Result<Self, String> {
         let stream = Stream::camera(index, width, height)?;
         Ok(Self::new(format!("Camera {index}"), Media::Camera { index, stream }))

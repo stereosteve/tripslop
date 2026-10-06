@@ -55,19 +55,8 @@ const USAGE: &str =
 fn app_icon() -> egui::IconData {
     const SIZE: u32 = 512;
     let svg = include_bytes!("../logos/tripslop-flower-color.svg");
-    let tree = resvg::usvg::Tree::from_data(svg, &resvg::usvg::Options::default()).expect("flower logo svg");
-    let mut pixmap = resvg::tiny_skia::Pixmap::new(SIZE, SIZE).unwrap();
-    let (w, h) = (tree.size().width(), tree.size().height());
-    let scale = SIZE as f32 * 0.9 / w.max(h);
-    let (dx, dy) = ((SIZE as f32 - w * scale) / 2.0, (SIZE as f32 - h * scale) / 2.0);
-    let xf = resvg::tiny_skia::Transform::from_scale(scale, scale).post_translate(dx, dy);
-    resvg::render(&tree, xf, &mut pixmap.as_mut());
-    // tiny-skia is premultiplied; IconData wants straight alpha.
-    let rgba = pixmap.pixels().iter().flat_map(|p| {
-        let c = p.demultiply();
-        [c.red(), c.green(), c.blue(), c.alpha()]
-    });
-    egui::IconData { rgba: rgba.collect(), width: SIZE, height: SIZE }
+    let f = source::render_svg(svg, SIZE, SIZE, 0.9).expect("flower logo svg");
+    egui::IconData { rgba: f.rgba, width: SIZE, height: SIZE }
 }
 
 /// The browser build: runs on the page's `<canvas id="tripslop">` (see `web/index.html`),
@@ -449,6 +438,100 @@ impl App {
         let mut k = Effect::new(EffectKind::Kaleidoscope);
         k.params[1] = k.params[1].clone().lfo(Shape::Triangle, 32.0, 0.25);
         l3.effects.push(k);
+        // Layers 4–7: the logo, with a VHS / public-access treatment per scene. Each layer has
+        // a clip only in its own scene, so launching a scene swaps the treatment.
+        const WORDMARK: &[u8] = include_bytes!("../logos/tripslop-wordmark-color.svg");
+        const FLOWER: &[u8] = include_bytes!("../logos/tripslop-flower-color.svg");
+        let logo = |name: &str, svg: &[u8], fill: f32| {
+            Clip::image(name, source::render_svg(svg, MEDIA_WIDTH, MEDIA_HEIGHT, fill).expect("logo svg"))
+        };
+        fn logo_layer<'a>(comp: &'a mut Composition, name: &str, col: usize, clip: Clip) -> &'a mut composition::Layer {
+            comp.add_layer();
+            let i = comp.layers.len() - 1;
+            comp.set_clip(i, col, clip);
+            let l = &mut comp.layers[i];
+            l.name = name.into();
+            l
+        }
+        // Scene 1, "Tracking": the wordmark smearing through tape-delay trails, with the
+        // channels slipping apart and the lines jumping like a worn tape.
+        let l = logo_layer(&mut self.comp, "Tracking", 0, logo("wordmark", WORDMARK, 0.72));
+        l.pos_y = l.pos_y.clone().lfo(Shape::Sine, 8.0, 0.06);
+        let mut e = Effect::new(EffectKind::Echo);
+        e.set("amount", 0.85);
+        e.set("spacing (frames)", 3.0);
+        e.set("decay", 0.75);
+        l.effects.push(e);
+        let mut e = Effect::new(EffectKind::RgbSplit);
+        e.set("delay (frames)", 2.0);
+        l.effects.push(e);
+        let mut e = Effect::new(EffectKind::Wave);
+        let p = e.set("amplitude", 0.004);
+        *p = p.clone().lfo(Shape::SampleHold, 1.0, 0.06);
+        e.set("frequency", 30.0);
+        e.set("speed", 6.0);
+        l.effects.push(e);
+        // Scene 2, "Dub": the flower in a camera-at-the-monitor feedback tunnel, zooming out
+        // and drifting through the hues, posterized like a cheap time-base corrector.
+        let l = logo_layer(&mut self.comp, "Dub", 1, logo("flower", FLOWER, 0.5));
+        let mut e = Effect::new(EffectKind::Feedback);
+        e.set("feedback", 0.94);
+        e.set("copy scale", 1.05);
+        let p = e.set("rotate °", 2.0);
+        *p = p.clone().lfo(Shape::Sine, 16.0, 0.05);
+        e.set("hue / pass", 0.025);
+        e.set("saturation", 1.1);
+        l.effects.push(e);
+        let mut e = Effect::new(EffectKind::Pixelate);
+        e.set("pixel size", 2.0);
+        e.set("posterize levels", 6.0);
+        l.effects.push(e);
+        // Scene 3, "Wallpaper": a scrolling, hue-cycling wall of wordmarks over the footage,
+        // stuttering through a long echo. Late-night community bulletin board.
+        let l = logo_layer(&mut self.comp, "Wallpaper", 2, logo("wordmark", WORDMARK, 0.9));
+        l.opacity.set(0.85);
+        let mut e = Effect::new(EffectKind::Transform);
+        e.set("zoom", 0.33);
+        e.set("tile", 1.0);
+        // One cycle moves it a whole width: three tiles, so the loop is seamless.
+        let p = e.set("x", 0.0);
+        *p = p.clone().lfo(Shape::SawUp, 16.0, 0.5);
+        l.effects.push(e);
+        let mut e = Effect::new(EffectKind::Color);
+        let p = e.set("hue", 0.5);
+        *p = p.clone().lfo(Shape::SawUp, 8.0, 1.0);
+        e.set("saturation", 1.6);
+        l.effects.push(e);
+        let mut e = Effect::new(EffectKind::Echo);
+        e.set("spacing (frames)", 8.0);
+        e.set("decay", 0.6);
+        l.effects.push(e);
+        // Scene 4, "Station bug": a small, breathing channel bug in the corner of the
+        // half-speed jellyfish, ghosting behind itself.
+        let l = logo_layer(&mut self.comp, "Station bug", 3, logo("flower", FLOWER, 0.9));
+        l.scale.set(0.22);
+        l.pos_x.set(0.39);
+        l.pos_y.set(0.33);
+        l.opacity = l.opacity.clone().lfo(Shape::Sine, 8.0, 0.3);
+        l.opacity.set(0.8);
+        let mut e = Effect::new(EffectKind::Echo);
+        e.set("amount", 0.5);
+        e.set("spacing (frames)", 2.0);
+        e.set("mode", 1.0);
+        l.effects.push(e);
+        // Master: the whole set played back off a tape on an old TV.
+        let mut e = Effect::new(EffectKind::Wave);
+        e.set("amplitude", 0.0015);
+        e.set("frequency", 40.0);
+        e.set("speed", 12.0);
+        self.comp.effects.push(e);
+        let mut e = Effect::new(EffectKind::Crt);
+        e.set("scanlines", 0.45);
+        e.set("vignette", 0.35);
+        e.set("noise", 0.15);
+        e.set("RGB shift (px)", 2.0);
+        e.set("curvature", 0.04);
+        self.comp.effects.push(e);
         self.comp.layers[0].name = "Footage".into();
         for l in &mut self.comp.layers {
             l.launch(0);

@@ -2,7 +2,7 @@
 # Run from the repo root:  cargo run --release -- --script scripts/smoke.tripslop
 
 demo
-assert layers == 3
+assert layers == 7                      # footage, fractal, overlay + a logo layer per scene
 assert active 1 == 1
 assert Fractal/feedback/copies == 3     # the Sierpinski preset on layer 2
 assert bpm == 120
@@ -12,6 +12,8 @@ at 1.25b launch-scene 2
 at 1.5b  assert active 1 == 1
 at 2.5b  assert active 1 == 2
 at 2.5b  assert active 3 == 0           # the Overlay layer's cell in scene 2 is empty
+at 2.5b  assert active 5 == 2           # Dub: scene 2's logo treatment
+at 2.5b  assert active 4 == 0           # Tracking (scene 1 only)
 
 # Parameters by path: layer number or name, effect / clip, parameter (case-insensitive prefix).
 set 1/opacity 0.5

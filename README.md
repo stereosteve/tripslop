@@ -19,7 +19,7 @@ generators work without them.
 
 ## Demo
 
-`--demo` builds a three-layer set from the media in `samples/` (run `samples/fetch.sh` to
+`--demo` builds a seven-layer set from the media in `samples/` (run `samples/fetch.sh` to
 re-download it). **Run it from the repo root**, since the sample paths are relative.
 
 * **Footage** (bottom): jellyfish, Big Buck Bunny, a plasma generator, and a half-speed
@@ -27,6 +27,14 @@ re-download it). **Run it from the repo root**, since the sample paths are relat
 * **Fractal**: small images and a dot generator (the layer is scaled to 42%) going through the
   Feedback effect's *Sierpinski* preset, Screen-blended
 * **Overlay**: generators through a kaleidoscope, Add-blended at 35%
+* **Logo layers**, one per scene, each with its own VHS / public-access treatment (the logos
+  are rasterized from `logos/` at load time):
+  1. **Tracking**: the wordmark through echo trails, RGB time split and a jumpy wave warp
+  2. **Dub**: the flower in a zooming, hue-drifting feedback tunnel, posterized
+  3. **Wallpaper**: a scrolling, hue-cycling tile of wordmarks with a stuttering echo
+  4. **Station bug**: a small breathing flower in the corner, like a channel watermark
+
+The master chain adds a little line jitter (Wave warp) and a CRT for the tape-on-a-TV look.
 
 Press `1`–`4` to launch scenes. Launches are quantized to the next beat.
 
