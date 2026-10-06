@@ -326,6 +326,8 @@ pub struct Composition {
     /// Bottom layer first (drawn first).
     pub layers: Vec<Layer>,
     pub columns: usize,
+    /// Scene (column) names; missing or empty ones are just numbered.
+    pub scenes: Vec<String>,
     pub master: Param,
     pub crossfader: Param,
     pub crossfade: Crossfade,
@@ -352,6 +354,7 @@ impl Composition {
                 })
                 .collect(),
             columns,
+            scenes: Vec::new(),
             master: Param::new(Spec::new("master", 0.0, 1.0, 1.0)),
             crossfader: Param::new(Spec::new("crossfader", 0.0, 1.0, 0.5)),
             crossfade: Crossfade::Bank,
@@ -387,6 +390,11 @@ impl Composition {
         while self.columns < n {
             self.add_column();
         }
+    }
+
+    /// The scene's name, if it has one.
+    pub fn scene_name(&self, col: usize) -> Option<&str> {
+        self.scenes.get(col).map(|s| s.trim()).filter(|s| !s.is_empty())
     }
 
     pub fn clip_mut(&mut self, layer: usize, col: usize) -> Option<&mut Clip> {

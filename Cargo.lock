@@ -3787,6 +3787,7 @@ dependencies = [
  "realfft",
  "resvg",
  "rfd",
+ "serde",
  "serde_json",
  "tobj",
  "wasm-bindgen",

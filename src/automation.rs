@@ -117,6 +117,23 @@ impl App {
     fn exec(&mut self, cmd: &Cmd) -> Result<(), String> {
         match cmd {
             Cmd::Demo => self.load_demo(),
+            Cmd::Open(name) => {
+                let path = Path::new(name);
+                if path.extension().is_some_and(|e| e == crate::set::EXTENSION) {
+                    self.open_set_file(path)?;
+                } else if !self.open_builtin(name) {
+                    let names: Vec<&str> = crate::set::builtins().iter().map(|b| b.id).collect();
+                    return Err(format!("no bundled set {name:?} (have: {})", names.join(", ")));
+                }
+                println!("{} {}", self.stamp(), self.status);
+            }
+            Cmd::Save(p) => {
+                make_parent(p)?;
+                self.save_set(Some(p.clone()));
+                if !self.status.starts_with("Saved") {
+                    return Err(self.status.clone());
+                }
+            }
             Cmd::LaunchScene(c) => {
                 if *c >= self.comp.columns {
                     return Err(format!("no scene {}", c + 1));
@@ -288,12 +305,13 @@ impl App {
                     "code" => self.device_tab = DeviceTab::Code,
                     "session" => self.view = View::Session,
                     "perform" => self.view = View::Perform,
-                    _ => return Err(format!("tab {t:?}: use layer / master / devices / modulators / code / session / perform")),
+                    "welcome" => self.welcome = true,
+                    _ => return Err(format!("tab {t:?}: use layer / master / devices / modulators / code / session / perform / welcome")),
                 }
             }
-            Cmd::Snapshot(p) => {
+            Cmd::Snapshot(p, width) => {
                 make_parent(p)?;
-                self.pending_snapshot = Some(p.clone());
+                self.pending_snapshot = Some((p.clone(), *width));
             }
             Cmd::Screenshot(p) => {
                 make_parent(p)?;

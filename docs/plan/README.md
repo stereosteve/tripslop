@@ -34,7 +34,7 @@ covers what it has, what we already have, and what we're leaving out.
 | 16 | [Effect-bus layers and masks](16-bus-masks.md) | medium | Effects are per layer or master, nothing between |
 | 17 | [OSC and Ableton Link](17-osc-link.md) | medium | Phones (TDLiDAR), TouchOSC, and band sync |
 | 18 | [Point clouds](18-point-clouds.md) | large | Pictures lifted into 3D and blown apart on the kick |
-| 19 | [Saving sets](19-sets.md) | medium–large | Nothing survives a restart; 12 makes that hurt |
+| 19 | ✅ [Saving sets](19-sets.md) | medium–large | Nothing survives a restart; 12 makes that hurt |
 | 20 | [Claude in the Code tab](20-claude-code-tab.md) | medium | Describe a shader, get one that compiles |
 
 9 to 12 are what changes how it plays; do those first. 19 is needed once 12 lands.

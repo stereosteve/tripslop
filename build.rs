@@ -47,6 +47,32 @@ fn main() {
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     std::fs::write(out.join("isf_bundle.rs"), src).unwrap();
     models(&out);
+    sets(&out);
+}
+
+/// `set_bundle.rs`: the demo sets in `sets/` (`NN-name.tripset`, listed in file name order) and
+/// their welcome-screen pictures (`sets/thumbs/NN-name.jpg`, made by `scripts/bake-sets.sh`).
+fn sets(out: &Path) {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("sets");
+    println!("cargo:rerun-if-changed={}", root.display());
+    println!("cargo:rerun-if-changed={}", root.join("thumbs").display());
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&root).expect("sets/ is readable").flatten().map(|e| e.path()).collect();
+    files.retain(|f| f.extension().is_some_and(|x| x == "tripset"));
+    files.sort();
+    let mut src = String::from("/// (file stem, contents, welcome picture) of every bundled set.\npub static SETS: &[(&str, &str, Option<&[u8]>)] = &[\n");
+    for f in files {
+        println!("cargo:rerun-if-changed={}", f.display());
+        let stem = f.file_stem().unwrap().to_string_lossy().into_owned();
+        let thumb = root.join("thumbs").join(format!("{stem}.jpg"));
+        println!("cargo:rerun-if-changed={}", thumb.display());
+        let thumb = match thumb.exists() {
+            true => format!("Some(include_bytes!({:?}))", thumb.display().to_string()),
+            false => "None".into(),
+        };
+        src += &format!("    ({stem:?}, include_str!({:?}), {thumb}),\n", f.display().to_string());
+    }
+    src += "];\n";
+    std::fs::write(out.join("set_bundle.rs"), src).unwrap();
 }
 
 /// `model_bundle.rs`: every file in `assets/models` (models, their materials and textures) but

@@ -1,0 +1,79 @@
+{
+  "tripslop": 1,
+  "name": "Public Access",
+  "description": "Late-night cable access: the tripslop logo through tape echo, a camera-at-the-monitor feedback tunnel and a scrolling bulletin board, over footage and a fractal rig, on an old TV.",
+  "bpm": 120,
+  "quantize": "beat",
+  "scenes": ["Tracking", "Dub", "Wallpaper", "Station bug"],
+  "columns": 8,
+  "effects": [
+    { "kind": "wave", "params": { "amplitude": 0.0015, "frequency": 40, "speed": 12 } },
+    { "kind": "crt", "params": { "scanlines": 0.45, "vignette": 0.35, "noise": 0.15, "RGB shift (px)": 2, "curvature": 0.04 } }
+  ],
+  "layers": [
+    {
+      "name": "Footage",
+      "clips": [
+        { "file": "../samples/jellyfish.mp4", "fallback": { "file": "../samples/pillars-of-creation.jpg" } },
+        { "file": "../samples/big-buck-bunny.mp4", "fallback": { "file": "../samples/crab-nebula.jpg" } },
+        { "generator": "plasma" },
+        { "file": "../samples/jellyfish.mp4", "loop": "bounce", "params": { "speed": 0.5 }, "fallback": { "generator": "noise" } }
+      ]
+    },
+    {
+      "name": "Fractal",
+      "blend": "screen",
+      "params": { "scale": 0.42 },
+      "effects": [ { "kind": "feedback", "preset": "Sierpinski" } ],
+      "clips": [
+        { "file": "../samples/crab-nebula.jpg", "fit": "contain" },
+        { "generator": "dot" },
+        { "file": "../samples/pillars-of-creation.jpg", "fit": "contain" },
+        { "file": "../samples/crab-nebula.jpg", "fit": "contain" }
+      ]
+    },
+    {
+      "name": "Overlay",
+      "blend": "add",
+      "params": { "opacity": 0.35 },
+      "effects": [
+        { "kind": "kaleidoscope", "params": { "rotation": { "mod": { "shape": "triangle", "beats": 32, "depth": 0.25 } } } }
+      ],
+      "clips": [ { "generator": "rings" }, null, { "generator": "bars" }, { "generator": "noise" } ]
+    },
+    {
+      "name": "Tracking",
+      "params": { "position y": { "mod": { "shape": "sine", "beats": 8, "depth": 0.06 } } },
+      "effects": [
+        { "kind": "echo", "params": { "amount": 0.85, "spacing": 3, "decay": 0.75 } },
+        { "kind": "rgb_split", "params": { "delay": 2 } },
+        { "kind": "wave", "params": { "amplitude": { "value": 0.004, "mod": { "shape": "sample_hold", "beats": 1, "depth": 0.06 } }, "frequency": 30, "speed": 6 } }
+      ],
+      "clips": [ { "name": "wordmark", "file": "../logos/tripslop-wordmark-color.svg", "fill": 0.72 } ]
+    },
+    {
+      "name": "Dub",
+      "effects": [
+        { "kind": "feedback", "params": { "feedback": 0.94, "copy scale": 1.05, "rotate": { "value": 2, "mod": { "shape": "sine", "beats": 16, "depth": 0.05 } }, "hue / pass": 0.025, "saturation": 1.1 } },
+        { "kind": "pixelate", "params": { "pixel size": 2, "posterize levels": 6 } }
+      ],
+      "clips": [ null, { "name": "flower", "file": "../logos/tripslop-flower-color.svg", "fill": 0.5 } ]
+    },
+    {
+      "name": "Wallpaper",
+      "params": { "opacity": 0.85 },
+      "effects": [
+        { "kind": "transform", "params": { "zoom": 0.33, "tile": "Repeat", "x": { "mod": { "shape": "saw_up", "beats": 16, "depth": 0.5 } } } },
+        { "kind": "color", "params": { "hue": { "value": 0.5, "mod": { "shape": "saw_up", "beats": 8, "depth": 1 } }, "saturation": 1.6 } },
+        { "kind": "echo", "params": { "spacing": 8, "decay": 0.6 } }
+      ],
+      "clips": [ null, null, { "name": "wordmark", "file": "../logos/tripslop-wordmark-color.svg" } ]
+    },
+    {
+      "name": "Station bug",
+      "params": { "scale": 0.22, "position x": 0.39, "position y": 0.33, "opacity": { "value": 0.8, "mod": { "shape": "sine", "beats": 8, "depth": 0.3 } } },
+      "effects": [ { "kind": "echo", "params": { "amount": 0.5, "spacing": 2, "mode": "Add" } } ],
+      "clips": [ null, null, null, { "name": "flower", "file": "../logos/tripslop-flower-color.svg" } ]
+    }
+  ]
+}

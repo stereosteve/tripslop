@@ -97,6 +97,9 @@ pub enum Query {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Cmd {
     Demo,
+    /// A bundled set by name, or a `.tripset` file.
+    Open(String),
+    Save(PathBuf),
     LaunchScene(usize),
     Launch(usize, usize),
     Stop(usize),
@@ -137,7 +140,8 @@ pub enum Cmd {
     Select(usize, usize),
     OpenEditor(usize, usize),
     Tab(String),
-    Snapshot(PathBuf),
+    /// The output frame, scaled down to a width if given (a `.jpg` path saves a JPEG).
+    Snapshot(PathBuf, Option<u32>),
     Screenshot(PathBuf),
     Record(bool),
     Print(Query),
@@ -453,7 +457,15 @@ fn parse_cmd(w: &[String]) -> Result<Vec<Cmd>, String> {
         "select" => one(Cmd::Select(idx(w.get(1), "layer")?, idx(w.get(2), "column")?)),
         "open-editor" => one(Cmd::OpenEditor(idx(w.get(1), "layer")?, idx(w.get(2), "column")?)),
         "tab" => one(Cmd::Tab(w.get(1).ok_or("missing layer/master/devices/modulators/code/session/perform")?.clone())),
-        "snapshot" => one(Cmd::Snapshot(PathBuf::from(w.get(1).ok_or("missing path")?))),
+        "snapshot" => {
+            let width = match w.get(2) {
+                Some(_) => Some(num(w.get(2), "width")?),
+                None => None,
+            };
+            one(Cmd::Snapshot(PathBuf::from(w.get(1).ok_or("missing path")?), width))
+        }
+        "open" => one(Cmd::Open(w.get(1).ok_or("open needs a set name or a .tripset file")?.clone())),
+        "save" => one(Cmd::Save(PathBuf::from(w.get(1).ok_or("missing path")?))),
         "screenshot" => one(Cmd::Screenshot(PathBuf::from(w.get(1).ok_or("missing path")?))),
         "record" => match w.get(1).map(String::as_str) {
             Some("start") => one(Cmd::Record(true)),
@@ -536,7 +548,7 @@ mod tests {
                 (When::Beat(2.0), Cmd::LaunchScene(1)),
                 (When::Beat(6.0), Cmd::PadDown(0)),
                 (When::Beat(10.0), Cmd::PadUp(0)),
-                (When::Frame(600), Cmd::Snapshot("out dir/end.png".into())),
+                (When::Frame(600), Cmd::Snapshot("out dir/end.png".into(), None)),
                 (When::Frame(600), Cmd::Assert(Query::Param("2/feedback/copies".into()), Op::Approx, 3.0)),
                 (When::Frame(600), Cmd::Assert(Query::Playhead(0), Op::Lt, 10.5)),
                 (When::Seconds(10.0), Cmd::Quit),

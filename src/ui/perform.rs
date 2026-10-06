@@ -65,7 +65,7 @@ pub fn scenes(ui: &mut egui::Ui, comp: &Composition, blink: bool, thumbs: &HashM
                         }
                     }
                 }
-                painter.text(inner.left_bottom(), egui::Align2::LEFT_BOTTOM, format!("Scene {}", col + 1), theme::bold(16.0), text);
+                painter.text(inner.left_bottom(), egui::Align2::LEFT_BOTTOM, comp.scene_name(col).map_or_else(|| format!("Scene {}", col + 1), str::to_string), theme::bold(16.0), text);
                 if col < 9 {
                     painter.text(inner.right_bottom(), egui::Align2::RIGHT_BOTTOM, format!("{}", col + 1), theme::mono(12.0), text.gamma_multiply(0.7));
                 }

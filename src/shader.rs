@@ -894,6 +894,8 @@ pub struct CustomShader {
     /// Starting values for parameters the first time they appear, by name (e.g. a library
     /// entry's tuned defaults) instead of the shader's own defaults.
     pub initial: Vec<(String, f32)>,
+    /// Modulators for parameters the first time they appear, by name (from a saved set).
+    pub initial_mods: Vec<(String, crate::modulation::Modulator)>,
 }
 
 impl CustomShader {
@@ -915,6 +917,7 @@ impl CustomShader {
             alpha: Param::with(Spec::choice("alpha", ALPHA_MODES, alpha_default), alpha_default as f32),
             mouse: [0.0; 4],
             initial: Vec::new(),
+            initial_mods: Vec::new(),
         }
     }
 
@@ -995,6 +998,9 @@ impl CustomShader {
                         let mut p = Param::new(spec);
                         if let Some((_, v)) = self.initial.iter().find(|(n, _)| *n == d.name) {
                             p.set(*v);
+                        }
+                        if let Some((_, m)) = self.initial_mods.iter().find(|(n, _)| *n == d.name) {
+                            p.modulator = Some(crate::modulation::Modulator { seed: p.seed, ..m.clone() });
                         }
                         p
                     }

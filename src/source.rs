@@ -30,6 +30,13 @@ pub fn is_shader(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+pub fn is_svg(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e.eq_ignore_ascii_case("svg"))
+}
+
+/// How much of the frame an SVG fills when it's opened as a clip (see `render_svg`).
+pub const SVG_FILL: f32 = 0.9;
+
 pub fn is_video(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())

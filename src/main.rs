@@ -21,6 +21,7 @@ mod punch;
 mod recorder;
 mod renderer;
 mod script;
+mod set;
 mod shader;
 mod source;
 mod ui;
@@ -31,10 +32,10 @@ use web_time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, Key, Rect, RichText, pos2};
 
-use clip::{Clip, LoopMode};
-use composition::{Blend, Composition, Launch, Quantize};
-use effects::{Effect, EffectKind, apply_feedback_preset};
-use modulation::{Clock, Shape};
+use clip::Clip;
+use composition::{Composition, Launch, Quantize};
+use effects::{Effect, EffectKind};
+use modulation::Clock;
 use recorder::{Finishing, Recorder};
 use renderer::{MEDIA_HEIGHT, MEDIA_WIDTH, Renderer};
 use ui::grid::{GridAction, GridView};
@@ -47,8 +48,9 @@ pub const WEB: bool = cfg!(target_arch = "wasm32");
 
 #[cfg(not(target_arch = "wasm32"))]
 const USAGE: &str =
-    "usage: tripslop [--demo] [--record] [--script FILE] [--isf DIR]... [--size WxH|720p|1080p] [--fixed-step | --realtime] [MEDIA...]
-       tripslop --bake-library   (re-check the bundled shaders and render their library pictures)";
+    "usage: tripslop [--demo | --set NAME] [--record] [--script FILE] [--isf DIR]... [--size WxH|720p|1080p] [--fixed-step | --realtime] [MEDIA...]
+       tripslop --bake-library   (re-check the bundled shaders and render their library pictures)
+MEDIA can include a .tripset file to open. --set opens a bundled set by name; --demo is the first.";
 
 /// Window / dock icon: the color flower, rasterized centered on a square transparent canvas.
 #[cfg(not(target_arch = "wasm32"))]
@@ -96,6 +98,7 @@ fn main() {
                     let mut app = App::new(Renderer::new(rs), Vec::new());
                     app.midi.port = midi::Port::Off;
                     app.load_demo();
+                    app.welcome = true;
                     Ok(Box::new(app))
                 }),
             )
@@ -116,6 +119,7 @@ fn main() -> eframe::Result {
     let mut files: Vec<PathBuf> = Vec::new();
     let mut record = false;
     let mut demo = false;
+    let mut set_name: Option<String> = None;
     let mut script_path: Option<PathBuf> = None;
     let mut fixed_step: Option<bool> = None;
     let mut isf_dirs: Vec<PathBuf> = Vec::new();
@@ -126,6 +130,10 @@ fn main() -> eframe::Result {
         match arg.as_str() {
             "--record" => record = true,
             "--demo" => demo = true,
+            "--set" => match args.next() {
+                Some(n) => set_name = Some(n),
+                None => exit_with(USAGE, 2),
+            },
             "--script" => match args.next() {
                 Some(p) => script_path = Some(PathBuf::from(p)),
                 None => exit_with(USAGE, 2),
@@ -157,7 +165,7 @@ fn main() -> eframe::Result {
         let (n, p) = v.split_once(':')?;
         Some((n.parse::<u64>().ok()?, PathBuf::from(p)))
     }) {
-        for cmd in [script::Cmd::Snapshot(p), script::Cmd::Quit] {
+        for cmd in [script::Cmd::Snapshot(p, None), script::Cmd::Quit] {
             events.push(script::Event { at: script::When::Frame(n), cmd, line: 0 });
         }
     }
@@ -205,6 +213,21 @@ fn main() -> eframe::Result {
             app.script = events.into_iter().map(|event| automation::Pending { event, done: false }).collect();
             if demo {
                 app.load_demo();
+            }
+            if let Some(n) = &set_name
+                && !app.open_builtin(n)
+            {
+                let names: Vec<&str> = set::builtins().iter().map(|b| b.id).collect();
+                return Err(format!("no bundled set {n:?} (have: {})", names.join(", ")).into());
+            }
+            let (sets, files): (Vec<PathBuf>, Vec<PathBuf>) = files.into_iter().partition(|f| f.extension().is_some_and(|e| e == set::EXTENSION));
+            for path in &sets {
+                app.open_set_file(path)?;
+            }
+            // Nothing asked for: the first demo plays behind the welcome screen.
+            if !demo && set_name.is_none() && sets.is_empty() && files.is_empty() && script_path.is_none() {
+                app.load_demo();
+                app.welcome = true;
             }
             let any_files = !files.is_empty();
             for (col, f) in files.into_iter().enumerate() {
@@ -294,8 +317,8 @@ struct App {
     script: Vec<automation::Pending>,
     /// One simulation tick per UI frame instead of real time (deterministic; for scripts).
     fixed_step: bool,
-    /// Output frame to save after the current tick renders.
-    pending_snapshot: Option<PathBuf>,
+    /// Output frame to save after the current tick renders (scaled to a width, if given).
+    pending_snapshot: Option<(PathBuf, Option<u32>)>,
     /// Full-window screenshot to save (egui delivers it a frame later).
     pending_screenshot: Option<PathBuf>,
     screenshot_requested: bool,
@@ -306,6 +329,15 @@ struct App {
     midi: midi::Midi,
     /// Custom size typed into the Output settings, applied with its button.
     size_edit: (u32, u32),
+    /// The open set: its name, description and file (`None` until it's saved).
+    set_name: String,
+    set_description: String,
+    set_path: Option<PathBuf>,
+    /// The welcome screen is up.
+    welcome: bool,
+    welcome_view: ui::welcome::WelcomeView,
+    /// Window title last sent.
+    title: String,
     /// Browser drops whose contents have been read: (layer, column, file name, contents).
     #[cfg(target_arch = "wasm32")]
     web_drops: std::sync::Arc<std::sync::Mutex<Vec<(usize, usize, String, Result<Vec<u8>, String>)>>>,
@@ -354,6 +386,12 @@ impl App {
             // Replaced in `main` (scripts don't touch the saved mappings or the hardware).
             midi: midi::Midi::new(None),
             size_edit: renderer::DEFAULT_SIZE,
+            set_name: String::new(),
+            set_description: String::new(),
+            set_path: None,
+            welcome: false,
+            welcome_view: Default::default(),
+            title: String::new(),
             #[cfg(target_arch = "wasm32")]
             web_drops: Default::default(),
         }
@@ -375,12 +413,11 @@ impl App {
     }
 
     fn try_load(&mut self, layer: usize, col: usize, path: &std::path::Path) -> Result<(), String> {
-        // The browser has no files: the demo's stills are built into the web build.
+        // The browser has no files, only the media compiled in (`set::MEDIA`).
         #[cfg(target_arch = "wasm32")]
-        let c = match path.file_name().and_then(|n| n.to_str()) {
-            Some(n @ "crab-nebula.jpg") => Clip::from_bytes(n, include_bytes!("../samples/crab-nebula.jpg"))?,
-            Some(n @ "pillars-of-creation.jpg") => Clip::from_bytes(n, include_bytes!("../samples/pillars-of-creation.jpg"))?,
-            _ => return Err(format!("{}: the browser build can't open files; drop them onto the grid", path.display())),
+        let c = match set::media_bytes(path) {
+            Some(bytes) => Clip::from_bytes(&source::file_name(path), bytes)?,
+            None => return Err(format!("{}: the browser build can't open files; drop them onto the grid", path.display())),
         };
         #[cfg(not(target_arch = "wasm32"))]
         let c = Clip::open(path, MEDIA_WIDTH, MEDIA_HEIGHT)?;
@@ -390,157 +427,117 @@ impl App {
         Ok(())
     }
 
-    /// Example set built from `samples/`.
+    /// The demo: the first bundled set.
     fn load_demo(&mut self) {
-        let s = |f: &str| PathBuf::from("samples").join(f);
-        // Layer 1: full-frame footage.
-        if WEB {
-            // No video in the browser: the two stills (built in, see `load_file`) and generators.
-            self.load_file(0, 0, s("pillars-of-creation.jpg"));
-            self.load_file(0, 1, s("crab-nebula.jpg"));
-            self.comp.set_clip(0, 2, Clip::generator(2));
-            self.comp.set_clip(0, 3, Clip::generator(5));
-        } else {
-            self.load_file(0, 0, s("jellyfish.mp4"));
-            self.load_file(0, 1, s("big-buck-bunny.mp4"));
-            self.comp.set_clip(0, 2, Clip::generator(2));
-            self.load_file(0, 3, s("jellyfish.mp4"));
-            if let Some(c) = self.comp.clip_mut(0, 3) {
-                c.loop_mode = LoopMode::Bounce;
-                c.speed.set(0.5);
+        self.open_builtin("public-access");
+    }
+
+    /// Open a bundled set by id or name.
+    fn open_builtin(&mut self, name: &str) -> bool {
+        match set::builtin(name) {
+            Some(b) => {
+                self.open_set(&b.set, set::Base::Bundled, None);
+                true
+            }
+            None => {
+                self.status = format!("No bundled set {name:?}");
+                false
             }
         }
-        // Layer 2: small seeds feeding a fractal feedback rig.
-        self.load_file(1, 0, s("crab-nebula.jpg"));
-        self.comp.set_clip(1, 1, Clip::generator(4));
-        self.load_file(1, 2, s("pillars-of-creation.jpg"));
-        self.load_file(1, 3, s("crab-nebula.jpg"));
-        for col in [0, 2, 3] {
-            if let Some(c) = self.comp.clip_mut(1, col) {
-                c.fit = clip::Fit::Contain;
-            }
+    }
+
+    /// Open a `.tripset` file.
+    fn open_set_file(&mut self, path: &std::path::Path) -> Result<(), String> {
+        let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let mut s = set::parse(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        if s.name.is_empty() {
+            s.name = path.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         }
-        let l2 = &mut self.comp.layers[1];
-        l2.name = "Fractal".into();
-        l2.scale.set(0.42);
-        l2.blend = Blend::Screen;
-        let mut fb = Effect::new(EffectKind::Feedback);
-        apply_feedback_preset(&mut fb, 1);
-        l2.effects.push(fb);
-        // Layer 3: generator overlay through a kaleidoscope.
-        self.comp.set_clip(2, 0, Clip::generator(1));
-        self.comp.set_clip(2, 2, Clip::generator(0));
-        self.comp.set_clip(2, 3, Clip::generator(5));
-        let l3 = &mut self.comp.layers[2];
-        l3.name = "Overlay".into();
-        l3.blend = Blend::Add;
-        l3.opacity.set(0.35);
-        let mut k = Effect::new(EffectKind::Kaleidoscope);
-        k.params[1] = k.params[1].clone().lfo(Shape::Triangle, 32.0, 0.25);
-        l3.effects.push(k);
-        // Layers 4–7: the logo, with a VHS / public-access treatment per scene. Each layer has
-        // a clip only in its own scene, so launching a scene swaps the treatment.
-        const WORDMARK: &[u8] = include_bytes!("../logos/tripslop-wordmark-color.svg");
-        const FLOWER: &[u8] = include_bytes!("../logos/tripslop-flower-color.svg");
-        let logo = |name: &str, svg: &[u8], fill: f32| {
-            Clip::image(name, source::render_svg(svg, MEDIA_WIDTH, MEDIA_HEIGHT, fill).expect("logo svg"))
+        let dir = path.parent().map(|d| d.to_path_buf()).unwrap_or_default();
+        self.open_set(&s, set::Base::Dir(dir), Some(path.to_path_buf()));
+        Ok(())
+    }
+
+    /// Replace the composition with a set's, and start its first scene.
+    fn open_set(&mut self, s: &set::SetFile, base: set::Base, path: Option<PathBuf>) {
+        let (comp, warnings) = set::open(s, &self.library, base);
+        self.comp = comp;
+        self.punch.retain_layers(&self.comp);
+        self.renderer.clear_history();
+        self.editing = None;
+        self.tab = Tab::Layer;
+        self.device_tab = DeviceTab::Devices;
+        if let Some(col) = set::start_scene(s, &self.comp) {
+            for l in &mut self.comp.layers {
+                l.launch(col);
+            }
+            self.comp.active_column = Some(col);
+        }
+        // Show the first layer with something to tweak.
+        self.grid.selected_layer = self.comp.layers.iter().position(|l| !l.effects.is_empty()).unwrap_or(0);
+        self.grid.selected_clip = self.comp.layers[self.grid.selected_layer].active.map(|c| (self.grid.selected_layer, c));
+        self.set_name = s.name.clone();
+        self.set_description = s.description.clone();
+        self.set_path = path;
+        self.welcome = false;
+        for w in &warnings {
+            eprintln!("{}: {w}", self.set_name);
+        }
+        let scenes = self.comp.columns.min(9);
+        self.status = match warnings.first() {
+            None => format!("Opened {}: number keys 1–{scenes} launch scenes.", self.set_name),
+            Some(w) if warnings.len() == 1 => format!("Opened {}, but {w}", self.set_name),
+            Some(w) => format!("Opened {}, with {} problems: {w} …", self.set_name, warnings.len()),
         };
-        fn logo_layer<'a>(comp: &'a mut Composition, name: &str, col: usize, clip: Clip) -> &'a mut composition::Layer {
-            comp.add_layer();
-            let i = comp.layers.len() - 1;
-            comp.set_clip(i, col, clip);
-            let l = &mut comp.layers[i];
-            l.name = name.into();
-            l
+    }
+
+    /// An empty composition.
+    fn new_set(&mut self) {
+        let empty = set::SetFile { name: "Untitled".into(), start: Some(0), columns: Some(8), layers: vec![Default::default(); 3], ..Default::default() };
+        self.open_set(&empty, set::Base::Bundled, None);
+        self.status = "New set: drop media onto the grid, or pick something from the browser.".into();
+    }
+
+    /// Save to `path`, or the set's own file (asking where when it has none).
+    fn save_set(&mut self, path: Option<PathBuf>) {
+        let Some(path) = path.or_else(|| self.set_path.clone()).or_else(|| self.ask_save_path()) else { return };
+        let dir = path.parent().map(|d| d.to_path_buf());
+        let name = match self.set_name.trim() {
+            "" | "Untitled" => path.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+            n => n.to_string(),
+        };
+        let (s, warnings) = set::capture(&mut self.comp, &name, &self.set_description, dir.as_deref());
+        self.status = match std::fs::write(&path, set::to_json(&s)) {
+            Ok(()) => {
+                self.set_name = name;
+                self.set_path = Some(path.clone());
+                match warnings.first() {
+                    None => format!("Saved {}", path.display()),
+                    Some(w) => format!("Saved {}, but {w}", path.display()),
+                }
+            }
+            Err(e) => format!("Can't save {}: {e}", path.display()),
+        };
+    }
+
+    fn ask_save_path(&self) -> Option<PathBuf> {
+        let name = match self.set_name.trim() {
+            "" => "Untitled".to_string(),
+            n => n.to_string(),
+        };
+        crate::dialog::FileDialog::new()
+            .add_filter("tripslop set", &[set::EXTENSION])
+            .set_file_name(format!("{name}.{}", set::EXTENSION))
+            .save_file()
+            .map(|p| if p.extension().is_none() { p.with_extension(set::EXTENSION) } else { p })
+    }
+
+    fn ask_open_set(&mut self) {
+        if let Some(path) = crate::dialog::FileDialog::new().add_filter("tripslop set", &[set::EXTENSION]).pick_file()
+            && let Err(e) = self.open_set_file(&path)
+        {
+            self.status = format!("Can't open: {e}");
         }
-        // Scene 1, "Tracking": the wordmark smearing through tape-delay trails, with the
-        // channels slipping apart and the lines jumping like a worn tape.
-        let l = logo_layer(&mut self.comp, "Tracking", 0, logo("wordmark", WORDMARK, 0.72));
-        l.pos_y = l.pos_y.clone().lfo(Shape::Sine, 8.0, 0.06);
-        let mut e = Effect::new(EffectKind::Echo);
-        e.set("amount", 0.85);
-        e.set("spacing (frames)", 3.0);
-        e.set("decay", 0.75);
-        l.effects.push(e);
-        let mut e = Effect::new(EffectKind::RgbSplit);
-        e.set("delay (frames)", 2.0);
-        l.effects.push(e);
-        let mut e = Effect::new(EffectKind::Wave);
-        let p = e.set("amplitude", 0.004);
-        *p = p.clone().lfo(Shape::SampleHold, 1.0, 0.06);
-        e.set("frequency", 30.0);
-        e.set("speed", 6.0);
-        l.effects.push(e);
-        // Scene 2, "Dub": the flower in a camera-at-the-monitor feedback tunnel, zooming out
-        // and drifting through the hues, posterized like a cheap time-base corrector.
-        let l = logo_layer(&mut self.comp, "Dub", 1, logo("flower", FLOWER, 0.5));
-        let mut e = Effect::new(EffectKind::Feedback);
-        e.set("feedback", 0.94);
-        e.set("copy scale", 1.05);
-        let p = e.set("rotate °", 2.0);
-        *p = p.clone().lfo(Shape::Sine, 16.0, 0.05);
-        e.set("hue / pass", 0.025);
-        e.set("saturation", 1.1);
-        l.effects.push(e);
-        let mut e = Effect::new(EffectKind::Pixelate);
-        e.set("pixel size", 2.0);
-        e.set("posterize levels", 6.0);
-        l.effects.push(e);
-        // Scene 3, "Wallpaper": a scrolling, hue-cycling wall of wordmarks over the footage,
-        // stuttering through a long echo. Late-night community bulletin board.
-        let l = logo_layer(&mut self.comp, "Wallpaper", 2, logo("wordmark", WORDMARK, 0.9));
-        l.opacity.set(0.85);
-        let mut e = Effect::new(EffectKind::Transform);
-        e.set("zoom", 0.33);
-        e.set("tile", 1.0);
-        // One cycle moves it a whole width: three tiles, so the loop is seamless.
-        let p = e.set("x", 0.0);
-        *p = p.clone().lfo(Shape::SawUp, 16.0, 0.5);
-        l.effects.push(e);
-        let mut e = Effect::new(EffectKind::Color);
-        let p = e.set("hue", 0.5);
-        *p = p.clone().lfo(Shape::SawUp, 8.0, 1.0);
-        e.set("saturation", 1.6);
-        l.effects.push(e);
-        let mut e = Effect::new(EffectKind::Echo);
-        e.set("spacing (frames)", 8.0);
-        e.set("decay", 0.6);
-        l.effects.push(e);
-        // Scene 4, "Station bug": a small, breathing channel bug in the corner of the
-        // half-speed jellyfish, ghosting behind itself.
-        let l = logo_layer(&mut self.comp, "Station bug", 3, logo("flower", FLOWER, 0.9));
-        l.scale.set(0.22);
-        l.pos_x.set(0.39);
-        l.pos_y.set(0.33);
-        l.opacity = l.opacity.clone().lfo(Shape::Sine, 8.0, 0.3);
-        l.opacity.set(0.8);
-        let mut e = Effect::new(EffectKind::Echo);
-        e.set("amount", 0.5);
-        e.set("spacing (frames)", 2.0);
-        e.set("mode", 1.0);
-        l.effects.push(e);
-        // Master: the whole set played back off a tape on an old TV.
-        let mut e = Effect::new(EffectKind::Wave);
-        e.set("amplitude", 0.0015);
-        e.set("frequency", 40.0);
-        e.set("speed", 12.0);
-        self.comp.effects.push(e);
-        let mut e = Effect::new(EffectKind::Crt);
-        e.set("scanlines", 0.45);
-        e.set("vignette", 0.35);
-        e.set("noise", 0.15);
-        e.set("RGB shift (px)", 2.0);
-        e.set("curvature", 0.04);
-        self.comp.effects.push(e);
-        self.comp.layers[0].name = "Footage".into();
-        for l in &mut self.comp.layers {
-            l.launch(0);
-        }
-        self.comp.active_column = Some(0);
-        self.comp.quantize = Quantize::Beat;
-        self.grid.selected_layer = 1;
-        self.grid.selected_clip = Some((1, 0));
-        self.status = "Demo loaded: number keys 1–4 launch scenes.".into();
     }
 
     fn handle_grid(&mut self, actions: Vec<GridAction>) {
@@ -764,7 +761,8 @@ impl App {
         let cmd = |k: Key| ctx.input(|i| i.modifiers.command && i.key_pressed(k));
         let scene_keys = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9];
         for (i, k) in scene_keys.iter().enumerate() {
-            if pressed(*k) && i < self.comp.columns {
+            // On the welcome screen the number keys pick a set instead (see `ui::welcome`).
+            if pressed(*k) && !command && i < self.comp.columns && !self.welcome {
                 self.comp.launch(Launch::Column(i));
             }
         }
@@ -772,7 +770,9 @@ impl App {
             self.perform = !self.perform;
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.perform));
         }
-        if pressed(Key::Escape) && self.perform {
+        if pressed(Key::Escape) && self.welcome {
+            self.welcome = false;
+        } else if pressed(Key::Escape) && self.perform {
             self.perform = false;
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
         }
@@ -795,8 +795,19 @@ impl App {
         if !WEB && cmd(Key::R) {
             self.toggle_recording();
         }
+        if !WEB && cmd(Key::E) {
+            self.save_snapshot(None, None);
+        }
+        // Sets: files are desktop only.
         if !WEB && cmd(Key::S) {
-            self.save_snapshot(None);
+            if !shift {
+                self.save_set(None);
+            } else if let Some(p) = self.ask_save_path() {
+                self.save_set(Some(p));
+            }
+        }
+        if !WEB && cmd(Key::O) {
+            self.ask_open_set();
         }
         if (pressed(Key::Delete) || pressed(Key::Backspace))
             && let Some((l, c)) = self.grid.selected_clip
@@ -830,9 +841,22 @@ impl App {
         }
     }
 
-    fn save_snapshot(&mut self, path: Option<PathBuf>) {
+    /// Save the output frame, scaled down to `width` if given. JPEG for a `.jpg` path.
+    fn save_snapshot(&mut self, path: Option<PathBuf>, width: Option<u32>) {
         let path = path.unwrap_or_else(|| PathBuf::from(format!("tripslop-{}.png", unix_time())));
-        self.status = match self.renderer.snapshot().and_then(|img| img.save(&path).map_err(|e| e.to_string())) {
+        let save = |img: image::RgbaImage| {
+            let mut img = image::DynamicImage::ImageRgba8(img);
+            if let Some(w) = width.filter(|w| *w < img.width()) {
+                let h = (img.height() as u64 * w as u64 / img.width() as u64) as u32;
+                img = img.resize_exact(w, h, image::imageops::FilterType::Triangle);
+            }
+            let jpeg = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("jpg") || e.eq_ignore_ascii_case("jpeg"));
+            if jpeg {
+                img = image::DynamicImage::ImageRgb8(img.to_rgb8());
+            }
+            img.save(&path).map_err(|e| e.to_string())
+        };
+        self.status = match self.renderer.snapshot().and_then(save) {
             Ok(()) => format!("Saved {}", path.display()),
             Err(e) => format!("Snapshot failed: {e}"),
         };
@@ -1206,8 +1230,8 @@ impl App {
         self.comp.tick(TICK, prev_beat, clock);
         self.renderer.render(&mut self.comp, &mut self.punch, clock);
         self.capture_frame();
-        if let Some(path) = self.pending_snapshot.take() {
-            self.save_snapshot(Some(path));
+        if let Some((path, width)) = self.pending_snapshot.take() {
+            self.save_snapshot(Some(path), width);
             println!("{} {}", automation_stamp(self.frame_count, self.beat), self.status);
         }
     }
@@ -1235,12 +1259,83 @@ impl App {
 
     // ------------------------------------------------------------------ UI
 
+    /// The open set's name, and what to do with sets: in the top bar.
+    fn sets_menu(&mut self, ui: &mut egui::Ui) {
+        use ui::theme;
+        enum Do {
+            Welcome,
+            New,
+            Open,
+            Save,
+            SaveAs,
+            Builtin(&'static str),
+        }
+        let mut action = None;
+        let name = if self.set_name.is_empty() { "Untitled" } else { &self.set_name };
+        let label = RichText::new(format!("{name}  ⏷")).font(theme::semibold(14.0)).color(theme::TEXT_STRONG);
+        ui.menu_button(label, |ui| {
+            ui.set_min_width(300.0);
+            ui.label(theme::caption("Set"));
+            ui.add(egui::TextEdit::singleline(&mut self.set_name).hint_text("Name").desired_width(f32::INFINITY));
+            ui.add(egui::TextEdit::multiline(&mut self.set_description).hint_text("Description").desired_rows(2).desired_width(f32::INFINITY));
+            if let Some(p) = &self.set_path {
+                ui.label(RichText::new(p.display().to_string()).small().color(theme::FAINT));
+            }
+            ui.separator();
+            if ui.button("Welcome screen…").clicked() {
+                action = Some(Do::Welcome);
+            }
+            if !WEB {
+                if ui.button("New").clicked() {
+                    action = Some(Do::New);
+                }
+                if ui.add(egui::Button::new("Open…").shortcut_text("Cmd/Ctrl+O")).clicked() {
+                    action = Some(Do::Open);
+                }
+                if ui.add(egui::Button::new("Save").shortcut_text("Cmd/Ctrl+S")).clicked() {
+                    action = Some(Do::Save);
+                }
+                if ui.add(egui::Button::new("Save as…").shortcut_text("Shift+Cmd/Ctrl+S")).clicked() {
+                    action = Some(Do::SaveAs);
+                }
+            } else if ui.button("New").clicked() {
+                action = Some(Do::New);
+            }
+            ui.separator();
+            ui.label(theme::caption("Demo sets"));
+            for b in set::builtins() {
+                let on = self.set_path.is_none() && self.set_name == b.set.name;
+                if ui.selectable_label(on, &b.set.name).on_hover_text(&b.set.description).clicked() {
+                    action = Some(Do::Builtin(b.id));
+                }
+            }
+        })
+        .response
+        .on_hover_text("The set: name, open, save, and the demo sets");
+        match action {
+            Some(Do::Welcome) => self.welcome = true,
+            Some(Do::New) => self.new_set(),
+            Some(Do::Open) => self.ask_open_set(),
+            Some(Do::Save) => self.save_set(None),
+            Some(Do::SaveAs) => {
+                if let Some(p) = self.ask_save_path() {
+                    self.save_set(Some(p));
+                }
+            }
+            Some(Do::Builtin(id)) => {
+                self.open_builtin(id);
+            }
+            None => {}
+        }
+    }
+
     fn transport_bar(&mut self, ui: &mut egui::Ui) {
         use ui::theme;
         ui.horizontal_centered(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
             ui.add(egui::Image::new(egui::include_image!("../logos/tripslop-wordmark-color.svg")).fit_to_exact_size(egui::vec2(76.0, 27.0)))
                 .on_hover_text("tripslop");
+            self.sets_menu(ui);
             divider(ui);
 
             let playing = self.comp.playing;
@@ -1314,8 +1409,8 @@ impl App {
                 divider(ui);
                 ui.toggle_value(&mut self.show_library, "Browser").on_hover_text("Show the shader browser (B)");
                 ui.toggle_value(&mut self.show_output, "🖵").on_hover_text("Output window: drag it to a projector, double-click for fullscreen");
-                if !WEB && ui.button("📷").on_hover_text("Save a PNG snapshot (Cmd/Ctrl+S)").clicked() {
-                    self.save_snapshot(None);
+                if !WEB && ui.button("📷").on_hover_text("Save a PNG snapshot (Cmd/Ctrl+E)").clicked() {
+                    self.save_snapshot(None, None);
                 }
                 if ui.button("✱").on_hover_text("Clear all feedback / delay memory (Cmd/Ctrl+K)").clicked() {
                     self.renderer.clear_history();
@@ -1855,6 +1950,24 @@ impl eframe::App for App {
                 });
         }
 
+        if self.welcome && !self.perform {
+            let sets = set::builtins();
+            match self.welcome_view.show(&ctx, &sets, &self.set_name) {
+                Some(ui::welcome::WelcomeAction::Open(i)) => self.open_set(&sets[i].set, set::Base::Bundled, None),
+                Some(ui::welcome::WelcomeAction::Empty) => self.new_set(),
+                Some(ui::welcome::WelcomeAction::OpenFile) => self.ask_open_set(),
+                Some(ui::welcome::WelcomeAction::Close) => self.welcome = false,
+                None => {}
+            }
+        }
+        let title = match self.set_name.as_str() {
+            "" => "tripslop".to_string(),
+            n => format!("{n} — tripslop"),
+        };
+        if title != self.title {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.title = title;
+        }
         self.after_ui(&ctx);
     }
 }

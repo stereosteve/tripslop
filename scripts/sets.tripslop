@@ -1,0 +1,31 @@
+# Sets: open a bundled set, change it, save, open the saved file, and check it came back.
+# Run from the repo root:  cargo run --release -- --script scripts/sets.tripslop
+
+open deep-field
+assert layers == 3
+assert bpm == 72
+assert active 1 == 1
+set Sky/transform/zoom 1.5
+set Glow/opacity 0.2
+bpm 90
+at 30 save target/script-out/sets/saved.tripset
+
+open showroom
+assert bpm == 100
+assert triangles 2 2 > 1000             # the Stanford Bunny
+
+at 60 open target/script-out/sets/saved.tripset
+assert layers == 3
+assert bpm == 90
+assert Sky/transform/zoom ~= 1.5
+assert Glow/opacity ~= 0.2
+assert active 1 == 1
+
+# Every demo opens (problems would fail the unit tests; this checks they render).
+at 90  open patch-bay
+at 120 open warehouse
+at 150 open lava-lamp
+at 180 open public-access
+assert layers == 7
+at 240 snapshot target/script-out/sets/public-access.png
+quit

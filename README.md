@@ -11,32 +11,36 @@ analog **video-feedback fractal rig** (a camera pointed at monitors, with delay 
 and proc amps) on the GPU.
 
 ```
-cargo run --release -- --demo
+cargo run --release          # opens the welcome screen with the demo sets
 ```
 
 Requires `ffmpeg` and `ffprobe` on your PATH for video, cameras and recording. Images and
 generators work without them.
 
-## Demo
+## Sets and demos
 
-`--demo` builds a seven-layer set from the media in `samples/` (run `samples/fetch.sh` to
-re-download it). **Run it from the repo root**, since the sample paths are relative.
+Starting tripslop with nothing on the command line opens a **welcome screen** with the demo
+sets, each a different look built from the same parts. Pick one with the mouse or its number
+key; the first one plays behind it until you choose. The set menu at the top left (it shows
+the set's name) brings the welcome screen back, and lists the demos too.
 
-* **Footage** (bottom): jellyfish, Big Buck Bunny, a plasma generator, and a half-speed
-  bouncing jellyfish
-* **Fractal**: small images and a dot generator (the layer is scaled to 42%) going through the
-  Feedback effect's *Sierpinski* preset, Screen-blended
-* **Overlay**: generators through a kaleidoscope, Add-blended at 35%
-* **Logo layers**, one per scene, each with its own VHS / public-access treatment (the logos
-  are rasterized from `logos/` at load time):
-  1. **Tracking**: the wordmark through echo trails, RGB time split and a jumpy wave warp
-  2. **Dub**: the flower in a zooming, hue-drifting feedback tunnel, posterized
-  3. **Wallpaper**: a scrolling, hue-cycling tile of wordmarks with a stuttering echo
-  4. **Station bug**: a small breathing flower in the corner, like a channel watermark
+| # | Set | What it shows off |
+| --- | --- | --- |
+| 1 | **Public Access** | the logo through tape echo, a feedback tunnel and a scrolling bulletin board, over footage and a fractal rig, on a CRT |
+| 2 | **Patch Bay** | an analog video synth: generators in four feedback loops (Mandala, Tunnel, Hall of mirrors, Melt) |
+| 3 | **Deep Field** | slow, ambient: telescope stills drifting with a glow, star fields and a galaxy |
+| 4 | **Warehouse** | 140 BPM: lasers, neon grids and rain cut up by strobing checkerboards; pumps with the kick when there's audio input |
+| 5 | **Showroom** | 3D models on a turntable, and footage wrapped around a spinning prism |
+| 6 | **Lava Lamp** | liquid shaders from the library through mirrors, a kaleidoscope and a half-wet feedback trail |
 
-The master chain adds a little line jitter (Wave warp) and a CRT for the tape-on-a-TV look.
-
-Press `1`–`4` to launch scenes. Launches are quantized to the next beat.
+A set is a `.tripset` file: JSON describing the layers, clips, effects, parameters and
+modulators (see [docs/sets.md](docs/sets.md)). **Cmd/Ctrl+S** saves, **Shift+Cmd/Ctrl+S**
+saves as, **Cmd/Ctrl+O** opens; `tripslop my.tripset` opens one from the command line, and
+`--set NAME` opens a demo (`--demo` is the first). The demos live in `sets/` and are compiled
+in, with their stills and logos. Their videos come from `samples/` (run `samples/fetch.sh` to
+re-download them), found from the current folder or the repo the app was built in; without
+them a clip falls back to a still or a generator. After changing a demo, run
+`scripts/bake-sets.sh` to redraw its welcome-screen picture.
 
 Any file arguments are loaded into the first layer's cells: `cargo run --release -- a.mp4 b.png`.
 
@@ -53,8 +57,8 @@ from NASA/ESA Hubble via Wikimedia Commons. See the source pages for the exact t
 
 ## In the browser
 
-tripslop also builds to WebAssembly, so people can try it before downloading. It runs the
-demo set on WebGPU (a recent Chrome, Edge, Safari or Firefox).
+tripslop also builds to WebAssembly, so people can try it before downloading. It opens on the
+welcome screen with the demo sets, on WebGPU (a recent Chrome, Edge, Safari or Firefox).
 
 ```
 rustup target add wasm32-unknown-unknown
@@ -70,7 +74,8 @@ what needs the operating system:
 
 Generators, the shader and model libraries, every effect, the shader editor, automation and
 Perform all work. Images, shaders and self-contained 3D models (not `.gltf` with external
-files) can be dropped onto the grid. The demo's video layer uses the stills and generators.
+files) can be dropped onto the grid. All the demo sets open, with stills or generators
+standing in for their videos; sets can't be saved or opened from files there.
 
 ## Concepts
 
@@ -393,7 +398,9 @@ saved mappings alone unless `TRIPSLOP_CONFIG_DIR` is set.
 | B | show / hide the browser |
 | ← / → | crossfader |
 | Cmd/Ctrl+R | start / stop recording |
-| Cmd/Ctrl+S | save a PNG snapshot |
+| Cmd/Ctrl+S, Shift+Cmd/Ctrl+S | save the set, save as |
+| Cmd/Ctrl+O | open a set |
+| Cmd/Ctrl+E | save a PNG snapshot |
 | Cmd/Ctrl+K | clear all feedback / delay memory |
 | Cmd/Ctrl+F, Esc | performance mode (fullscreen output only) |
 | Delete | remove the selected clip |
@@ -434,7 +441,7 @@ Layers and columns are **1-based**, like the UI.
 
 | Command | |
 | --- | --- |
-| `demo` | load the demo set |
+| `demo` · `open NAME` · `open FILE.tripset` · `save FILE.tripset` | open the first demo set, a demo by name (`deep-field`), or a set file; save the set |
 | `launch-scene N` · `launch L C` · `stop L` | launch a scene / a clip; stop a layer |
 | `load L C PATH` · `generator L C NAME` · `shader L C TEMPLATE` · `isf L C NAME` · `model L C NAME` · `camera L C INDEX` | put media in a cell (layers are created as needed); `isf` takes a library generator's name, `model` a library model's (`load` also takes model files) |
 | `effect-model LAYER/EFFECT NAME` | give a Shape projector or Projection mapping a library model (and set its shape to *Model*) |
@@ -445,8 +452,8 @@ Layers and columns are **1-based**, like the UI.
 | `crossfade bank/layer [linear/smooth/cut]` · `side L a/b/off` | crossfader mode and curve; a layer's side |
 | `size WxH` (or `720p`, `1080p`) · `history LAYER/EFFECT full/half` | output size; an effect's history size |
 | `pad KEY down/up/latch/unlatch` · `hold KEY DURATION` | punch-in pads, by key, name or number |
-| `select L C` · `tab layer/master` · `tab devices/modulators/code` · `tab session/perform` · `open-editor L C` | UI state, for screenshots |
-| `snapshot PATH` · `screenshot PATH` · `record start/stop` | output frame, full window, video |
+| `select L C` · `tab layer/master` · `tab devices/modulators/code` · `tab session/perform/welcome` · `open-editor L C` | UI state, for screenshots |
+| `snapshot PATH [WIDTH]` · `screenshot PATH` · `record start/stop` | output frame (scaled to a width if given; `.jpg` for JPEG), full window, video |
 | `audio FILE.wav` · `audio off` | analyse a WAV file in step with the clock (deterministic) |
 | `automate PATH SHAPE [DEPTH] [BEATS]` · `automate PATH off` | attach automation: `sine`, `square`, `drift`, … or `audio:BAND` (e.g. `audio:kick`) |
 | `midi note N on [VEL] [CH]` · `midi note N off [CH]` · `midi cc N VALUE [CH]` | fake MIDI input (channels 1–16, default 1); goes through the same mappings as hardware |

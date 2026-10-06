@@ -1,0 +1,51 @@
+{
+  "tripslop": 1,
+  "name": "Lava Lamp",
+  "description": "Liquid light show: lava, aurora, ocean and glowing mycelium from the shader library, folded through mirrors and a kaleidoscope, with a half-wet feedback trail on everything.",
+  "bpm": 90,
+  "quantize": "bar",
+  "scenes": ["Lava", "Aurora", "Ocean", "Mycelium"],
+  "effects": [
+    { "kind": "feedback", "preset": "Slow trails", "params": { "wet": 0.45, "hue / pass": 0.02 } },
+    { "kind": "color", "params": { "saturation": 1.25, "hue": { "mod": { "shape": "sine", "beats": 64, "depth": 0.1 } } } }
+  ],
+  "layers": [
+    {
+      "name": "Liquid",
+      "params": { "transition": 2 },
+      "effects": [ { "kind": "mirror", "params": { "mode": "Left → right" } } ],
+      "clips": [
+        { "library": "Lava" },
+        { "library": "Aurora Borealis" },
+        { "library": "Ocean Waves" },
+        { "library": "Mycelium Network" }
+      ]
+    },
+    {
+      "name": "Flow",
+      "blend": "screen",
+      "params": { "opacity": { "value": 0.35, "mod": { "shape": "sine", "beats": 32, "depth": 0.3 } } },
+      "effects": [
+        { "kind": "kaleidoscope", "params": { "segments": 8, "rotation": { "mod": { "shape": "triangle", "beats": 64, "depth": 0.5 } }, "zoom": 0.8 } }
+      ],
+      "clips": [
+        { "library": "Psychedelic Noise Flow" },
+        null,
+        { "library": "Psychedelic Noise Flow" },
+        null
+      ]
+    },
+    {
+      "name": "Blob",
+      "blend": "overlay",
+      "params": { "opacity": 0.5, "scale": 1.4 },
+      "effects": [ { "kind": "blur", "params": { "radius": 20 } } ],
+      "clips": [
+        null,
+        { "generator": "plasma", "params": { "frequency": 1.5, "pattern speed": 0.25, "hue": 0.6 } },
+        null,
+        { "generator": "plasma", "params": { "frequency": 1.5, "pattern speed": 0.25, "hue": 0.3 } }
+      ]
+    }
+  ]
+}

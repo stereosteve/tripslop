@@ -188,6 +188,11 @@ pub struct Clip {
     pub direction: Direction,
     pub sync: Sync,
     pub fit: Fit,
+    /// The file the media came from (a `builtin:` path for media compiled into the app), so a
+    /// set can be saved and opened again.
+    pub file: Option<std::path::PathBuf>,
+    /// An SVG's size in the frame (0..1), when it isn't `source::SVG_FILL`.
+    pub fill: Option<f32>,
     /// Playhead in frames.
     pub position: f64,
     /// +1 / -1 while bouncing.
@@ -212,6 +217,8 @@ impl Clip {
             direction: Direction::Forward,
             sync: Sync::Timeline,
             fit: Fit::Fill,
+            file: None,
+            fill: None,
             position: 0.0,
             bounce: 1.0,
             finished: false,
@@ -235,18 +242,23 @@ impl Clip {
             Media::Model(Box::new(ModelClip::new(ModelRef { key: path.display().to_string(), model })))
         } else if source::is_video(path) {
             Media::Video(VideoMedia::import(path, width, height)?)
+        } else if source::is_svg(path) {
+            let svg = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+            let frame = source::render_svg(&svg, width, height, source::SVG_FILL).map_err(|e| format!("{}: {e}", path.display()))?;
+            Media::Image { frame, uploaded: false }
         } else {
             Media::Image {
                 frame: source::load_image(path)?,
                 uploaded: false,
             }
         };
-        Ok(Self::new(stem, media))
+        let mut clip = Self::new(stem, media);
+        clip.file = Some(path.to_path_buf());
+        Ok(clip)
     }
 
     /// A clip from a file's contents rather than its path: what the browser build gets when a
     /// file is dropped. Images, shaders and self-contained models; video needs ffmpeg.
-    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     pub fn from_bytes(name: &str, bytes: &[u8]) -> Result<Self, String> {
         let path = Path::new(name);
         let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or(name.to_string());
@@ -260,6 +272,9 @@ impl Clip {
             Media::Model(Box::new(ModelClip::new(ModelRef { key: name.to_string(), model: std::sync::Arc::new(model) })))
         } else if source::is_video(path) {
             return Err(fail("video files need the desktop app (it decodes them with ffmpeg)".into()));
+        } else if source::is_svg(path) {
+            let (w, h) = (crate::renderer::MEDIA_WIDTH, crate::renderer::MEDIA_HEIGHT);
+            Media::Image { frame: source::render_svg(bytes, w, h, source::SVG_FILL).map_err(fail)?, uploaded: false }
         } else {
             Media::Image {
                 frame: source::decode_image(bytes).map_err(fail)?,
@@ -269,7 +284,7 @@ impl Clip {
         Ok(Self::new(stem, media))
     }
 
-    /// A still made in code (the demo's logos).
+    /// A still made in code.
     pub fn image(name: &str, frame: Frame) -> Self {
         Self::new(name.to_string(), Media::Image { frame, uploaded: false })
     }

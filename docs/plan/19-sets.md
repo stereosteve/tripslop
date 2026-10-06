@@ -1,43 +1,55 @@
-# 19. Saving sets
+# 19. Saving sets ✅
 
-tripslop can't save what you've built. Scripts can rebuild a set, but nobody writes a script
-after a good jam. Arkestra's `.vfx` project is a folder holding a JSON document, a screenshot and
-thumbnails. Snapshots (12), macros (11) and sequences (10) make the problem bigger, because
-they're exactly the kind of work you want to keep.
+tripslop couldn't save what you'd built, and the demo was a hundred lines of Rust. Sets fix
+both: a set file holds a whole composition, and the demos are now sets, so there can be
+several, each with its own look, behind a welcome screen.
 
-This is infrastructure, which the ground rules say should only go in when something is blocking.
-Item 12 is what makes it blocking.
+## What was built
 
-## Plan
+The format is described in [../sets.md](../sets.md).
 
-* **Format:** a `.tripset` folder with `set.json` (versioned), `thumbs/` and a `screenshot.png`.
-  Media is referenced by path, both relative to the set and absolute; shaders and generators
-  are stored inline. A *Collect media* option copies the referenced files into `media/` inside
-  the set, so it can be moved to another machine.
-* **What's in it:** layers (name, colour, blend, side, opacity, transform, transition, mute and
-  solo), clips (source, loop mode, direction, speed, sync, fit, the parameters), effects (kind,
-  enabled, parameters, custom shader code, model reference), every parameter's value and
-  modulator, macros, shared modulators, snapshots, scene names, tempo, quantize, crossfader
-  mode, output size. Not in it: MIDI and OSC mappings (they belong to the controller), and
-  live state like cue, held pads and the playing position.
-* **Serialisation:** `serde` derive on the plain data types. Effects and parameters are stored by
-  label, not index, so adding parameters to an effect later doesn't break old sets. Unknown
-  labels are dropped with a warning in the status bar. Videos are re-imported (transcoded) on
-  load, in the background, with the cells showing progress.
-* **UI:** *Save* (Cmd/Ctrl+S, moving snapshot PNG to Cmd/Ctrl+Shift+S), *Save as…*, *Open…*
-  (Cmd/Ctrl+O), and a recent-sets list. The window title shows the set name, with a dot for
-  unsaved changes. Opening a `.tripset` folder from the command line loads it.
-* **Missing media:** cells whose file is gone show a red outline. *Locate…* on one searches
-  that folder for the other missing files too.
-* **Scripts:** `save PATH` / `open PATH`.
+* **One JSON file, not a folder.** The first plan was a `.tripset` folder with `set.json`,
+  thumbnails and a screenshot. A single file is easier to write by hand, diff, mail and bundle
+  into the app (`build.rs` compiles in everything in `sets/`). Media is referenced by path
+  relative to the set; a folder holding a set and its collected media can come later
+  (*Collect media*, below) without changing the format.
+* **Sparse and hand-writable.** Only what differs from a fresh composition is written.
+  Parameters go by label (prefix match, like scripts), choice parameters by option name, enums
+  in snake case. Feedback presets can be named instead of spelled out. Unknown effects,
+  parameters, options and missing media are skipped and reported in the status bar and on
+  stderr, never fatal.
+* **Fallbacks.** A clip can name another clip to use when it can't open. The demos use this so
+  the browser build (no video) gets stills or generators instead of the footage.
+* **Compiled-in media.** The two sample stills and the six logos are compiled in and can be
+  named as `builtin:PATH`, so the demos work from any folder and in the browser.
+* **Scene names** are now part of the composition: the grid's scene buttons and Perform's
+  scene pads show them.
+* **Shaders are saved inline**, so edits in the Code tab survive. Their parameters don't exist
+  until they compile, so saved values wait in `CustomShader::initial` / `initial_mods`.
+* **UI:** the set menu at the top left shows the set's name (editable, with a description) and
+  has New, Open (Cmd/Ctrl+O), Save (Cmd/Ctrl+S), Save as (Shift+Cmd/Ctrl+S) and the demo
+  sets. The PNG snapshot moved to Cmd/Ctrl+E. The window title shows the set's name. A
+  `.tripset` on the command line opens it; `--set NAME` opens a demo.
+* **Welcome screen:** shown when tripslop starts with nothing to open, and always in the
+  browser. A card per demo set with a picture, its description and its scenes; number keys
+  pick one. The first demo plays behind it.
+* **Six demo sets** in `sets/`: Public Access (the old demo), Patch Bay, Deep Field, Warehouse,
+  Showroom and Lava Lamp. `scripts/bake-sets.sh` renders their welcome pictures into
+  `sets/thumbs/`.
+* **Scripts:** `open NAME|FILE`, `save FILE`, `snapshot PATH WIDTH` (`.jpg` writes a JPEG),
+  `tab welcome`.
 
-## Scripts and tests
+Unit tests cover a round trip (open, save, open again: the same values and modulators, and
+saving twice gives the same file), unknown things being reported rather than fatal, relative
+paths, and every bundled set opening without a warning. `scripts/smoke.tripslop` runs on the
+Public Access set unchanged.
 
-* Round trip: build the demo set, change things, save, load, and compare `visit_paths` values
-  and a snapshot image.
-* Loading a set with an unknown effect parameter keeps the rest.
-* `scripts/sets.tripslop` saves and reloads mid-script.
+## Not done yet
 
-## Done when
-
-* Quit, relaunch, open the set, and everything is where you left it, snapshots included.
+* **Unsaved-changes dot** in the title, and asking before New / Open throws work away.
+* **Recent sets** list.
+* **Collect media:** copy referenced files next to the set so it can move machines.
+* **Missing media UI:** a red outline on cells whose file is gone, and *Locate…* that searches
+  that folder for the others.
+* **Browser:** saving a set as a download and opening one by dropping it on the page.
+* Snapshots (12) and macros (11) go in the format when they exist.

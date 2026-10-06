@@ -1,0 +1,56 @@
+{
+  "tripslop": 1,
+  "name": "Deep Field",
+  "description": "Slow and wide. Telescope pictures drifting like a camera move, with a soft glow, star fields and a slowly turning galaxy. For ambient sets and long fades.",
+  "bpm": 72,
+  "quantize": "bar",
+  "scenes": ["Pillars", "Crab", "Nebula", "Galaxy"],
+  "params": { "master": 1 },
+  "effects": [
+    { "kind": "color", "params": { "saturation": 1.15, "gamma": 1.1 } },
+    { "kind": "crt", "params": { "scanlines": 0, "vignette": 0.55, "noise": 0.06, "RGB shift (px)": 0, "curvature": 0 } }
+  ],
+  "layers": [
+    {
+      "name": "Sky",
+      "params": { "transition": 3 },
+      "effects": [
+        { "kind": "transform", "params": {
+          "zoom": { "value": 1.2, "mod": { "shape": "sine", "beats": 64, "depth": 0.04 } },
+          "rotate": { "mod": { "shape": "smooth_random", "beats": 32, "depth": 0.02 } },
+          "x": { "mod": { "shape": "smooth_random", "beats": 32, "depth": 0.05 } },
+          "y": { "mod": { "shape": "smooth_random", "beats": 48, "depth": 0.04 } } } }
+      ],
+      "clips": [
+        { "file": "../samples/pillars-of-creation.jpg" },
+        { "file": "../samples/crab-nebula.jpg" },
+        { "library": "Cosmic Nebula" },
+        { "library": "Spiral Galaxy" }
+      ]
+    },
+    {
+      "name": "Glow",
+      "blend": "screen",
+      "params": { "opacity": { "value": 0.4, "mod": { "shape": "sine", "beats": 16, "depth": 0.2 } }, "transition": 3 },
+      "effects": [
+        { "kind": "blur", "params": { "radius": 28 } },
+        { "kind": "color", "params": { "saturation": 1.4, "hue": { "mod": { "shape": "sine", "beats": 64, "depth": 0.08 } } } }
+      ],
+      "clips": [
+        { "file": "../samples/pillars-of-creation.jpg" },
+        { "file": "../samples/crab-nebula.jpg" }
+      ]
+    },
+    {
+      "name": "Stars",
+      "blend": "add",
+      "params": { "opacity": 0.6 },
+      "clips": [
+        { "library": "Particles & Fire/Particle Field", "params": { "particleSize": 0.006, "flySpeed": 0.04 } },
+        { "library": "Particles & Fire/Particle Field", "params": { "particleSize": 0.005, "flySpeed": 0.03 } },
+        null,
+        { "library": "Particles & Fire/Particle Field", "params": { "particleSize": 0.004, "flySpeed": 0.02 } }
+      ]
+    }
+  ]
+}

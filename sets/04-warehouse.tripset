@@ -1,0 +1,68 @@
+{
+  "tripslop": 1,
+  "name": "Warehouse",
+  "description": "140 BPM and strobing. Lasers, neon grids and digital rain cut up by checkerboards on the off-beat, mirrored bars and an RGB smear. Turn on an audio input and it pumps with the kick.",
+  "bpm": 140,
+  "quantize": "beat",
+  "scenes": ["Lasers", "Grid", "Lattice", "Rain"],
+  "effects": [
+    { "kind": "rgb_split", "params": { "delay": 1, "amount": 0.6 } },
+    { "kind": "color", "params": { "contrast": 1.35, "saturation": 1.4, "brightness": { "value": 1, "mod": { "shape": "audio", "band": "kick", "depth": 0.25, "polarity": "up" } } } },
+    { "kind": "pixelate", "params": { "pixel size": { "value": 1, "mod": { "shape": "sample_hold", "beats": 4, "depth": 0.05, "polarity": "up" } } } }
+  ],
+  "layers": [
+    {
+      "name": "Light show",
+      "effects": [
+        { "kind": "mirror", "params": { "mode": "Quad" } }
+      ],
+      "clips": [
+        { "library": "Laser Beams" },
+        { "library": "Neon Grid" },
+        { "library": "Laser Lattice" },
+        { "library": "Neon & Electric/Digital Rain" }
+      ]
+    },
+    {
+      "name": "Checker",
+      "blend": "difference",
+      "params": { "opacity": 0.85 },
+      "effects": [
+        { "kind": "strobe", "params": { "rate": "1/2", "on time": 0.25, "mode": "Hide" } },
+        { "kind": "kaleidoscope", "params": { "segments": 4, "rotation": { "mod": { "shape": "saw_up", "beats": 8, "depth": 1 } } } }
+      ],
+      "clips": [
+        { "generator": "checker", "params": { "frequency": 6, "pattern speed": 2 } },
+        null,
+        { "generator": "checker", "params": { "frequency": 14, "pattern speed": 3 } }
+      ]
+    },
+    {
+      "name": "Bars",
+      "blend": "add",
+      "params": { "opacity": 0.5 },
+      "effects": [
+        { "kind": "transform", "params": { "rotate": { "value": 45, "mod": { "shape": "square", "beats": 4, "depth": 0.25 } } } },
+        { "kind": "strobe", "params": { "rate": "1/4", "on time": 0.4, "mode": "Hide" } }
+      ],
+      "clips": [
+        null,
+        { "generator": "bars", "params": { "frequency": 8, "pattern speed": 3, "hue": 0.8 } },
+        null,
+        { "generator": "bars", "params": { "frequency": 5, "pattern speed": 4, "hue": 0.3 } }
+      ]
+    },
+    {
+      "name": "Bug",
+      "blend": "add",
+      "params": { "scale": 0.16, "position x": -0.42, "position y": -0.38, "opacity": 0.8 },
+      "effects": [ { "kind": "strobe", "params": { "rate": "1", "mode": "Invert" } } ],
+      "clips": [
+        { "name": "flower", "file": "../logos/tripslop-flower-cream.svg" },
+        { "name": "flower", "file": "../logos/tripslop-flower-cream.svg" },
+        { "name": "flower", "file": "../logos/tripslop-flower-cream.svg" },
+        { "name": "flower", "file": "../logos/tripslop-flower-cream.svg" }
+      ]
+    }
+  ]
+}

@@ -71,7 +71,12 @@ impl GridView {
                 } else {
                     (theme::RAISED, theme::TEXT, Stroke::new(1.0, theme::LINE_SOFT))
                 };
-                let mut b = egui::Button::new(RichText::new(format!("▶  {}", col + 1)).font(theme::semibold(13.0)).color(text))
+                let label = match comp.scene_name(col) {
+                    Some(n) => format!("▶ {}  {n}", col + 1),
+                    None => format!("▶  {}", col + 1),
+                };
+                let mut b = egui::Button::new(RichText::new(label).font(theme::semibold(13.0)).color(text))
+                    .truncate()
                     .min_size(vec2(CELL.x, 26.0))
                     .fill(fill)
                     .stroke(stroke);
@@ -80,7 +85,7 @@ impl GridView {
                     b = b.stroke(Stroke::new(2.0, ACCENT));
                 }
                 let hint = if col < 9 { format!("Launch scene {} (key {})", col + 1, col + 1) } else { format!("Launch scene {}", col + 1) };
-                let r = ui.add(b).on_hover_text(hint);
+                let r = ui.add_sized(vec2(CELL.x, 26.0), b).on_hover_text(hint);
                 r.context_menu(|ui| crate::ui::midi::menu(ui, key));
                 if r.clicked() {
                     actions.push(GridAction::Launch(Launch::Column(col)));

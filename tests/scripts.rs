@@ -55,6 +55,12 @@ fn smoke() {
 
 #[test]
 #[ignore = "opens a window; needs a GPU"]
+fn sets() {
+    run("scripts/sets.tripslop");
+}
+
+#[test]
+#[ignore = "opens a window; needs a GPU"]
 fn shaders() {
     run("scripts/shaders.tripslop");
 }
