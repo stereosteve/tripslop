@@ -12,7 +12,6 @@ The file only needs what differs from a fresh composition, so a hand-written set
   "tripslop": 1,
   "name": "Two scenes",
   "bpm": 120,
-  "quantize": "beat",
   "scenes": ["Rings", "Plasma"],
   "effects": [ { "kind": "crt", "params": { "noise": 0.2 } } ],
   "layers": [

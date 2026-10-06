@@ -3,7 +3,6 @@
   "name": "Warehouse",
   "description": "140 BPM and strobing. Lasers, neon grids and digital rain cut up by checkerboards on the off-beat, mirrored bars and an RGB smear. Turn on an audio input and it pumps with the kick.",
   "bpm": 140,
-  "quantize": "beat",
   "scenes": ["Lasers", "Grid", "Lattice", "Rain"],
   "effects": [
     { "kind": "rgb_split", "params": { "delay": 1, "amount": 0.6 } },

@@ -3,7 +3,6 @@
   "name": "Showroom",
   "description": "3D objects on a turntable: a chrome teapot over a synthwave sun, a wireframe bunny, a toon dragon that comes apart on the beat, and footage wrapped around a spinning prism.",
   "bpm": 100,
-  "quantize": "beat",
   "scenes": ["Teapot", "Bunny", "Dragon", "Prism"],
   "layers": [
     {

@@ -3,7 +3,6 @@
   "name": "Deep Field",
   "description": "Slow and wide. Telescope pictures drifting like a camera move, with a soft glow, shafts of dust and a slowly turning galaxy. For ambient sets and long fades.",
   "bpm": 72,
-  "quantize": "bar",
   "scenes": ["Pillars", "Crab", "Nebula", "Galaxy"],
   "params": { "master": 1 },
   "effects": [

@@ -3,7 +3,6 @@
   "name": "Patch Bay",
   "description": "An analog video synthesizer with nothing but oscillators: rings, checkerboards, bars and plasma, each shrunk into its own feedback loop, from a slow mandala to a melting tunnel.",
   "bpm": 110,
-  "quantize": "bar",
   "scenes": ["Mandala", "Tunnel", "Hall of mirrors", "Melt"],
   "effects": [
     { "kind": "color", "params": { "hue": { "mod": { "shape": "smooth_random", "beats": 32, "depth": 0.3 } }, "saturation": 1.15, "contrast": 1.05 } },

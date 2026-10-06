@@ -4,7 +4,6 @@
 # Every scene is given two seconds to compile its shaders and fill its feedback first.
 
 open public-access
-quantize off
 at 2s  print frame-ms
 at 2s  launch-scene 2
 at 4s  print frame-ms
@@ -14,7 +13,6 @@ at 6s  launch-scene 4
 at 8s  print frame-ms
 
 at 8s  open patch-bay
-quantize off
 at 10s print frame-ms
 at 10s launch-scene 2
 at 12s print frame-ms
@@ -24,7 +22,6 @@ at 14s launch-scene 4
 at 16s print frame-ms
 
 at 16s open deep-field
-quantize off
 at 18s print frame-ms
 at 18s launch-scene 2
 at 20s print frame-ms
@@ -34,7 +31,6 @@ at 22s launch-scene 4
 at 24s print frame-ms
 
 at 24s open warehouse
-quantize off
 at 26s print frame-ms
 at 26s launch-scene 2
 at 28s print frame-ms
@@ -44,7 +40,6 @@ at 30s launch-scene 4
 at 32s print frame-ms
 
 at 32s open showroom
-quantize off
 at 34s print frame-ms
 at 34s launch-scene 2
 at 36s print frame-ms
@@ -54,7 +49,6 @@ at 38s launch-scene 4
 at 40s print frame-ms
 
 at 40s open lava-lamp
-quantize off
 at 42s print frame-ms
 at 42s launch-scene 2
 at 44s print frame-ms

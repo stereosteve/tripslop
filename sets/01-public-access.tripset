@@ -3,7 +3,6 @@
   "name": "Public Access",
   "description": "Late-night cable access: the tripslop logo through tape echo, a camera-at-the-monitor feedback tunnel and a scrolling bulletin board, over footage and a fractal rig, on an old TV.",
   "bpm": 120,
-  "quantize": "beat",
   "scenes": ["Tracking", "Dub", "Wallpaper", "Station bug"],
   "columns": 8,
   "effects": [

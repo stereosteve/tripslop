@@ -7,7 +7,8 @@ assert active 1 == 1
 assert Fractal/feedback/copies == 3     # the Sierpinski preset on layer 2
 assert bpm == 120
 
-# Launches are quantized to the beat in the demo: requested mid-beat, fired on beat 2.
+# Quantized launches: requested mid-beat, fired on beat 2.
+quantize beat
 at 1.25b launch-scene 2
 at 1.5b  assert active 1 == 1
 at 2.5b  assert active 1 == 2

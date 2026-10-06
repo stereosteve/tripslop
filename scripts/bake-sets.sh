@@ -22,7 +22,6 @@ for file in sets/*.tripset; do
 	script=target/script-out/bake-$stem.tripslop
 	cat >"$script" <<SCRIPT
 open $file
-quantize off
 launch-scene $scene
 at ${secs}s snapshot sets/thumbs/$stem.jpg 640
 at +0.1s quit
