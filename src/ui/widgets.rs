@@ -67,6 +67,16 @@ pub const CHOICE_W: f32 = 120.0;
 
 /// Choice params as small dropdown cells, then the rest as a wrapping grid of knobs.
 pub fn param_grid<'a>(ui: &mut egui::Ui, params: impl IntoIterator<Item = &'a mut Param>, clock: Clock) {
+    param_grid_with(ui, params, clock, |_, _| false);
+}
+
+/// [`param_grid`], letting `custom` draw any param its own way: it returns true when it did.
+pub fn param_grid_with<'a>(
+    ui: &mut egui::Ui,
+    params: impl IntoIterator<Item = &'a mut Param>,
+    clock: Clock,
+    mut custom: impl FnMut(&mut egui::Ui, &mut Param) -> bool,
+) {
     let (mut knobs, mut choices) = (Vec::new(), Vec::new());
     for p in params {
         if p.spec.choices.is_empty() { knobs.push(p) } else { choices.push(p) }
@@ -75,7 +85,9 @@ pub fn param_grid<'a>(ui: &mut egui::Ui, params: impl IntoIterator<Item = &'a mu
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(6.0, 4.0);
             for p in choices {
-                choice(ui, p, clock);
+                if !custom(ui, p) {
+                    choice(ui, p, clock);
+                }
             }
         });
     }
@@ -85,7 +97,9 @@ pub fn param_grid<'a>(ui: &mut egui::Ui, params: impl IntoIterator<Item = &'a mu
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = vec2(2.0, 6.0);
         for p in knobs {
-            knob(ui, p, clock);
+            if !custom(ui, p) {
+                knob(ui, p, clock);
+            }
         }
     });
 }
@@ -200,7 +214,9 @@ fn automation_menu(resp: &egui::Response, p: &mut Param, label: &str, clock: Clo
     let spec = p.spec;
     let key = crate::ui::midi::LearnKey::Param(p.seed);
     let popup_id = resp.id.with("automation");
-    resp.context_menu(|ui| {
+    // Not `resp.context_menu`: its default popup id is the one a ComboBox uses for its list, so
+    // on a choice cell the left click that opens the list would close it again straight away.
+    egui::Popup::context_menu(resp).id(resp.id.with("context menu")).show(|ui| {
         let label_text = if p.modulator.is_some() { "Edit automation…" } else { "Automate…" };
         if ui.button(label_text).clicked() {
             egui::Popup::open_id(ui.ctx(), popup_id);
@@ -235,6 +251,24 @@ fn automation_menu(resp: &egui::Response, p: &mut Param, label: &str, clock: Clo
 /// A choice param as a small labelled dropdown cell (for device cards). Right-click to
 /// automate or learn MIDI; it turns pink while automated.
 pub fn choice(ui: &mut egui::Ui, p: &mut Param, clock: Clock) -> egui::Response {
+    let choices = p.spec.choices;
+    let shown = if p.is_automated() { p.index() } else { p.value.round() as usize };
+    choice_cell(ui, p, clock, choices[shown.min(choices.len() - 1)], |ui, idx| {
+        for (i, c) in choices.iter().enumerate() {
+            ui.selectable_value(idx, i, *c);
+        }
+    })
+}
+
+/// A [`choice`] cell showing `selected`, with `list` filling the dropdown: it gets the
+/// param's index to change, and may also act on picks of its own.
+pub fn choice_cell(
+    ui: &mut egui::Ui,
+    p: &mut Param,
+    clock: Clock,
+    selected: &str,
+    list: impl FnOnce(&mut egui::Ui, &mut usize),
+) -> egui::Response {
     use crate::ui::theme;
     let spec = p.spec;
     let active = p.is_automated();
@@ -243,15 +277,11 @@ pub fn choice(ui: &mut egui::Ui, p: &mut Param, clock: Clock) -> egui::Response 
         let label = RichText::new(spec.label).size(11.5).color(if active { ACCENT } else { theme::MUTED });
         ui.add(egui::Label::new(label).truncate().selectable(false));
         let mut idx = p.value.round() as usize;
-        let shown = if active { p.index() } else { idx };
         let r = egui::ComboBox::from_id_salt(("choice", p.seed))
-            .selected_text(RichText::new(spec.choices[shown.min(spec.choices.len() - 1)]).size(12.5))
+            .selected_text(RichText::new(selected).size(12.5))
             .width(CHOICE_W - 4.0)
-            .show_ui(ui, |ui| {
-                for (i, c) in spec.choices.iter().enumerate() {
-                    ui.selectable_value(&mut idx, i, *c);
-                }
-            })
+            .height(420.0)
+            .show_ui(ui, |ui| list(ui, &mut idx))
             .response;
         if idx as f32 != p.value.round() {
             p.set(idx as f32);
@@ -568,4 +598,43 @@ fn mini_plot(ui: &mut egui::Ui, m: &Modulator, clock: Clock, size: egui::Vec2) {
     painter.add(egui::Shape::line(line, Stroke::new(1.5, color)));
     let t = ((pos - start) / cycles) as f32;
     painter.circle_filled(pos2(inner.left() + t * inner.width(), to_y(m.signal_at(pos))), 3.0, color);
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::param::Spec;
+
+    /// Clicks a lone choice cell with `button` and returns whether its dropdown list and its right-click menu are open afterwards.
+    fn click_choice(button: egui::PointerButton) -> (bool, bool) {
+        let ctx = egui::Context::default();
+        crate::ui::theme::apply(&ctx);
+        let mut p = Param::new(Spec::choice("background", &["Transparent", "Black"], 1));
+        let resp = std::cell::RefCell::new(None);
+        let mut frame = |events: Vec<egui::Event>| {
+            let input = egui::RawInput { events, ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| *resp.borrow_mut() = Some(choice(ui, &mut p, Clock::default())));
+            out.textures_delta.clear();
+        };
+        frame(vec![]);
+        let r = resp.borrow().clone().unwrap();
+        let pos = r.rect.center();
+        let press = |pressed| egui::Event::PointerButton { pos, button, pressed, modifiers: Default::default() };
+        frame(vec![egui::Event::PointerMoved(pos)]);
+        frame(vec![press(true)]);
+        frame(vec![press(false)]);
+        frame(vec![]);
+        (egui::Popup::is_id_open(&ctx, r.id.with("popup")), egui::Popup::is_id_open(&ctx, r.id.with("context menu")))
+    }
+
+    #[test]
+    fn choice_click_opens_list() {
+        assert_eq!(click_choice(egui::PointerButton::Primary), (true, false));
+    }
+
+    #[test]
+    fn choice_right_click_opens_menu() {
+        assert_eq!(click_choice(egui::PointerButton::Secondary), (false, true));
+    }
 }

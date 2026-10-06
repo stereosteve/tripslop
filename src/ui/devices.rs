@@ -167,7 +167,7 @@ fn effect_cards(ui: &mut egui::Ui, effects: &mut Vec<Effect>, owner: u64, lib: &
         let h = ui.available_height();
         let (mut knobs, mut choices) = count(&e.params);
         // The wet strip is a row of its own, about three extra rows tall.
-        let mut extra = WET_STRIP_ROWS + usize::from(e.kind == EffectKind::Feedback) + usize::from(e.def().history.is_some()) + usize::from(e.takes_model());
+        let mut extra = WET_STRIP_ROWS + usize::from(e.kind == EffectKind::Feedback) + usize::from(e.def().history.is_some());
         if let Some(c) = e.custom.as_deref() {
             let (k, ch) = count(&c.params);
             knobs += k;
@@ -187,7 +187,7 @@ fn effect_cards(ui: &mut egui::Ui, effects: &mut Vec<Effect>, owner: u64, lib: &
                 ui.painter().rect_stroke(r.rect.expand(4.0), 6.0, Stroke::new(2.0, theme::QUEUED), StrokeKind::Inside);
             }
             if let Some(d) = r.dnd_release_payload::<Drag>().filter(|d| d.kind == Kind::Model) {
-                if let Some(m) = loaded(ui, id, Some(lib.model(&d.key))) {
+                if let Some(m) = loaded(ui, Id::new(("fx model", e.id)), Some(lib.model(&d.key))) {
                     e.set_model(m);
                 }
             }
@@ -236,14 +236,6 @@ fn effect_cards(ui: &mut egui::Ui, effects: &mut Vec<Effect>, owner: u64, lib: &
 }
 
 fn effect_body(ui: &mut egui::Ui, e: &mut Effect, lib: &Library, clock: Clock) {
-    if e.takes_model() {
-        let id = Id::new(("fx model", e.id));
-        let current = e.model.as_ref().map_or("Utah Teapot", |m| m.name()).to_string();
-        let picked = model_menu(ui, id, &current, lib, "Pick the object for the shape \"Model\" (or drag one from the browser onto this card)");
-        if let Some(m) = loaded(ui, id, picked) {
-            e.set_model(m);
-        }
-    }
     if e.kind == EffectKind::Feedback {
         egui::ComboBox::from_id_salt(("fb preset", e.id))
             .selected_text("Preset…")
@@ -264,7 +256,11 @@ fn effect_body(ui: &mut egui::Ui, e: &mut Effect, lib: &Library, clock: Clock) {
             shader_editor::status(ui, c);
         });
     }
-    widgets::param_grid(ui, e.params.iter_mut(), clock);
+    if e.takes_model() {
+        solid_params(ui, e, lib, clock);
+    } else {
+        widgets::param_grid(ui, e.params.iter_mut(), clock);
+    }
     if let Some(c) = e.custom.as_deref_mut() {
         shader_editor::params(ui, c, clock);
     }
@@ -292,6 +288,49 @@ fn wet_strip(ui: &mut egui::Ui, e: &mut Effect, clock: Clock) {
     });
 }
 
+/// The shape / projection mappers' params. The simple solids and the library's models share
+/// one "shape" dropdown, and the knobs that only some shapes use are greyed out for the rest.
+fn solid_params(ui: &mut egui::Ui, e: &mut Effect, lib: &Library, clock: Clock) {
+    let id = Id::new(("fx model", e.id));
+    let shape = e.shape().unwrap_or_default();
+    let is_model = shape == "Model";
+    let has_sides = !matches!(shape, "Sphere" | "Model");
+    let model = e.model.as_ref().map_or("Utah Teapot", |m| m.name()).to_string();
+    let mut picked = None;
+    widgets::param_grid_with(ui, e.params.iter_mut(), clock, |ui, p| match p.spec.label {
+        "shape" => {
+            let choices = p.spec.choices;
+            let shown = if is_model { model.as_str() } else { shape };
+            widgets::choice_cell(ui, p, clock, shown, |ui, idx| {
+                for (i, c) in choices.iter().enumerate().filter(|(_, c)| **c != "Model") {
+                    ui.selectable_value(idx, i, *c);
+                }
+                ui.separator();
+                picked = model_list(ui, is_model.then_some(model.as_str()), lib);
+            })
+            .on_hover_text("A simple solid, or any model from the library (or drag one from the browser onto this card)");
+            true
+        }
+        "sides" => {
+            ui.add_enabled_ui(has_sides, |ui| widgets::knob(ui, p, clock))
+                .inner
+                .on_disabled_hover_text("Only prisms, pyramids and diamonds have sides");
+            true
+        }
+        "model mapping" => {
+            ui.add_enabled_ui(is_model, |ui| widgets::choice(ui, p, clock))
+                .inner
+                .on_disabled_hover_text("How a model's surface takes the image: pick a model as the shape to use it");
+            true
+        }
+        _ => false,
+    });
+    if let Some(m) = loaded(ui, id, picked.map(|k| lib.model(&k))) {
+        e.set_model(m);
+    }
+    load_error(ui, id);
+}
+
 /// A "Model ▾" row listing the library's models by category; returns the one picked (loaded).
 /// Shows the last load error under it.
 fn model_menu(ui: &mut egui::Ui, id: Id, current: &str, lib: &Library, hint: &str) -> Option<Result<ModelRef, String>> {
@@ -302,28 +341,38 @@ fn model_menu(ui: &mut egui::Ui, id: Id, current: &str, lib: &Library, hint: &st
             .selected_text(current)
             .width((ui.available_width() - 8.0).clamp(80.0, 220.0))
             .height(420.0)
-            .show_ui(ui, |ui| {
-                let mut last = "";
-                for e in lib.entries.iter().filter(|e| e.kind == Kind::Model && e.status == Status::Ok) {
-                    if e.category != last {
-                        ui.label(theme::caption(&e.category));
-                        last = &e.category;
-                    }
-                    if ui.selectable_label(e.name == current, &e.name).on_hover_text(&e.description).clicked() {
-                        picked = Some(e.key.clone());
-                    }
-                }
-            })
+            .show_ui(ui, |ui| picked = model_list(ui, Some(current), lib))
             .response
             .on_hover_text(hint);
     });
-    if let Some(err) = ui.data(|d| d.get_temp::<String>(id.with("error"))) {
-        ui.colored_label(theme::RECORD, err);
-    }
+    load_error(ui, id);
     picked.map(|k| lib.model(&k))
 }
 
-/// The picked model, if it loaded; otherwise remember why not, for `model_menu` to show.
+/// The library's models by category, as rows to pick from; returns the key of the one clicked.
+fn model_list(ui: &mut egui::Ui, current: Option<&str>, lib: &Library) -> Option<String> {
+    let mut picked = None;
+    let mut last = "";
+    for e in lib.entries.iter().filter(|e| e.kind == Kind::Model && e.status == Status::Ok) {
+        if e.category != last {
+            ui.label(theme::caption(&e.category));
+            last = &e.category;
+        }
+        if ui.selectable_label(Some(e.name.as_str()) == current, &e.name).on_hover_text(&e.description).clicked() {
+            picked = Some(e.key.clone());
+        }
+    }
+    picked
+}
+
+/// The last model load error under `id`, if any.
+fn load_error(ui: &mut egui::Ui, id: Id) {
+    if let Some(err) = ui.data(|d| d.get_temp::<String>(id.with("error"))) {
+        ui.colored_label(theme::RECORD, err);
+    }
+}
+
+/// The picked model, if it loaded; otherwise remember why not, for [`load_error`] to show.
 fn loaded(ui: &egui::Ui, id: Id, picked: Option<Result<ModelRef, String>>) -> Option<ModelRef> {
     match picked? {
         Ok(m) => {

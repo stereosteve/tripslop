@@ -394,10 +394,15 @@ impl Effect {
         matches!(self.kind, EffectKind::ShapeProjector | EffectKind::ProjectionMapping)
     }
 
+    /// The shape it's drawing now (automation included), for effects that take a model.
+    pub fn shape(&self) -> Option<&'static str> {
+        let shape = self.params.first().filter(|_| self.takes_model())?;
+        shape.spec.choices.get(shape.index()).copied()
+    }
+
     /// The model to draw, when the shape is set to *Model*.
     pub fn drawn_model(&self) -> Option<Arc<Model>> {
-        let shape = self.params.first()?;
-        let wants = self.takes_model() && shape.spec.choices.get(shape.index()) == Some(&"Model");
+        let wants = self.shape() == Some("Model");
         wants.then(|| self.model.as_ref().map_or_else(crate::model::fallback, |m| m.model.clone()))
     }
 

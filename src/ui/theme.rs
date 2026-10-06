@@ -169,6 +169,13 @@ pub fn apply(ctx: &egui::Context) {
         w.active = widget(CONTROL_HI, LIVE, TEXT_STRONG);
         w.open = widget(CONTROL_HI, LINE_HI, TEXT_STRONG);
         w.inactive.weak_bg_fill = RAISED_HI;
+        // Controls at rest and under the pointer are told apart by fill alone, with no outline.
+        // Besides the look, egui pads a selectable at rest (drawn frameless) as if it still had
+        // its at-rest outline, so with one it grew a pixel each side on hover and nudged its
+        // neighbours. Pressed keeps the LIVE outline.
+        for v in [&mut w.inactive, &mut w.hovered, &mut w.open] {
+            v.bg_stroke = Stroke::NONE;
+        }
         // Slider rails: the "trailing fill" uses selection.bg_fill; the rail uses inactive.bg_fill.
     });
 }
