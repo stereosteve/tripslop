@@ -1,5 +1,14 @@
 # 9. Dry/wet on every effect
 
+**Status: done.** `Effect` has `wet` and `wet_blend` parameters, visited after its own, so
+they're automatable, learnable and settable by path (`2/fx1/wet`). `Renderer::chain` only takes
+the extra pass when `is_mixed()`: it renders the effect into a shared `wet_scratch` texture, then
+mixes that with the dry input using the composite shader (mode 9 for Normal, the blend mode
+otherwise). Every card ends with the wet strip, and the card's name fades with the wet amount.
+Feedback presets leave wet alone. `scripts/dry-wet.tripslop` checks exact output values for an
+inverting Color effect at wet 0, 0.5 and 1 with Normal and Add, and an LFO on wet. It uses a
+new `output X Y` script query (luma of the program output at a point).
+
 Every effect is all or nothing today. To use a little kaleidoscope you have to find a knob in
 that particular effect that happens to soften it, and most don't have one. Arkestra puts a
 **Mix** slider and a **blend mode** on every device, and that's most of what makes stacking

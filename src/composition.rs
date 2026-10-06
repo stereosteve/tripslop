@@ -31,6 +31,8 @@ impl Blend {
         Blend::Overlay,
         Blend::Subtract,
     ];
+    /// Names in `ALL` order (for choice parameters).
+    pub const NAMES: &'static [&'static str] = &["Normal", "Add", "Screen", "Multiply", "Difference", "Lighten", "Darken", "Overlay", "Subtract"];
     pub fn name(self) -> &'static str {
         match self {
             Blend::Normal => "Normal",
@@ -596,6 +598,23 @@ mod tests {
         c.set_clip(0, 1, Clip::generator(1));
         c.set_clip(1, 1, Clip::generator(2));
         c
+    }
+
+    #[test]
+    fn every_effect_has_wet_and_wet_blend_paths() {
+        let mut c = comp();
+        c.layers[1].effects.push(crate::effects::Effect::new(crate::effects::EffectKind::Kaleidoscope));
+        c.effects.push(crate::effects::Effect::new(crate::effects::EffectKind::Blur));
+        let mut paths = Vec::new();
+        c.visit_paths(&mut |path, p| paths.push((path.to_string(), p.get())));
+        for want in ["2/fx1/wet", "2/fx1/wet blend", "master/fx1/wet", "master/fx1/wet blend"] {
+            assert!(paths.iter().any(|(p, _)| p == want), "missing {want}");
+        }
+        // Fully wet, Normal by default: effects behave exactly as before.
+        assert!(paths.iter().filter(|(p, _)| p.ends_with("/wet")).all(|(_, v)| *v == 1.0));
+        assert!(!c.effects[0].is_mixed());
+        c.effects[0].wet_blend.set(1.0);
+        assert!(c.effects[0].is_mixed());
     }
 
     #[test]

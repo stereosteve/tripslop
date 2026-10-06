@@ -180,6 +180,8 @@ pub struct Renderer {
     meshes: MeshRenderer,
     /// Where the Shape projector draws a model before laying it over its input.
     mesh_scratch: Option<Tex>,
+    /// An effect's output when it's mixed with its input (wet < 1 or a wet blend).
+    wet_scratch: Option<Tex>,
 }
 
 fn shader(device: &wgpu::Device, label: &str, parts: &[&str]) -> wgpu::ShaderModule {
@@ -517,6 +519,7 @@ impl Renderer {
             lib_calls: 0,
             meshes: MeshRenderer::new(&device, &queue),
             mesh_scratch: None,
+            wet_scratch: None,
             device,
             queue,
         }
@@ -730,15 +733,31 @@ impl Renderer {
     fn chain(&mut self, enc: &mut wgpu::CommandEncoder, effects: Vec<&mut Effect>, bufs: &[Tex; 2], mut cur: usize, clock: Clock, used: &mut HashSet<u64>) -> usize {
         for e in effects.into_iter().filter(|e| e.enabled) {
             used.insert(e.id);
-            if let Some(c) = e.custom.as_deref_mut() {
-                used.insert(c.id);
-                self.run_custom(enc, c, Some(&bufs[cur]), &bufs[1 - cur], clock);
-            } else {
-                self.effect(enc, e, &bufs[cur], &bufs[1 - cur], clock);
+            if !e.is_mixed() {
+                self.run_effect(enc, e, &bufs[cur], &bufs[1 - cur], clock, used);
+                cur = 1 - cur;
+                continue;
             }
-            cur = 1 - cur;
+            // Render the wet picture aside, then mix it with the dry input into the other buffer.
+            let size = self.size;
+            let wet = self.wet_scratch.take().unwrap_or_else(|| tex2d(&self.device, "wet", size.0, size.1, RENDER));
+            self.run_effect(enc, e, &bufs[cur], &wet, clock, used);
+            let blend = e.wet_blend.index();
+            // Normal is a straight dissolve; the others lay the wet picture over the dry one.
+            let mode = if blend == 0 { XFADE } else { blend as f32 };
+            cur = self.composite(enc, bufs, cur, &wet.view, mode, e.wet.get());
+            self.wet_scratch = Some(wet);
         }
         cur
+    }
+
+    fn run_effect(&mut self, enc: &mut wgpu::CommandEncoder, e: &mut Effect, src: &Tex, dst: &Tex, clock: Clock, used: &mut HashSet<u64>) {
+        if let Some(c) = e.custom.as_deref_mut() {
+            used.insert(c.id);
+            self.run_custom(enc, c, Some(src), dst, clock);
+        } else {
+            self.effect(enc, e, src, dst, clock);
+        }
     }
 
     /// Compile a user shader's WGSL into a pipeline, catching GPU validation errors.
@@ -1338,6 +1357,7 @@ impl Renderer {
             .update_egui_texture_from_wgpu_texture(&self.device, &self.output.view, wgpu::FilterMode::Linear, self.display_id);
         self.prev_output_gl = tex2d(&self.device, "previous output (GL)", size.0, size.1, RENDER);
         self.mesh_scratch = None;
+        self.wet_scratch = None;
         self.layers.clear();
         self.rings.clear();
         // Video and image sources are re-uploaded on the next frame; shader clips re-render.
@@ -1362,6 +1382,7 @@ impl Renderer {
             total += gpu.bufs.as_ref().map_or(0, |_| 2 * full) + gpu.input_gl.as_ref().map_or(0, |_| full);
         }
         total += self.mesh_scratch.as_ref().map_or(0, |_| full);
+        total += self.wet_scratch.as_ref().map_or(0, |_| full);
         total + self.meshes.memory() + self.thumbs.len() as u64 * px((THUMB_W, THUMB_H))
     }
 

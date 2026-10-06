@@ -357,6 +357,12 @@ impl App {
             Query::Width => self.renderer.size().0 as f64,
             Query::Audio(band) => self.audio.levels.get(*band) as f64,
             Query::Height => self.renderer.size().1 as f64,
+            Query::Output(x, y) => {
+                let img = self.renderer.snapshot()?;
+                let px = |v: f32, n: u32| ((v.clamp(0.0, 1.0) * n as f32) as u32).min(n - 1);
+                let [r, g, b, _] = img.get_pixel(px(*x, img.width()), px(*y, img.height())).0;
+                (0.2126 * r as f64 + 0.7152 * g as f64 + 0.0722 * b as f64) / 255.0
+            }
             Query::Bpm => self.comp.bpm as f64,
             Query::Beat => self.beat,
         })

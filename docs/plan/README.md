@@ -15,6 +15,8 @@ blocking.
 | 7 | [Frame-time overlay](07-perf-overlay.md) | small | Know when you're dropping frames |
 | 8 | ✅ [UI redesign](08-ui-redesign.md) | large | It looks like a debug panel; hard to see what's live |
 
+The order is a suggestion. 4 and 5 are the fun ones, and nothing stops you doing them first.
+
 ### Ideas from Arkestra
 
 [Arkestra](https://www.arkestra.app/) is the closest app to tripslop. [arkestra.md](arkestra.md)
@@ -22,7 +24,7 @@ covers what it has, what we already have, and what we're leaving out.
 
 | # | What | Size | Why |
 | --- | --- | --- | --- |
-| 9 | [Dry/wet on every effect](09-dry-wet.md) | small | Effects are all or nothing |
+| 9 | ✅ [Dry/wet on every effect](09-dry-wet.md) | small | Effects are all or nothing |
 | 10 | [Step sequencer and response shaping](10-sequencer.md) | small–medium | No rhythmic patterns of your own; audio mappings jitter |
 | 11 | [Macros and shared modulators](11-macros.md) | medium | One knob can't drive a whole look; LFOs can't be shared |
 | 12 | [Snapshots that morph](12-snapshots.md) | medium | A good look is lost as soon as you touch a knob |
@@ -37,7 +39,6 @@ covers what it has, what we already have, and what we're leaving out.
 
 9 to 12 are what changes how it plays; do those first. 19 is needed once 12 lands.
 
-The order is a suggestion. 4 and 5 are the fun ones, and nothing stops you doing them first.
 
 ## Ground rules
 

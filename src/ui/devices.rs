@@ -166,14 +166,15 @@ fn effect_cards(ui: &mut egui::Ui, effects: &mut Vec<Effect>, owner: u64, lib: &
     for (i, e) in effects.iter_mut().enumerate() {
         let h = ui.available_height();
         let (mut knobs, mut choices) = count(&e.params);
-        let mut extra = usize::from(e.kind == EffectKind::Feedback) + usize::from(e.def().history.is_some()) + usize::from(e.takes_model());
+        // The wet strip is a row of its own, about three extra rows tall.
+        let mut extra = WET_STRIP_ROWS + usize::from(e.kind == EffectKind::Feedback) + usize::from(e.def().history.is_some()) + usize::from(e.takes_model());
         if let Some(c) = e.custom.as_deref() {
             let (k, ch) = count(&c.params);
             knobs += k;
             choices += ch + 1;
             extra += 1;
         }
-        let width = knob_card_width(knobs, choices, extra, h);
+        let width = knob_card_width(knobs, choices, extra, h).max(WET_STRIP_W);
         let title = e.name().to_string();
         let enabled = e.enabled;
         let id = Id::new(("fx", owner, e.id));
@@ -205,7 +206,9 @@ fn effect_cards(ui: &mut egui::Ui, effects: &mut Vec<Effect>, owner: u64, lib: &
             if resp.on_hover_text(if enabled { "On: click to bypass" } else { "Bypassed: click to turn on" }).clicked() {
                 e.enabled = !enabled;
             }
-            let name = RichText::new(&title).font(theme::semibold(13.5)).color(if enabled { theme::TEXT_STRONG } else { theme::MUTED });
+            // The name fades with the wet amount, so a half-mixed effect reads as half there.
+            let color = if enabled { theme::TEXT_STRONG.gamma_multiply(0.5 + 0.5 * e.wet.get()) } else { theme::MUTED };
+            let name = RichText::new(&title).font(theme::semibold(13.5)).color(color);
             ui.add(egui::Label::new(name).truncate().selectable(false)).on_hover_text("Double-click the header to fold");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
@@ -265,12 +268,28 @@ fn effect_body(ui: &mut egui::Ui, e: &mut Effect, lib: &Library, clock: Clock) {
     if let Some(c) = e.custom.as_deref_mut() {
         shader_editor::params(ui, c, clock);
     }
+    wet_strip(ui, e, clock);
     if let Some(h) = e.def().history {
         ui.checkbox(&mut e.half_history, RichText::new("Half-size history").small()).on_hover_text(format!(
             "Keep the {} frames of history at half the output size: a quarter of the memory, a little softer. Changing it restarts the history.",
             h.frames
         ));
     }
+}
+
+const WET_STRIP_ROWS: usize = 3;
+const WET_STRIP_W: f32 = widgets::KNOB_W + widgets::CHOICE_W + 36.0;
+
+/// Wet amount and blend, in the same place on every card.
+fn wet_strip(ui: &mut egui::Ui, e: &mut Effect, clock: Clock) {
+    ui.separator();
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        widgets::knob(ui, &mut e.wet, clock)
+            .on_hover_text("How much of the effect replaces its input. Below 1 the effect still runs, so feedback keeps its trails.");
+        widgets::choice(ui, &mut e.wet_blend, clock)
+            .on_hover_text("How the effect's output lands on its input. Normal dissolves between them; the others lay it on top at the wet amount.");
+    });
 }
 
 /// A "Model ▾" row listing the library's models by category; returns the one picked (loaded).

@@ -85,7 +85,7 @@ In rough order of how much they make tripslop nicer to play:
 
 | # | Item | Size | Arkestra feature |
 | --- | --- | --- | --- |
-| 9 | [Dry/wet on every effect](09-dry-wet.md) | small | Device Mix + blend |
+| 9 | ✅ [Dry/wet on every effect](09-dry-wet.md) | small | Device Mix + blend |
 | 10 | [Step sequencer and response shaping](10-sequencer.md) | small–medium | Sequencers, conditional trigs, smoothing |
 | 11 | [Macros and shared modulators](11-macros.md) | medium | Chain macros, global LFOs |
 | 12 | [Snapshots that morph](12-snapshots.md) | medium | Chain snapshots, scene autoplay |

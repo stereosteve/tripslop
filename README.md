@@ -120,6 +120,14 @@ has frequency, speed and hue controls.
 | Color | Color (hue/sat/contrast/brightness/gamma/invert), Luma key, Pixelate / posterize |
 | Stylize | Blur, Edges, CRT, Strobe (beat-synced) |
 
+**Dry/wet.** Every effect card ends with a **wet** knob and a **wet blend** dropdown. Wet sets
+how much of the effect's output replaces its input. With *Normal* it dissolves between the two;
+the other blend modes (the layer ones: Add, Screen, Multiply…) lay the effect's output over its
+input at the wet amount, so Edges or Blur in *Add* makes a glow. Below 1 the effect still runs,
+and feedback and delays keep recording their full output, so a feedback loop at wet 0.3 builds the
+same trails, just fainter. Both are ordinary parameters (`2/fx1/wet`, `2/fx1/wet blend`) that you
+can automate and MIDI-learn.
+
 Effects can be reordered, bypassed and removed. Effects that need history (feedback and the
 delays) each allocate their own 32-frame delay buffer when you add them. That's about 112 MB
 at 720p and 253 MB at 1080p each. Tick *Half-size history* on such an effect to keep its
@@ -420,7 +428,8 @@ Layers and columns are **1-based**, like the UI.
 **`WHAT`** is either a parameter path or one of: `playhead L`, `active L` (1-based column, 0
 for none), `pad KEY` (envelope 0..1), `errors L C` (shader compile errors), `triangles L C`
 (a model clip's triangle count), `layers`, `bpm`,
-`beat`, `width`, `height` or `audio BAND` (`level`, `bass`, `mid`, `high` or `kick`).
+`beat`, `width`, `height`, `audio BAND` (`level`, `bass`, `mid`, `high` or `kick`), or
+`output X Y` (the luma, 0..1, of the program output at a point; 0..1 from the top left).
 
 **Parameter paths** have one of these forms:
 * `LAYER/PARAM`, `LAYER/EFFECT/PARAM`, `LAYER/clip/PARAM` (the playing clip) or

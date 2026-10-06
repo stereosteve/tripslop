@@ -90,6 +90,8 @@ pub enum Query {
     Height,
     /// The audio analysis: level, bass, mid, high or kick.
     Audio(crate::audio::Band),
+    /// Luma (0..1) of the program output at a point (0..1 from the top left).
+    Output(f32, f32),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -271,6 +273,7 @@ fn parse_query(w: &[String]) -> Result<Query, String> {
             Query::Audio(band)
         }
         "height" => Query::Height,
+        "output" => Query::Output(num(w.get(1), "x (0..1)")?, num(w.get(2), "y (0..1)")?),
         _ => Query::Param(w.join(" ")),
     })
 }
@@ -633,6 +636,7 @@ mod tests {
         assert!(parse("size big\n").is_err());
         assert!(parse("history 2/feedback\n").is_err());
         assert_eq!(parse("assert width == 1920\n").unwrap()[0].cmd, Cmd::Assert(Query::Width, Op::Eq, 1920.0));
+        assert_eq!(parse("assert output 0.25 0.5 > 0.1\n").unwrap()[0].cmd, Cmd::Assert(Query::Output(0.25, 0.5), Op::Gt, 0.1));
     }
 
     #[test]

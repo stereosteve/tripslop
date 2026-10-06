@@ -360,7 +360,14 @@ pub struct Effect {
     /// The Shape projector's / Projection mapping's object when its shape is *Model*
     /// (`None`: the teapot).
     pub model: Option<ModelRef>,
+    /// How much of the effect's output replaces its input (1 = all of it).
+    pub wet: Param,
+    /// How the wet picture lands on the dry one (a `Blend` index).
+    pub wet_blend: Param,
 }
+
+pub const WET: Spec = Spec::new("wet", 0.0, 1.0, 1.0);
+pub const WET_BLEND: Spec = Spec::choice("wet blend", crate::composition::Blend::NAMES, 0);
 
 impl Effect {
     pub fn new(kind: EffectKind) -> Self {
@@ -372,7 +379,14 @@ impl Effect {
             custom: None,
             half_history: false,
             model: None,
+            wet: Param::new(WET),
+            wet_blend: Param::new(WET_BLEND),
         }
+    }
+
+    /// Whether the output is mixed with the input rather than replacing it.
+    pub fn is_mixed(&self) -> bool {
+        self.wet.get() < 1.0 || self.wet_blend.index() != 0
     }
 
     /// Whether this effect accepts a model (whatever its shape is set to).
@@ -444,6 +458,8 @@ impl Params for Effect {
             }
             f("alpha", &mut c.alpha);
         }
+        f("wet", &mut self.wet);
+        f("wet blend", &mut self.wet_blend);
     }
 }
 
