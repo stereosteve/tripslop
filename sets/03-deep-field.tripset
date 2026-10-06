@@ -1,7 +1,7 @@
 {
   "tripslop": 1,
   "name": "Deep Field",
-  "description": "Slow and wide. Telescope pictures drifting like a camera move, with a soft glow, star fields and a slowly turning galaxy. For ambient sets and long fades.",
+  "description": "Slow and wide. Telescope pictures drifting like a camera move, with a soft glow, shafts of dust and a slowly turning galaxy. For ambient sets and long fades.",
   "bpm": 72,
   "quantize": "bar",
   "scenes": ["Pillars", "Crab", "Nebula", "Galaxy"],
@@ -42,14 +42,14 @@
       ]
     },
     {
-      "name": "Stars",
+      "name": "Dust",
       "blend": "add",
-      "params": { "opacity": 0.6 },
+      "params": { "opacity": 0.45 },
       "clips": [
-        { "library": "Particles & Fire/Particle Field", "params": { "particleSize": 0.006, "flySpeed": 0.04 } },
-        { "library": "Particles & Fire/Particle Field", "params": { "particleSize": 0.005, "flySpeed": 0.03 } },
+        { "library": "Dust Shafts" },
+        { "library": "Dust Shafts" },
         null,
-        { "library": "Particles & Fire/Particle Field", "params": { "particleSize": 0.004, "flySpeed": 0.02 } }
+        { "library": "Dust Shafts" }
       ]
     }
   ]

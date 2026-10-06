@@ -1017,6 +1017,43 @@ mod tests {
         }
     }
 
+    /// Demos have to run smoothly on an ordinary machine: no slow library shader, and not too
+    /// many in one scene (costs are measured by `--bake-library`).
+    #[test]
+    fn bundled_sets_use_cheap_shaders() {
+        const SCENE_MS: f32 = 10.0;
+        let lib = library();
+        let o = Opener { library: &lib, base: Base::Bundled, warnings: Vec::new() };
+        let (mut problems, mut heavy) = (Vec::new(), Vec::new());
+        for b in builtins() {
+            let mut cost = |name: &str, kind: Kind, what: String| {
+                let e = o.library_entry(name, kind).unwrap();
+                let ms = e.cost_ms.unwrap_or_else(|| panic!("{} has no cost: run --bake-library", e.name));
+                if ms > crate::isf_library::SLOW_MS {
+                    problems.push(format!("{}: {what} uses {} ({ms} ms a frame)", b.id, e.name));
+                }
+                ms
+            };
+            let master: f32 = b.set.effects.iter().filter_map(|e| e.library.as_deref()).map(|n| cost(n, Kind::Effect, "the master chain".into())).sum();
+            let columns = b.set.layers.iter().map(|l| l.clips.len()).max().unwrap_or(0);
+            for col in 0..columns {
+                let mut ms = master;
+                for l in &b.set.layers {
+                    let Some(Some(clip)) = l.clips.get(col) else { continue };
+                    if let Some(name) = clip.library.as_deref() {
+                        ms += cost(name, Kind::Generator, format!("{} › scene {}", l.name, col + 1));
+                    }
+                    ms += l.effects.iter().filter_map(|e| e.library.as_deref()).map(|n| cost(n, Kind::Effect, l.name.clone())).sum::<f32>();
+                }
+                if ms > SCENE_MS {
+                    heavy.push(format!("{}: scene {} has {ms:.1} ms of library shaders", b.id, col + 1));
+                }
+            }
+        }
+        problems.extend(heavy);
+        assert!(problems.is_empty(), "{problems:#?}");
+    }
+
     #[test]
     fn enum_names_are_snake_case() {
         assert_eq!(key(LoopMode::PlayOnceHold), "play_once_hold");

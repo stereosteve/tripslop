@@ -189,8 +189,9 @@ fn main() -> eframe::Result {
             egui_extras::install_image_loaders(&cc.egui_ctx);
             if bake {
                 // A build-time chore that needs the GPU: write assets/isf/baked.json and thumbs/, then quit.
-                let mut renderer = Renderer::new(rs);
-                match isf_library::bake(|e| renderer.bake_library_card(e)) {
+                let renderer = Renderer::new(rs);
+                let renderer = std::cell::RefCell::new(renderer);
+                match isf_library::bake(|e| renderer.borrow_mut().bake_library_card(e), |e| renderer.borrow_mut().time_library_shader(e)) {
                     Ok(summary) => exit_with(&summary, 0),
                     Err(e) => exit_with(&format!("bake failed: {e}"), 1),
                 }

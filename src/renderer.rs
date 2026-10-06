@@ -1249,6 +1249,41 @@ impl Renderer {
         img
     }
 
+    /// GPU time to draw a library shader once at 1280×720, in milliseconds: the median of a
+    /// few frames, each waited for. For `--bake-library`.
+    pub fn time_library_shader(&mut self, entry: &crate::isf_library::Entry) -> Result<f32, String> {
+        let mut shader = entry.shader()?;
+        let c = shader.poll_compile().ok_or_else(|| shader.errors.first().map(|e| e.message.clone()).unwrap_or_else(|| "doesn't compile".into()))?;
+        let pipe = self.build_custom(&c.wgsl, &c.entry)?;
+        let size = (MEDIA_WIDTH, MEDIA_HEIGHT);
+        let target = tex2d(&self.device, "shader timing", size.0, size.1, RENDER);
+        let input = tex2d(&self.device, "shader timing input", size.0, size.1, RENDER);
+        let mut times = Vec::new();
+        for frame in 0..7 {
+            self.next_uniform = 0;
+            let t = PREVIEW_TIME + frame as f64 / 60.0;
+            let data = shader_uniforms(&shader, size, size, frame, Clock::new(t * 2.0, t, 120.0));
+            let ub = self.uniform(&data);
+            let d = &self.dummy_tex.view;
+            let bg = self.bind_with(&self.repeat_sampler, &pipe.layout, ub, &[&input.view, d, &self.noise.view, d, d, d]);
+            let start = web_time::Instant::now();
+            let mut enc = self.device.create_command_encoder(&Default::default());
+            pass(&mut enc, &target.view, Some(wgpu::Color::TRANSPARENT), &pipe, &bg);
+            self.queue.submit([enc.finish()]);
+            let _ = self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+            times.push(start.elapsed().as_secs_f32() * 1000.0);
+        }
+        // The first frame pays for pipeline warm-up.
+        let mut times = times.split_off(1);
+        times.sort_by(f32::total_cmp);
+        Ok(times[times.len() / 2])
+    }
+
+    /// Wait for the GPU to finish everything submitted so far.
+    pub fn wait(&self) {
+        let _ = self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+    }
+
     /// A rendered library card picture.
     pub fn library_thumb(&self, key: &str) -> Option<egui::TextureId> {
         self.lib_thumbs.get(key).filter(|t| t.rendered).map(|t| t.id)

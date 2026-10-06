@@ -110,6 +110,14 @@ A modulator's fields, all optional: `shape` (`sine`, `triangle`, `saw_up`, `saw_
 A shader's parameters only exist once it has compiled, a moment after opening, so its values
 are held until then (choices by name don't work there: use the option's number).
 
+## Keep the demos cheap
+
+The bundled sets have to play smoothly for someone trying tripslop on a laptop. A unit test
+(`bundled_sets_use_cheap_shaders`) fails if a demo uses a library shader slower than
+`isf_library::SLOW_MS` (6 ms per 720p frame, timed by `--bake-library`) or puts more than
+10 ms of library shaders in one scene. `scripts/sets-cost.tripslop` measures each whole scene,
+built-in effects included; on the machine they were made on, every scene is under 6 ms.
+
 ## What's not in it
 
 MIDI mappings (they belong to the controller, and live in the config folder), the output size,

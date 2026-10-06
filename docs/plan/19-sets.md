@@ -39,6 +39,11 @@ The format is described in [../sets.md](../sets.md).
 * **Scripts:** `open NAME|FILE`, `save FILE`, `snapshot PATH WIDTH` (`.jpg` writes a JPEG),
   `tab welcome`.
 
+* **Cost.** The first Lava Lamp spent 686 ms a frame in one shader (*Lava*). `--bake-library`
+  now times every bundled shader (`ms` in `baked.json`), the browser marks slow ones, a unit
+  test keeps them out of the demos, and the `frame-ms` script query measures a whole scene
+  (`scripts/sets-cost.tripslop`).
+
 Unit tests cover a round trip (open, save, open again: the same values and modulators, and
 saving twice gives the same file), unknown things being reported rather than fatal, relative
 paths, and every bundled set opening without a warning. `scripts/smoke.tripslop` runs on the

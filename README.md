@@ -40,7 +40,14 @@ saves as, **Cmd/Ctrl+O** opens; `tripslop my.tripset` opens one from the command
 in, with their stills and logos. Their videos come from `samples/` (run `samples/fetch.sh` to
 re-download them), found from the current folder or the repo the app was built in; without
 them a clip falls back to a still or a generator. After changing a demo, run
-`scripts/bake-sets.sh` to redraw its welcome-screen picture.
+`scripts/bake-sets.sh` to redraw its welcome-screen picture, and keep it cheap: a unit test
+fails a demo that uses a library shader marked slow, and `scripts/sets-cost.tripslop` prints
+what every scene costs the GPU per frame.
+
+**Slow shaders.** `--bake-library` times every bundled shader at 1280×720 and the browser
+marks the expensive ones: **SLOW** over 6 ms a frame, **VERY SLOW** over 16.7 ms (too much for
+60 fps on its own). Hover a card for its cost. The times are from the machine that baked them,
+so compare shaders with them rather than reading them as promises.
 
 Any file arguments are loaded into the first layer's cells: `cargo run --release -- a.mp4 b.png`.
 
@@ -464,7 +471,8 @@ Layers and columns are **1-based**, like the UI.
 **`WHAT`** is either a parameter path or one of: `playhead L`, `active L` (1-based column, 0
 for none), `pad KEY` (envelope 0..1), `errors L C` (shader compile errors), `triangles L C`
 (a model clip's triangle count), `layers`, `bpm`,
-`beat`, `width`, `height`, `audio BAND` (`level`, `bass`, `mid`, `high` or `kick`), or
+`beat`, `width`, `height`, `fps` (with `--realtime`), `frame-ms` (GPU time to render the
+composition once, in ms), `audio BAND` (`level`, `bass`, `mid`, `high` or `kick`), or
 `output X Y` (the luma, 0..1, of the program output at a point; 0..1 from the top left).
 
 **Parameter paths** have one of these forms:

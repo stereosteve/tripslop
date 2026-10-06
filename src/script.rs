@@ -88,6 +88,11 @@ pub enum Query {
     /// Program size.
     Width,
     Height,
+    /// Output frames per second (meaningful with `--realtime`).
+    Fps,
+    /// GPU time to render the current composition once, in milliseconds (the median of a few
+    /// frames, each waited for): what a scene costs, whatever the window is doing.
+    FrameMs,
     /// The audio analysis: level, bass, mid, high or kick.
     Audio(crate::audio::Band),
     /// Luma (0..1) of the program output at a point (0..1 from the top left).
@@ -277,6 +282,8 @@ fn parse_query(w: &[String]) -> Result<Query, String> {
             Query::Audio(band)
         }
         "height" => Query::Height,
+        "fps" => Query::Fps,
+        "frame-ms" => Query::FrameMs,
         "output" => Query::Output(num(w.get(1), "x (0..1)")?, num(w.get(2), "y (0..1)")?),
         _ => Query::Param(w.join(" ")),
     })

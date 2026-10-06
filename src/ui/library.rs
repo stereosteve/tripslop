@@ -275,6 +275,15 @@ impl LibraryView {
                 painter.text(pic.center(), egui::Align2::CENTER_CENTER, msg, egui::FontId::proportional(11.0), Color32::from_gray(110));
             }
         }
+        // Shaders that eat the frame budget on their own (see `isf_library::SLOW_MS`).
+        if let Some(ms) = e.cost_ms.filter(|ms| *ms > crate::isf_library::SLOW_MS) {
+            let (label, color) = if ms > 16.7 { ("VERY SLOW", theme::RECORD) } else { ("SLOW", theme::QUEUED) };
+            let font = theme::semibold(10.0);
+            let w = painter.layout_no_wrap(label.into(), font.clone(), theme::ON_LIT).size().x + 8.0;
+            let badge = Rect::from_min_size(pic.right_top() + egui::vec2(-w - 4.0, 4.0), egui::vec2(w, 15.0));
+            painter.rect_filled(badge, 3.0, color);
+            painter.text(badge.center(), egui::Align2::CENTER_CENTER, label, font, theme::ON_LIT);
+        }
         if resp.hovered() && ok {
             painter.rect_stroke(pic, radius, Stroke::new(1.5, theme::LIVE), StrokeKind::Inside);
             *hovered = Some(e.key.clone());
@@ -306,6 +315,11 @@ impl LibraryView {
             }
             if let Status::Unsupported(why) = &e.status {
                 ui.colored_label(Color32::from_rgb(255, 120, 100), why);
+            }
+            if let Some(ms) = e.cost_ms {
+                let text = format!("≈ {ms:.1} ms of GPU time per 720p frame (a 60 fps frame has 16.7)");
+                let color = if ms > crate::isf_library::SLOW_MS { theme::QUEUED } else { theme::MUTED };
+                ui.label(RichText::new(text).small().color(color));
             }
         });
         if !ok {

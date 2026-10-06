@@ -11,7 +11,7 @@
       "params": { "transition": 1 },
       "clips": [
         { "library": "Retro Sun" },
-        { "library": "Infinite Grid" },
+        { "library": "3D Rooms/Neon Grid" },
         { "library": "Wireframe Corridor" },
         { "library": "Fog Cathedral" }
       ]

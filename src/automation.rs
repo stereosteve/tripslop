@@ -375,6 +375,20 @@ impl App {
             Query::Width => self.renderer.size().0 as f64,
             Query::Audio(band) => self.audio.levels.get(*band) as f64,
             Query::Height => self.renderer.size().1 as f64,
+            Query::Fps => self.fps as f64,
+            Query::FrameMs => {
+                let clock = self.clock();
+                let mut times: Vec<f64> = (0..7)
+                    .map(|_| {
+                        let start = web_time::Instant::now();
+                        self.renderer.render(&mut self.comp, &mut self.punch, clock);
+                        self.renderer.wait();
+                        start.elapsed().as_secs_f64() * 1000.0
+                    })
+                    .collect();
+                times.sort_by(f64::total_cmp);
+                times[times.len() / 2]
+            }
             Query::Output(x, y) => {
                 let img = self.renderer.snapshot()?;
                 let px = |v: f32, n: u32| ((v.clamp(0.0, 1.0) * n as f32) as u32).min(n - 1);
