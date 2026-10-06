@@ -341,11 +341,11 @@ impl GridView {
                 actions.push(GridAction::Launch(Launch::Clip { layer: li, col }));
             }
         }
-        if resp.double_clicked() && !has_clip {
+        if resp.double_clicked() && !has_clip && crate::dialog::AVAILABLE {
             actions.push(GridAction::LoadFile { layer: li, col });
         }
         resp.context_menu(|ui| {
-            if ui.button("Load file…").clicked() {
+            if crate::dialog::AVAILABLE && ui.button("Load file…").clicked() {
                 actions.push(GridAction::LoadFile { layer: li, col });
                 ui.close();
             }
@@ -366,15 +366,18 @@ impl GridView {
                 }
                 ui.label(RichText::new("Or drop a .glsl / .frag file").small().weak());
             });
-            ui.menu_button("Camera / capture", |ui| {
-                for index in 0..6 {
-                    if ui.button(format!("Device {index}")).clicked() {
-                        actions.push(GridAction::Camera { layer: li, col, index });
-                        ui.close();
+            // Cameras come through ffmpeg, which the browser build doesn't have.
+            if !crate::WEB {
+                ui.menu_button("Camera / capture", |ui| {
+                    for index in 0..6 {
+                        if ui.button(format!("Device {index}")).clicked() {
+                            actions.push(GridAction::Camera { layer: li, col, index });
+                            ui.close();
+                        }
                     }
-                }
-                ui.label(RichText::new("List devices: ffmpeg -f avfoundation -list_devices true -i \"\"").small().weak());
-            });
+                    ui.label(RichText::new("List devices: ffmpeg -f avfoundation -list_devices true -i \"\"").small().weak());
+                });
+            }
             if has_clip {
                 ui.separator();
                 if ui.button("Remove clip").clicked() {

@@ -1,10 +1,15 @@
 //! tripslop — a live video mixer: layered clip grid with scenes, per-layer effects and an
 //! emulated analog video-feedback rig.
 
+// The browser build leaves out the command line, scripts and the ffmpeg / hardware paths, so
+// much of what they use goes unused there.
+#![cfg_attr(target_arch = "wasm32", allow(dead_code, unused_imports))]
+
 mod audio;
 mod automation;
 mod clip;
 mod composition;
+mod dialog;
 mod effects;
 mod isf_library;
 mod meshes;
@@ -22,7 +27,7 @@ mod ui;
 mod video;
 
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use web_time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, Key, Rect, RichText, pos2};
 
@@ -36,11 +41,17 @@ use ui::grid::{GridAction, GridView};
 
 const TICK: f64 = 1.0 / 60.0;
 
+/// The browser build: no ffmpeg (video files, cameras, recording), audio input, MIDI or file
+/// system. Built-in media (generators, the shader library, models) all work.
+pub const WEB: bool = cfg!(target_arch = "wasm32");
+
+#[cfg(not(target_arch = "wasm32"))]
 const USAGE: &str =
     "usage: tripslop [--demo] [--record] [--script FILE] [--isf DIR]... [--size WxH|720p|1080p] [--fixed-step | --realtime] [MEDIA...]
        tripslop --bake-library   (re-check the bundled shaders and render their library pictures)";
 
 /// Window / dock icon: the color flower, rasterized centered on a square transparent canvas.
+#[cfg(not(target_arch = "wasm32"))]
 fn app_icon() -> egui::IconData {
     const SIZE: u32 = 512;
     let svg = include_bytes!("../logos/tripslop-flower-color.svg");
@@ -59,6 +70,59 @@ fn app_icon() -> egui::IconData {
     egui::IconData { rgba: rgba.collect(), width: SIZE, height: SIZE }
 }
 
+/// The browser build: runs on the page's `<canvas id="tripslop">` (see `web/index.html`),
+/// with the demo set loaded.
+#[cfg(target_arch = "wasm32")]
+fn main() {
+    use wasm_bindgen::JsCast;
+    let document = web_sys::window().and_then(|w| w.document()).expect("a document");
+    // Shown in the page's loading overlay if the app can't start (no WebGPU, typically).
+    let show_error = move |msg: String| {
+        if let Some(el) = document.get_element_by_id("loading") {
+            el.set_inner_html(&format!("<p>tripslop couldn't start: {msg}</p><p>It needs a browser with WebGPU (a recent Chrome, Edge, Safari or Firefox).</p>"));
+            let _ = el.set_attribute("class", "error");
+        }
+    };
+    let Some(canvas) = web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.get_element_by_id("tripslop"))
+        .and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok())
+    else {
+        return show_error("no canvas".into());
+    };
+    let mut options = eframe::WebOptions::default();
+    // The renderer's shaders and texture formats are written for WebGPU; WebGL2 lacks too much.
+    if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup {
+        setup.instance_descriptor.backends = eframe::wgpu::Backends::BROWSER_WEBGPU;
+    }
+    wasm_bindgen_futures::spawn_local(async move {
+        let started = eframe::WebRunner::new()
+            .start(
+                canvas,
+                options,
+                Box::new(|cc| {
+                    let rs = cc.wgpu_render_state.as_ref().ok_or("tripslop needs the wgpu renderer")?;
+                    ui::theme::apply(&cc.egui_ctx);
+                    egui_extras::install_image_loaders(&cc.egui_ctx);
+                    let mut app = App::new(Renderer::new(rs), Vec::new());
+                    app.midi.port = midi::Port::Off;
+                    app.load_demo();
+                    Ok(Box::new(app))
+                }),
+            )
+            .await;
+        match started {
+            Ok(()) => {
+                if let Some(el) = web_sys::window().and_then(|w| w.document()).and_then(|d| d.get_element_by_id("loading")) {
+                    el.remove();
+                }
+            }
+            Err(e) => show_error(e.as_string().unwrap_or_else(|| format!("{e:?}"))),
+        }
+    });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result {
     let mut files: Vec<PathBuf> = Vec::new();
     let mut record = false;
@@ -175,6 +239,7 @@ fn main() -> eframe::Result {
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn exit_with(msg: &str, code: i32) -> ! {
     if code == 0 {
         println!("{msg}");
@@ -252,6 +317,9 @@ struct App {
     midi: midi::Midi,
     /// Custom size typed into the Output settings, applied with its button.
     size_edit: (u32, u32),
+    /// Browser drops whose contents have been read: (layer, column, file name, contents).
+    #[cfg(target_arch = "wasm32")]
+    web_drops: std::sync::Arc<std::sync::Mutex<Vec<(usize, usize, String, Result<Vec<u8>, String>)>>>,
 }
 
 impl App {
@@ -297,6 +365,8 @@ impl App {
             // Replaced in `main` (scripts don't touch the saved mappings or the hardware).
             midi: midi::Midi::new(None),
             size_edit: renderer::DEFAULT_SIZE,
+            #[cfg(target_arch = "wasm32")]
+            web_drops: Default::default(),
         }
     }
 
@@ -316,6 +386,14 @@ impl App {
     }
 
     fn try_load(&mut self, layer: usize, col: usize, path: &std::path::Path) -> Result<(), String> {
+        // The browser has no files: the demo's stills are built into the web build.
+        #[cfg(target_arch = "wasm32")]
+        let c = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n @ "crab-nebula.jpg") => Clip::from_bytes(n, include_bytes!("../samples/crab-nebula.jpg"))?,
+            Some(n @ "pillars-of-creation.jpg") => Clip::from_bytes(n, include_bytes!("../samples/pillars-of-creation.jpg"))?,
+            _ => return Err(format!("{}: the browser build can't open files; drop them onto the grid", path.display())),
+        };
+        #[cfg(not(target_arch = "wasm32"))]
         let c = Clip::open(path, MEDIA_WIDTH, MEDIA_HEIGHT)?;
         self.status = format!("Loaded {} into {} / column {}", c.name, self.comp.layers[layer].name, col + 1);
         self.comp.set_clip(layer, col, c);
@@ -327,13 +405,21 @@ impl App {
     fn load_demo(&mut self) {
         let s = |f: &str| PathBuf::from("samples").join(f);
         // Layer 1: full-frame footage.
-        self.load_file(0, 0, s("jellyfish.mp4"));
-        self.load_file(0, 1, s("big-buck-bunny.mp4"));
-        self.comp.set_clip(0, 2, Clip::generator(2));
-        self.load_file(0, 3, s("jellyfish.mp4"));
-        if let Some(c) = self.comp.clip_mut(0, 3) {
-            c.loop_mode = LoopMode::Bounce;
-            c.speed.set(0.5);
+        if WEB {
+            // No video in the browser: the two stills (built in, see `load_file`) and generators.
+            self.load_file(0, 0, s("pillars-of-creation.jpg"));
+            self.load_file(0, 1, s("crab-nebula.jpg"));
+            self.comp.set_clip(0, 2, Clip::generator(2));
+            self.comp.set_clip(0, 3, Clip::generator(5));
+        } else {
+            self.load_file(0, 0, s("jellyfish.mp4"));
+            self.load_file(0, 1, s("big-buck-bunny.mp4"));
+            self.comp.set_clip(0, 2, Clip::generator(2));
+            self.load_file(0, 3, s("jellyfish.mp4"));
+            if let Some(c) = self.comp.clip_mut(0, 3) {
+                c.loop_mode = LoopMode::Bounce;
+                c.speed.set(0.5);
+            }
         }
         // Layer 2: small seeds feeding a fractal feedback rig.
         self.load_file(1, 0, s("crab-nebula.jpg"));
@@ -392,7 +478,7 @@ impl App {
                 GridAction::LoadFile { layer, col } => {
                     let mut exts = vec!["png", "jpg", "jpeg", "gif", "webp", "bmp", "mp4", "mov", "m4v", "mkv", "webm", "avi", "glsl", "frag", "fs", "isf", "wgsl"];
                     exts.extend(model::formats::EXTENSIONS);
-                    if let Some(path) = rfd::FileDialog::new()
+                    if let Some(path) = crate::dialog::FileDialog::new()
                         .add_filter("media", &exts)
                         .add_filter("3D models", model::formats::EXTENSIONS)
                         .pick_file()
@@ -498,7 +584,7 @@ impl App {
                     self.use_library(&d, layer, None);
                 }
                 LibraryAction::AddFiles => {
-                    if let Some(files) = rfd::FileDialog::new().add_filter("3D models", model::formats::EXTENSIONS).pick_files() {
+                    if let Some(files) = crate::dialog::FileDialog::new().add_filter("3D models", model::formats::EXTENSIONS).pick_files() {
                         let n = files.len();
                         self.library.add_files(files);
                         self.library_view.kind = isf_library::Kind::Model;
@@ -506,7 +592,7 @@ impl App {
                     }
                 }
                 LibraryAction::AddFolder => {
-                    if let Some(dir) = rfd::FileDialog::new().pick_folder()
+                    if let Some(dir) = crate::dialog::FileDialog::new().pick_folder()
                         && !self.library.dirs.contains(&dir)
                     {
                         self.library.dirs.push(dir);
@@ -552,7 +638,19 @@ impl App {
                 (l, free)
             });
             for f in dropped {
+                #[cfg(not(target_arch = "wasm32"))]
                 self.load_file(layer, col, f.path().to_path_buf());
+                // The browser only hands over the contents, and only asynchronously: they're
+                // loaded when they arrive (`load_web_drops`).
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let queue = self.web_drops.clone();
+                    wasm_bindgen_futures::spawn_local(async move {
+                        let name = f.path().to_string_lossy().into_owned();
+                        let bytes = f.bytes_async().await;
+                        queue.lock().unwrap().push((layer, col, name, bytes));
+                    });
+                }
                 col += 1;
             }
         }
@@ -610,10 +708,11 @@ impl App {
         if cmd(Key::K) {
             self.renderer.clear_history();
         }
-        if cmd(Key::R) {
+        // Recording needs ffmpeg and snapshots a blocking GPU readback: desktop only.
+        if !WEB && cmd(Key::R) {
             self.toggle_recording();
         }
-        if cmd(Key::S) {
+        if !WEB && cmd(Key::S) {
             self.save_snapshot(None);
         }
         if (pressed(Key::Delete) || pressed(Key::Backspace))
@@ -629,6 +728,22 @@ impl App {
         }
         if held(Key::ArrowRight) {
             xf.set(xf.value + dt);
+        }
+    }
+
+    /// Files dropped in the browser whose contents have arrived.
+    #[cfg(target_arch = "wasm32")]
+    fn load_web_drops(&mut self) {
+        let drops = std::mem::take(&mut *self.web_drops.lock().unwrap());
+        for (layer, col, name, bytes) in drops {
+            match bytes.and_then(|b| Clip::from_bytes(&name, &b)) {
+                Ok(c) => {
+                    self.status = format!("Loaded {} into {} / column {}", c.name, self.comp.layers[layer].name, col + 1);
+                    self.comp.set_clip(layer, col, c);
+                    self.grid.selected_clip = Some((layer, col));
+                }
+                Err(e) => self.status = format!("Error: {e}"),
+            }
         }
     }
 
@@ -874,7 +989,7 @@ impl App {
                     }
                 }
                 ui.separator();
-                if ui.selectable_label(self.audio.is_file(), "WAV file…").on_hover_text("Analyse a WAV file in step with the clock (silent)").clicked() {
+                if crate::dialog::AVAILABLE && ui.selectable_label(self.audio.is_file(), "WAV file…").on_hover_text("Analyse a WAV file in step with the clock (silent)").clicked() {
                     file = true;
                 }
             })
@@ -893,7 +1008,7 @@ impl App {
             }
             None => {}
         }
-        if file && let Some(path) = rfd::FileDialog::new().add_filter("WAV", &["wav"]).pick_file() {
+        if file && let Some(path) = crate::dialog::FileDialog::new().add_filter("WAV", &["wav"]).pick_file() {
             self.status = match self.audio.open_file(&path, self.sim_time) {
                 Ok(()) => format!("Analysing {}", path.display()),
                 Err(e) => format!("Can't read audio: {e}"),
@@ -1116,7 +1231,7 @@ impl App {
                 divider(ui);
                 ui.toggle_value(&mut self.show_library, "Browser").on_hover_text("Show the shader browser (B)");
                 ui.toggle_value(&mut self.show_output, "🖵").on_hover_text("Output window: drag it to a projector, double-click for fullscreen");
-                if ui.button("📷").on_hover_text("Save a PNG snapshot (Cmd/Ctrl+S)").clicked() {
+                if !WEB && ui.button("📷").on_hover_text("Save a PNG snapshot (Cmd/Ctrl+S)").clicked() {
                     self.save_snapshot(None);
                 }
                 if ui.button("✱").on_hover_text("Clear all feedback / delay memory (Cmd/Ctrl+K)").clicked() {
@@ -1135,13 +1250,15 @@ impl App {
                     }
                     None => egui::Button::new(RichText::new("⏺ REC").color(theme::RECORD)),
                 };
-                if ui.add(rec).on_hover_text("Record the output to MP4 (Cmd/Ctrl+R)").clicked() {
+                if !WEB && ui.add(rec).on_hover_text("Record the output to MP4 (Cmd/Ctrl+R)").clicked() {
                     self.toggle_recording();
                 }
-                divider(ui);
-                // Right-to-left: these appear as audio, then MIDI.
-                self.midi_controls(ui);
-                self.audio_controls(ui);
+                // Right-to-left: these appear as audio, then MIDI. The browser build has neither.
+                if !WEB {
+                    divider(ui);
+                    self.midi_controls(ui);
+                    self.audio_controls(ui);
+                }
             });
         });
     }
@@ -1409,8 +1526,8 @@ fn automation_stamp(frame: u64, beat: f64) -> String {
 }
 
 fn unix_time() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
 }
@@ -1451,6 +1568,8 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         self.poll_finished_recordings();
         self.handle_input(&ctx);
+        #[cfg(target_arch = "wasm32")]
+        self.load_web_drops();
         let midi = self.midi.poll();
         self.apply_midi(midi);
         self.sync_midi_ui(&ctx);
@@ -1529,8 +1648,10 @@ impl eframe::App for App {
                     ui.add_space(4.0);
                     self.crossfader(ui);
                     ui.add_space(4.0);
-                    self.audio_panel(ui);
-                    ui.add_space(4.0);
+                    if !WEB {
+                        self.audio_panel(ui);
+                        ui.add_space(4.0);
+                    }
                     let beat = self.beat;
                     let rest = (ui.available_height() - 30.0).min(4.0 * 72.0 + 3.0 * 6.0);
                     ui::punch::pads(ui, &mut self.punch, beat, rest);

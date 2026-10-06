@@ -7,3 +7,4 @@
 /trippy-*.mp4
 !docs/images/*.png
 !assets/models/**/*.png
+/web/dist

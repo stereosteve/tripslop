@@ -39,7 +39,13 @@ pub fn is_video(path: &Path) -> bool {
 
 /// Decode a still image (premultiplied later, on the GPU).
 pub fn load_image(path: &Path) -> Result<Frame, String> {
-    let img = image::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    decode_image(&bytes).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Decode a still image from memory (also what files dropped into the browser build use).
+pub fn decode_image(bytes: &[u8]) -> Result<Frame, String> {
+    let img = image::load_from_memory(bytes).map_err(|e| e.to_string())?;
     // Keep textures within sane GPU limits.
     let img = if img.width() > 4096 || img.height() > 4096 {
         img.resize(4096, 4096, image::imageops::FilterType::Triangle)

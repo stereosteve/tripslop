@@ -243,6 +243,11 @@ impl Library {
         // Baked entries already know their status.
         let bundled: Vec<(String, Source, Kind)> =
             self.entries.iter().filter(|e| e.status == Status::Checking).map(|e| (e.key.clone(), e.source.clone(), e.kind)).collect();
+        // The browser has no threads (or folders): there this only checks bundled shaders
+        // edited since the last bake, which is normally none.
+        #[cfg(target_arch = "wasm32")]
+        scan_thread(dirs, files, bundled, tx);
+        #[cfg(not(target_arch = "wasm32"))]
         std::thread::spawn(move || scan_thread(dirs, files, bundled, tx));
         self.rx = Some(rx);
         self.scanning = true;
@@ -734,7 +739,7 @@ mod tests {
         }
         let mut reasons = std::collections::BTreeMap::<String, Vec<String>>::new();
         let mut ok = 0;
-        let start = std::time::Instant::now();
+        let start = web_time::Instant::now();
         for e in entries.iter().filter(|e| e.kind != Kind::Transition) {
             match check(&e.source, e.kind) {
                 Status::Ok => ok += 1,

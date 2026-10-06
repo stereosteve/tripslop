@@ -144,13 +144,24 @@ pub struct Midi {
     clock: ClockFollower,
     /// Where mappings are saved; `None` keeps them in memory (scripts, tests).
     config: Option<PathBuf>,
+    #[cfg(not(target_arch = "wasm32"))]
     connections: Vec<midir::MidiInputConnection<()>>,
+    /// The browser build has no MIDI input, so never any connections.
+    #[cfg(target_arch = "wasm32")]
+    connections: Vec<()>,
     tx: Sender<(u64, Msg)>,
     rx: Receiver<(u64, Msg)>,
     pub error: Option<String>,
 }
 
+/// Names of the MIDI input ports. None in the browser build.
+#[cfg(target_arch = "wasm32")]
+pub fn ports() -> Vec<String> {
+    Vec::new()
+}
+
 /// Names of the MIDI input ports.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn ports() -> Vec<String> {
     let Ok(input) = midir::MidiInput::new("tripslop") else { return Vec::new() };
     input.ports().iter().filter_map(|p| input.port_name(p).ok()).collect()
@@ -213,6 +224,12 @@ impl Midi {
         self.save();
     }
 
+    #[cfg(target_arch = "wasm32")]
+    fn open(&mut self, _name: &str) -> Result<(), String> {
+        Err("MIDI isn't available in the browser build".into())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     fn open(&mut self, name: &str) -> Result<(), String> {
         let mut input = midir::MidiInput::new("tripslop").map_err(|e| e.to_string())?;
         // Keep clock messages; drop sysex and active sensing.

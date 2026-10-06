@@ -3,7 +3,7 @@
 //! layer (effects), or double-click it.
 
 use std::collections::HashMap;
-use std::time::Instant;
+use web_time::Instant;
 
 use eframe::egui::{self, Color32, CornerRadius, Rect, RichText, Sense, Stroke, StrokeKind, TextStyle, TextWrapMode};
 
@@ -80,10 +80,11 @@ impl LibraryView {
                 if ui.small_button("⟳").on_hover_text("Rescan").clicked() {
                     actions.push(LibraryAction::Rescan);
                 }
-                if ui.small_button("Add folder…").on_hover_text("Also list the ISF shaders (.fs) and 3D models in a folder").clicked() {
+                if crate::dialog::AVAILABLE && ui.small_button("Add folder…").on_hover_text("Also list the ISF shaders (.fs) and 3D models in a folder").clicked() {
                     actions.push(LibraryAction::AddFolder);
                 }
                 if self.kind == Kind::Model
+                    && crate::dialog::AVAILABLE
                     && ui.small_button("Add models…").on_hover_text(format!("List model files ({})", crate::model::formats::EXTENSIONS.join(", "))).clicked()
                 {
                     actions.push(LibraryAction::AddFiles);

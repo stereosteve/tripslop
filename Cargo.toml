@@ -5,18 +5,28 @@ edition = "2024"
 
 [dependencies]
 bytemuck = { version = "1.25.2", features = ["derive"] }
-cpal = "0.18.2"
 eframe = "0.36.2"
 egui_extras = { version = "0.36.2", default-features = false, features = ["svg"] }
 glam = "0.34.0"
 gltf = { version = "1.4.1", default-features = false, features = ["import", "utils", "names"] }
 hound = "3.5.1"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
-midir = "0.11.0"
 naga = { version = "30.0.1", features = ["glsl-in", "wgsl-in", "wgsl-out"] }
-pollster = "1.0.1"
 realfft = "3.5.0"
 resvg = { version = "0.45.1", default-features = false }
-rfd = "0.17.2"
 serde_json = "1.0.151"
 tobj = "4.0.5"
+web-time = "1.1.0"
+
+# Hardware, files and ffmpeg: the desktop build only. The web build (see web/) leaves these out.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+cpal = "0.18.2"
+midir = "0.11.0"
+pollster = "1.0.1"
+rfd = "0.17.2"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["Document", "Element", "HtmlCanvasElement", "Window"] }

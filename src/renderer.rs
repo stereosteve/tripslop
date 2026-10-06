@@ -794,6 +794,14 @@ impl Renderer {
             multiview_mask: None,
             cache: None,
         });
+        // The browser can't block on the scope; naga has already validated the shader on the
+        // CPU (shader::compile), so dropping the scope there just skips the second check.
+        #[cfg(target_arch = "wasm32")]
+        {
+            drop(scope);
+            Ok(Pipe { pipeline, layout })
+        }
+        #[cfg(not(target_arch = "wasm32"))]
         match pollster::block_on(scope.pop()) {
             Some(e) => Err(e.to_string()),
             None => Ok(Pipe { pipeline, layout }),
@@ -1154,7 +1162,7 @@ impl Renderer {
         // Uniform slots are free again: everything rendered so far has been submitted.
         self.next_uniform = 0;
         self.meshes.begin(false);
-        let start = std::time::Instant::now();
+        let start = web_time::Instant::now();
         let mut enc = self.device.create_command_encoder(&Default::default());
         let mut work = false;
         let hovered_key = hovered.map(|(k, _)| k);
@@ -1435,8 +1443,8 @@ impl Renderer {
 
 /// Shadertoy iDate: (year, month 0-11, day 1-31, seconds since midnight), local time ≈ UTC.
 fn date_now() -> [f32; 4] {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let secs = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
         .unwrap_or(0.0);
     let days = (secs / 86400.0).floor() as i64;

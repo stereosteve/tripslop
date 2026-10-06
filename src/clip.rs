@@ -244,6 +244,31 @@ impl Clip {
         Ok(Self::new(stem, media))
     }
 
+    /// A clip from a file's contents rather than its path: what the browser build gets when a
+    /// file is dropped. Images, shaders and self-contained models; video needs ffmpeg.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    pub fn from_bytes(name: &str, bytes: &[u8]) -> Result<Self, String> {
+        let path = Path::new(name);
+        let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or(name.to_string());
+        let fail = |e: String| format!("{name}: {e}");
+        let media = if source::is_shader(path) {
+            let code = std::str::from_utf8(bytes).map_err(|e| fail(e.to_string()))?;
+            Media::Shader(Box::new(CustomShader::new(&stem, code, Role::Source)))
+        } else if crate::model::formats::is_model(path) {
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+            let model = crate::model::formats::from_bytes(&stem, &ext, bytes, &|_| None).map_err(fail)?;
+            Media::Model(Box::new(ModelClip::new(ModelRef { key: name.to_string(), model: std::sync::Arc::new(model) })))
+        } else if source::is_video(path) {
+            return Err(fail("video files need the desktop app (it decodes them with ffmpeg)".into()));
+        } else {
+            Media::Image {
+                frame: source::decode_image(bytes).map_err(fail)?,
+                uploaded: false,
+            }
+        };
+        Ok(Self::new(stem, media))
+    }
+
     pub fn camera(index: u32, width: u32, height: u32) -> Result<Self, String> {
         let stream = Stream::camera(index, width, height)?;
         Ok(Self::new(format!("Camera {index}"), Media::Camera { index, stream }))

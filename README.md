@@ -43,6 +43,27 @@ Sample credits: *Jellyfish* test clip via test-videos.co.uk (footage from jell.y
 from NASA/ESA Hubble via Wikimedia Commons. See the source pages for the exact terms.
 `beat.wav` (a 120 BPM drum loop for the audio test) is generated, not recorded.
 
+## In the browser
+
+tripslop also builds to WebAssembly, so people can try it before downloading. It runs the
+demo set on WebGPU (a recent Chrome, Edge, Safari or Firefox).
+
+```
+rustup target add wasm32-unknown-unknown
+cargo install wasm-bindgen-cli --version 0.2.129   # must match wasm-bindgen in Cargo.lock
+web/build.sh                                       # writes the static site to web/dist
+python3 -m http.server -d web/dist 8080
+```
+
+`web/dist` is plain static files, so any web host can serve it. The browser build leaves out
+what needs the operating system:
+* video files, cameras and recording (these use ffmpeg)
+* audio input, MIDI, snapshots and file dialogs
+
+Generators, the shader and model libraries, every effect, the shader editor, automation and
+Perform all work. Images, shaders and self-contained 3D models (not `.gltf` with external
+files) can be dropped onto the grid. The demo's video layer uses the stills and generators.
+
 ## Concepts
 
 **The window.** Like Ableton's Session view with Bitwig's device panel:

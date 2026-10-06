@@ -11,7 +11,7 @@
 //!   shader's previous frame (feedback), `iChannel2` = RGBA noise, `iChannel3` = the
 //!   composition output from the previous frame.
 
-use std::time::{Duration, Instant};
+use web_time::{Duration, Instant};
 
 use crate::clip::next_id;
 use crate::modulation::Clock;

@@ -9,10 +9,14 @@
 //! Each value has auto-gain (it's divided by its own slowly decaying peak) and attack/release
 //! smoothing, so it sits in 0..1 without constant tweaking, whatever the input level.
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::collections::VecDeque;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::Mutex;
 
+#[cfg(not(target_arch = "wasm32"))]
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use realfft::RealFftPlanner;
 use realfft::num_complex::Complex;
@@ -75,6 +79,7 @@ impl Levels {
 enum Source {
     Off,
     /// A live input; the callback appends mono samples to the shared buffer.
+    #[cfg(not(target_arch = "wasm32"))]
     Device { name: String, _stream: cpal::Stream, buf: Arc<Mutex<VecDeque<f32>>> },
     /// A WAV file, read at the simulation clock (deterministic, for scripts).
     File { name: String, samples: Vec<f32>, start: f64 },
@@ -107,7 +112,14 @@ impl Default for Audio {
     }
 }
 
+/// Names of the input devices. None in the browser build.
+#[cfg(target_arch = "wasm32")]
+pub fn input_devices() -> Vec<String> {
+    Vec::new()
+}
+
 /// Names of the input devices.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn input_devices() -> Vec<String> {
     let host = cpal::default_host();
     let Ok(devices) = host.input_devices() else { return Vec::new() };
@@ -119,7 +131,9 @@ impl Audio {
     pub fn source_name(&self) -> Option<&str> {
         match &self.source {
             Source::Off => None,
-            Source::Device { name, .. } | Source::File { name, .. } => Some(name),
+            #[cfg(not(target_arch = "wasm32"))]
+            Source::Device { name, .. } => Some(name),
+            Source::File { name, .. } => Some(name),
         }
     }
 
@@ -134,7 +148,13 @@ impl Audio {
         self.waveform.fill(0.0);
     }
 
+    #[cfg(target_arch = "wasm32")]
+    pub fn open_device(&mut self, _name: Option<&str>) -> Result<(), String> {
+        Err("audio input isn't available in the browser build".into())
+    }
+
     /// Listen to an input device (`None`: the default one).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn open_device(&mut self, name: Option<&str>) -> Result<(), String> {
         self.stop();
         let host = cpal::default_host();
@@ -195,6 +215,7 @@ impl Audio {
     pub fn tick(&mut self, now: f64, dt: f32) {
         match &self.source {
             Source::Off => return,
+            #[cfg(not(target_arch = "wasm32"))]
             Source::Device { buf, .. } => {
                 let mut b = buf.lock().unwrap();
                 // Keep only what the next window needs.
@@ -226,6 +247,7 @@ impl Audio {
 }
 
 /// Input callback: mix to mono and append to the shared buffer.
+#[cfg(not(target_arch = "wasm32"))]
 fn feeder<T: cpal::SizedSample>(buf: Arc<Mutex<VecDeque<f32>>>, channels: usize) -> impl FnMut(&[T], &cpal::InputCallbackInfo) + Send + 'static
 where
     f32: cpal::FromSample<T>,

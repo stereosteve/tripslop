@@ -78,8 +78,9 @@ fn editor(ui: &mut egui::Ui, s: &mut CustomShader, clock: Clock) -> bool {
                 }
             }
         });
-        if ui.button("Load…").clicked()
-            && let Some(path) = rfd::FileDialog::new().add_filter("Shader", &["glsl", "frag", "fs", "isf", "shader", "wgsl", "txt"]).pick_file()
+        if crate::dialog::AVAILABLE
+            && ui.button("Load…").clicked()
+            && let Some(path) = crate::dialog::FileDialog::new().add_filter("Shader", &["glsl", "frag", "fs", "isf", "shader", "wgsl", "txt"]).pick_file()
         {
             match std::fs::read_to_string(&path) {
                 Ok(code) => {
@@ -90,8 +91,9 @@ fn editor(ui: &mut egui::Ui, s: &mut CustomShader, clock: Clock) -> bool {
                 Err(e) => s.errors = vec![crate::shader::CompileError { line: None, message: e.to_string() }],
             }
         }
-        if ui.button("Save…").clicked()
-            && let Some(path) = rfd::FileDialog::new()
+        if crate::dialog::AVAILABLE
+            && ui.button("Save…").clicked()
+            && let Some(path) = crate::dialog::FileDialog::new()
                 .add_filter("Shader", &["glsl", "frag", "wgsl"])
                 .set_file_name(format!("{}.{}", s.name, if crate::shader::lang_of(&s.source) == crate::shader::Lang::Wgsl { "wgsl" } else { "glsl" }))
                 .save_file()
